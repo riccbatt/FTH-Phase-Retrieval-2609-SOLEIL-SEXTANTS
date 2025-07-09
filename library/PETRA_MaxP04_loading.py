@@ -1,5 +1,5 @@
 """
-Python library for MAXI chamber from MBI
+Python library for PETRA III, MaxP04
 
 2024
 @authors:   CK: Christopher Klose (christopher.klose@mbi-berlin.de)
@@ -18,14 +18,17 @@ import numpy as np
 
 # Commonly used hdf5 entries. MaxP04 nexus file structure specific
 mnemonics = dict()
+mnemonics["images"] = "ccd"
+mnemonics["magnet_mT"] = "/scan/instrument/collection/m_magnett_read"
+mnemonics["magnet_A"] = "/scan/data/m_magnetA"
+mnemonics["data"] = "/scan/data"
+mnemonics["collection"] = "/scan/instrument/collection"
+mnemonics["energy"] = "/scan/instrument/collection/mono"
+mnemonics["marana"] = "measurement/m_marana"
 mnemonics["measurement"] = "measurement"
-mnemonics["ccd"] = "measurement/ccd"
-mnemonics["pre_scan_snapshot"] = "measurement/pre_scan_snapshot"
-mnemonics["energy"] = "measurement/pre_scan_snapshot/energy"
-mnemonics["helicity"] = "measurement/pre_scan_snapshot/helicity"
-mnemonics["magOOP"] = "measurement/pre_scan_snapshot/magOOP"
-mnemonics["magIP"] = "measurement/pre_scan_snapshot/magIP"
-mnemonics["cmos"] = "measurement/cmos"
+mnemonics["helicity"] = "measurement/pre_scan_snapshot/und_shift"
+mnemonics["nx_marana"] = "/entry/instrument/detector/data"
+mnemonics["framerate"] = "/entry/instrument/detector/framerate"
 
 ##########################################################################
 

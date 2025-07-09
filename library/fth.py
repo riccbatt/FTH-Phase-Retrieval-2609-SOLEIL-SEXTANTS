@@ -90,7 +90,7 @@ def propagate(holo, propdist, detectordist, pixelsize, energy, int_mul=True):
     q = c0 ** 2 + c1 ** 2
     phase = dist_phase * (1 - q * (pixelsize / detectordist) ** 2) ** 0.5
     return np.exp(1j * phase.astype(np.single)) * holo
-    
+
 
 
 def shift_image(image, shift):
