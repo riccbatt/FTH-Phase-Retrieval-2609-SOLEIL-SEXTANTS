@@ -31,12 +31,10 @@ import scipy.special as spec
 
 
 
-###########################################################################################
-
+""
 #                         RECONSTRUCT WITH MATLAB FILE                                    #
 
-###########################################################################################
-
+""
 
 def allNew(image_folder, image_numbers, folder_matlab, matlab_number = None, size=[2052,2046], auto_factor = True, spe_prefix = None):
     '''
@@ -184,12 +182,10 @@ def propagate(holo, ROI, phase=0, prop_dist=0, scale=(0,100), experimental_setup
 
 
 
-###########################################################################################
-
+""
 #                      RECONSTRUCT WITH PREVIOUS PARAMETERS                               #
 
-###########################################################################################
-
+""
 def fromParameters(pos, neg, fname_param, new_bs=False, old_prop=True, topo=None, auto_factor=False, experimental_setup = {'ccd_dist': 18e-2, 'energy': 779.5, 'px_size' : 20e-6}):
     '''
     This function reconstructs a hologram using the latest parameters of the given hdf file.
@@ -296,11 +292,10 @@ def phase_shift(pos, neg, roi, phase=0):
     button.on_click(on_button_clicked)
     return (slider_phase, button)
 
-###########################################################################################
-
+""
 #                               FINE TUNING                                               #
 
-###########################################################################################
+""
 import scipy.constants as sc
 
 
@@ -458,8 +453,8 @@ def high_pass_filtering(holo, amp = .5, sig = 60):
     return(slider_amp, slider_sig)
 
 ##################################
-## FOCUSING + CENTERING FUNCTIONS
-###############################
+# # FOCUSING + CENTERING FUNCTIONS
+# ##############################
 
 def focus_fast(holo, roi, mask=1, phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100), experimental_setup={'ccd_dist':18e-2, 'energy':779.5, 'px_size':20e-6}, max_prop_dist=10):
     '''
@@ -1133,12 +1128,11 @@ def tv_minimize_GPU(reco, bs_diam, holo_shape, iterations = 40000, step_size = 1
     output=cp.asnumpy(cp.fft.fftshift(tvm.u_tv))
     return output
 
-###########################################################################################
 
+""
 #                               SAVE THE CONFIG                                           #
 
-###########################################################################################
-
+""
 
 def save_parameters(fname, recon, intercept, slope , center, bs_diam, prop_dist, phase, dx, dy, roi, image_numbers, comment = '', topo = None):
     '''

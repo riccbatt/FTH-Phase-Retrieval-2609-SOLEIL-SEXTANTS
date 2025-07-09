@@ -1,10 +1,3 @@
-"""
-Python library for processing of geometric masks
-
-2024
-@authors:   CK: Christopher Klose (christopher.klose@mbi-berlin.de)
-"""
-
 import numpy as np
 from matplotlib.path import Path
 
@@ -17,26 +10,9 @@ from dipy.segment.mask import median_otsu
 
 # skimage
 import skimage.morphology
-from skimage.draw import ellipse
 
 # Is there a GPU?
-try:
-    # Cupy
-    import cupy as cp
-    import cupyx as cpx
-
-    GPU = True
-
-    print("GPU available")
-
-    # Self-written library
-    import CCI_core_cupy as cci
-except:
-    GPU = False
-    import CCI_core as cci
-
-    print("GPU unavailable")
-
+import CCI_core as cci
 
 #Draw circle mask
 def circle_mask(shape,center,radius,sigma=None):

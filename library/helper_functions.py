@@ -6,7 +6,9 @@ Python library for some general functions for paths, data processing, ...
 """
 
 import sys, os
+import glob
 import fnmatch
+from tqdm.auto import tqdm
 
 import numpy as np
 
@@ -37,6 +39,29 @@ def list_files(directory):
     '''
     return sorted(os.listdir(directory))
 
+def list_files_pattern(directory: str, pattern: str = "*") -> list:
+    """
+    List all files in the given directory matching the specified pattern.
+
+    :param directory: The directory to search in.
+    :param pattern: The pattern to match files against (e.g., '*.txt' for text files).
+    :return: A list of matching file paths.
+    """
+    if not os.path.exists(directory):
+        print(f"Error: Directory '{directory}' does not exist.")
+        return []
+
+    if not os.path.isdir(directory):
+        print(f"Error: '{directory}' is not a valid directory.")
+        return []
+
+    search_pattern = os.path.join(directory, pattern)
+    files = glob.glob(search_pattern)
+
+    if not files:
+        print(f"No files found in '{directory}' matching pattern '{pattern}'")
+
+    return files
 
 def list_files_excluding_pattern(directory, pattern):
     '''
@@ -82,6 +107,43 @@ def photon_energy_wavelength(value, input_unit = 'eV'):
         return energy_Xray
 
 
+def detector_pixel_to_q(pixel, wavelength, detector_distance, pixelsize, center = 0):
+    '''
+    Converts detector pixel indices to reciprocal-space
+    
+    Parameter
+    =========
+    pixel : array
+        array of pixel coordinates 
+    wavelength : scalar
+        photon wavelength in m
+    detector_distance : scalar
+        distance between sample and detector
+    pixelsize : scalar
+        size of detector pixel in m
+    center : scalar
+        origin of pixel array
+        
+    Output
+    ======
+    q : array
+        pixels converted to reciprocal space units
+    ======
+    author: ck 2025
+    '''
+
+    # Centering
+    pixel = pixel - center
+
+    # Multiply with pixelsize to get real space coordinate
+    x = pixel*pixelsize
+
+    # Convert to reciprocal space
+    q = 4*np.pi/wavelength * np.sin(0.5*np.arctan(x/detector_distance))
+    
+    return q
+
+    
 #=========================
 #Image processing
 #=========================
@@ -225,22 +287,11 @@ def drop_inhomogenous_part(image_list):
     # Check if array is inhomogenous
     if np.all(length == max_stack_size) == False:
         print("Dropping inhomogenous part of array")
-        for i in range(len(image_list)):
-            image_list[i] = image_list[i][:max_stack_size]
+        for i in tqdm(range(len(image_list)),desc="Stack"):
+            if length[i] > max_stack_size:
+                image_list[i] = image_list[i][:max_stack_size]
 
     return image_list
-
-def pad_to_dense(M):
-    """Appends the minimal required amount of zeroes at the end of each
-    array in the jagged array `M`, such that `M` looses its jagedness."""
-
-    maxlen = max((r.shape[0]) for r in M)
-    arr_shape = (M[0].shape[-1], M[0].shape[-2])
-
-    Z = np.zeros((len(M), maxlen, arr_shape[0], arr_shape[1]))
-    for enu, row in enumerate(M):
-        Z[enu, : len(row)] += row
-    return Z
 
 
 def reshape_arrays(arrays, dimensions):
@@ -412,3 +463,10 @@ def complex_to_color(array, abs_range=[0, 100]):
     saturation = 1 * np.ones(array.shape)
 
     return hls_to_rgb(np.stack((hue, lightness, saturation), axis=2))
+
+
+def log_clip(image):
+
+    image = np.log10(image-np.nanmin(image)+1)
+
+    return image
