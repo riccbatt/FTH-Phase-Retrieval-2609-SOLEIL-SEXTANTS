@@ -1,8 +1,9 @@
 """
-Python Dictionary for CCI correlation analysis using cuda gpu with cupy/cupyx
+Python library for CCI using cuda gpu with cupy/cupyx
 
-2022-24
+2022-26
 @authors:   CK: Christopher Klose (christopher.klose@mbi-berlin.de)
+            MS: Michael Schneider (michaelschneider@mbi-berlin.de)
 """
 
 import sys, os
@@ -12,15 +13,15 @@ from importlib import reload
 import numpy as np
 import matplotlib.pyplot as plt
 import xarray as xr
-import pandas as pd
-import itertools
-import scipy
 import h5py
 
-#Fitting
-import scipy.optimize
+# Comments
+from numpy.typing import ArrayLike
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
-#Filters
+# scipy
+import scipy.constants as cst
+import scipy.optimize
 from scipy.ndimage.filters import gaussian_filter
 
 #Image registration
@@ -33,7 +34,7 @@ from tqdm.auto import tqdm
 
 #Clustering
 from scipy.spatial.distance import pdist, squareform
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster, inconsistent
 from sklearn.metrics import pairwise_distances
 
 #colormap
@@ -50,77 +51,10 @@ from cupyx.scipy.ndimage import shift as scipy_shift
 # Self-written libraries
 import mask_lib
 
-#======================
-#Physics
-#======================
-#photon energy - wavelength converter
-def photon_energy_wavelength(value, input_unit = 'eV'):
-    '''
-    Converts photon energy to wavelength and vice versa
-    
-    Parameter
-    =========
-    value : scalar
-        input value either in eV or nm
-    unit : string
-        Select input unit. Currently either nm or eV is supported
-        
-    Output
-    ======
-    lambda_Xray or energy_Xray: scalar
-        Converted unit  
-    ======
-    author: ck 2023
-    '''    
-
-    if input_unit == 'eV':
-        lambda_Xray = scipy.constants.h*scipy.constants.c/(value*scipy.constants.e)
-        return lambda_Xray
-    elif input_unit == 'nm':
-        energy_Xray = scipy.constants.h*scipy.constants.c/(value*10**(-9)*scipy.constants.e)
-        return energy_Xray
-
-
-def photon_to_fluence(photons, photon_energy, radius):
-    """
-    Converts number of incident photons to fluence in mJ/cm^2
-
-    Parameter
-    =========
-    photons : array
-        number of incident photons
-    photon_energy : scalar
-        photon energy in eV
-    radius: scalar
-        radius of circle in m
-
-    Output
-    ======
-    fluence: array
-        incident photon flux in mJ/cm^2
-    ======
-    author: ck 2025
-    """
-    # To numpy array
-    photons = np.array(photons)
-
-    # Conversion 1eV to J
-    eV_to_J = 1.602176634e-19
-
-    # Area of circle
-    area = np.pi * (radius**2)
-
-    # Calc fluence
-    fluence = photons * photon_energy * eV_to_J / area  # J/m^2
-
-    # Conversion to mJ/cm^2
-    fluence = fluence * 1e3 * 1e-4
-    return fluence
 
 # ======================
 # Arrays
 # ======================
-
 
 def shift_image(image,shift,interpolation = True,out_dtype = 'numpy'):
     '''
@@ -289,7 +223,7 @@ def image_registration(image_unproccessed,image_background, method= "phase_cross
 
         # Bring it together
         affreg = AffineRegistration(
-            metric=metric, level_iters=level_iters, sigmas=sigmas, factors=factors,verbosity=0,
+            metric=metric, level_iters=level_iters, sigmas=sigmas, factors=factors
         )
 
         # Calc your transformation
@@ -590,6 +524,9 @@ def calc_diff_stack(images, topos, chunk_sz=None, method="scalarproduct", crop =
 
     return images, factor, offset
 
+# ===========================
+# CCI - Imaging helper
+# ===========================
 
 def reconstruct(image):
     '''
@@ -614,10 +551,43 @@ def FFT(image):
     image = cp.asnumpy(image)
     return image
 
+def propagate(holo, prop_l, experimental_setup, integer_wl_multiple=True):
+    '''
+    Propagate the hologram
+    
+    Parameters
+    ----------
+    holo : array
+        input hologram
+    prop_l: scalar
+        distance of propagation in metre
+    experimental_setup: dict
+        experimental setup parameters in the following form: {'ccd_dist': [in metre], 'energy': [in eV], 'px_size': [in metre]}
+    integer_wl_multiple: bool, optional
+        Use a propagation, that is an integer multiple of the x-ray wave length, default is True.
+    
+    Returns
+    -------
+    prop_holo: array
+        propagated hologram
+    -------
+    author: MS 2016
+    '''
+    wl = cst.h * cst.c / (experimental_setup['energy'] * cst.e)
+    if integer_wl_multiple:
+        prop_l = np.round(prop_l / wl) * wl
 
-# ======================
-# CCI specific
-# ======================
+    l1, l2 = holo.shape
+    q0, p0 = [s / 2 for s in holo.shape] # centre of the hologram
+    q, p = np.mgrid[0:l1, 0:l2]  #grid over CCD pixel coordinates   
+    pq_grid = (q - q0) ** 2 + (p - p0) ** 2 #grid over CCD pixel coordinates, (0,0) is the centre position
+    dist_wl = 2 * prop_l * np.pi / wl
+    phase = (dist_wl * np.sqrt(1 - (experimental_setup['px_size']/ experimental_setup['ccd_dist']) ** 2 * pq_grid))
+    return np.exp(1j * phase) * holo
+
+# ===========================
+# CCI - Correlation functions
+# ===========================
 
 def parula_cmap():
 
@@ -752,7 +722,7 @@ def filter_reference(holo,mask,settings):
 
 def seg_statistics(holo, mask, NrStd = 1, verbose = False):
     '''
-    Creates mask that shows only value outside of a noise interval defined by the statistics of the array
+    Creates mask that shows only value outside of a noise intervall defined by the statistics of the array
     
     Parameters
     ----------
@@ -774,8 +744,8 @@ def seg_statistics(holo, mask, NrStd = 1, verbose = False):
     holo = cp.array(holo)  
     temp = holo[mask == 0]
 
-    MEAN = cp.mean(temp)
-    STD  = cp.std(temp)
+    MEAN = cp.nanmean(temp)
+    STD  = cp.nanstd(temp)
 
     Statistics_mask = cp.asnumpy((cp.abs(holo) >= MEAN + NrStd*STD))
 
@@ -831,62 +801,6 @@ def create_ring_mask(shape,center, radi):
     return mask_circ, masks_ring
 
 
-def correlate_holograms(diff1, diff2, sum1, sum2, Statistics1, Statistics2):
-    '''
-    Function to determine the cross-correlation of two holograms.
-    
-    Parameters
-    ----------
-    diff1 : cp array
-        difference hologram of the first data image
-    diff2 : cp array
-        difference hologram of the second data image
-    sum1: cp array
-        sum hologram of the first data image
-    sum2: cp array 
-        sum hologram of the first data image
-    
-    Returns
-    -------
-    c_val : scalar
-        correlation value of the two holograms
-    c_array: array
-        pixelwise correlation array of the two holograms
-    -------
-    author: CK 2020-2021 / KG 2021
-    '''    
-             
-    #Convert to cupy
-    diff1 = cp.array(diff1)
-    diff2 = cp.array(diff2)
-    sum1 = cp.array(sum1)
-    sum2 = cp.array(sum2)
-    Statistics1 = cp.array(Statistics1)     
-    Statistics2 = cp.array(Statistics2)  
-                             
-    # replace all zeros in sum1/sum2 with another value to avoid infinities
-    sum1[sum1 == 0] = 1e-8
-    sum2[sum2 == 0] = 1e-8    
-    
-    # Combine Statistics Mask
-    mask = cp.logical_or(Statistics1,Statistics2).astype(float)
-    
-    # Calc flattened holos called scattering images
-    S1 = diff1*mask/cp.sqrt(sum1)
-    S2 = diff2*mask/cp.sqrt(sum2)
-   
-    # normalization Factor called scattering factor
-    sf = cp.sqrt(cp.sum(S1 * S1)*cp.sum(S2 * S2))
-    
-    # calculate the pixelwise correlation
-    c_array = S1 * S2 / sf
-    
-    # average correlation
-    c_val = cp.sum(c_array)
-    
-    return (c_val, c_array)
-
-
 def correlation_map(diff_holo_norm, statistics_mask):
     '''
     Function to calculate cross-correlation map of array along first axis.
@@ -900,7 +814,7 @@ def correlation_map(diff_holo_norm, statistics_mask):
     
     Returns
     -------
-    corr_map : cupy array
+    corr_map : numpy array
         correlation map where every image is correlatetd to each other image in the input
     -------
     author: CK 2022
@@ -1008,6 +922,48 @@ def correlation_map_fast(in_array):
     return corr_map_nonorm, corr_map_pearson, corr_map_sutton
 
 
+# ===========================
+# CCI - clustering
+# ===========================
+
+
+def mutual_information_metric_from_correlation(metric_array: ArrayLike, log_base: int=2):
+    '''
+    Script Reconstruct the cluster's correlation map from the given
+    cluster's 'frames' and the (large) correlation map of all
+    frames.
+    
+    Parameters
+    ----------
+    metric_array: ArrayLike
+        (N, N) symmetric array of metric with values in [-1, 1]
+    log_base: float
+        base of logarithm 2 -> bits, np.e -> nats
+        
+    Returns
+    -------
+    mi_map: ArrayLike
+        Mutual information metric applied to metric_array
+    -------
+    author: CK 2026
+    '''
+
+    one_minus_rho_sq = 1.0 - metric_array * metric_array
+
+    if log_base == 2:
+        mi_map = -0.5 * np.log2(one_minus_rho_sq)
+    elif log_base == np.e:
+        mi_map = -0.5 * np.log(one_minus_rho_sq)
+    else:
+        mi_map = -0.5 * (np.log(one_minus_rho_sq) / np.log(log_base))
+
+    # for distance usage, set diagonal to zero
+    np.fill_diagonal(mi_map, 0.0)
+
+    return mi_map
+
+
+
 def reconstruct_correlation_map(frames,corr_array,verbose = True):
     '''
     Script Reconstruct the cluster's correlation map from the given
@@ -1019,7 +975,9 @@ def reconstruct_correlation_map(frames,corr_array,verbose = True):
     frames: array
         relevant frames
     corr_array: array
-        complete pair correlation map    
+        complete pair correlation map
+    verbose: bool
+        enables/disable feedback about number of frames    
         
     Returns
     -------
@@ -1038,88 +996,9 @@ def reconstruct_correlation_map(frames,corr_array,verbose = True):
     #Indexing of correlation array
     corr = corr_array[np.ix_(frames,frames)]
     
-    #print('Reconstruction finished!')
-    
     return corr
 
 
-
-
-
-def create_linkage(cluster_idx,corr_array,linkage_method = "average",metric='correlation',order = 1,plot = True):
-    '''
-    calculates distance metric, linkage and feedback plots
-    
-    Parameters
-    ----------
-    cluster_idx: int
-        Index of 'Cluster'-list row-entry that will be processed
-    corr_array: array
-        pair correlation map
-        
-    Returns
-    -------
-    tlinkage: array
-        clustering linkage array
-    dist_metric: array
-        distance metric
-    -------
-    author: CK 2021
-    '''
-    #get colomap
-    parula = parula_map()
-    
-    #Calc distance metric
-    dist_metric = corr_array.copy()
-    
-    #Calculate higher orders of distance metrics
-    if order > 0:
-        for n in range(1,order+1):
-            dist_metric = pairwise_distances(dist_metric, metric=metric,n_jobs = -1)
-    
-    #Calculate Linkage
-    tlinkage = linkage(dist_metric,method=linkage_method,metric=metric)
-    
-    nr_cluster = 2
-    temp_assignment = fcluster(tlinkage,nr_cluster,criterion='maxclust')
-    
-    #Output plots
-    if plot is True:
-        fig = plt.figure(figsize = (8,8))
-        fig.suptitle(f'Cluster Index: {cluster_idx}')    
-        
-        #Dist metric
-        ax1 = fig.add_subplot(2,2,1)
-        vmi, vma = np.percentile(dist_metric[dist_metric >= 1e-5],[1,99])
-        ax1.imshow(dist_metric, vmin = vmi, vmax = vma, cmap = parula, aspect="auto")
-        ax1.set_title('Distance metric')
-        ax1.set_xlabel('Frame index k')
-        ax1.set_ylabel('Frame index k')
-    
-        #Corr map
-        ax2 = fig.add_subplot(2,2,2,sharex=ax1,sharey=ax1)
-        vmi, vma = np.percentile(corr_array[corr_array <= 1-1e-5],[5,95])
-        ax2.imshow(corr_array, vmin = vmi, vmax = vma, cmap = parula, aspect="auto")
-        ax2.set_title('Correlation map')
-        ax2.set_xlabel('Frame index k')
-        ax2.set_ylabel('Frame index k')
-        ax2.invert_yaxis()
-
-        #Assignment plot
-        ax3 = fig.add_subplot(2,2,3,sharex=ax1)
-        ax3.plot(temp_assignment)
-        ax3.set_title('Frame assignment')
-        ax3.set_xlabel('Frame index k')
-        ax3.set_ylabel('State')
-        ax3.set_ylim((0.5,2.5))
-        ax3.set_yticks([1,2])
-
-        #Assignment plot
-        ax4 = fig.add_subplot(2,2,4)
-        dendrogram(tlinkage, p=100, truncate_mode = 'lastp')
-        plt.show()
-        
-    return tlinkage, dist_metric
 
 def create_linkage_fast(
     cluster_idx,
@@ -1136,8 +1015,17 @@ def create_linkage_fast(
     ----------
     cluster_idx: int
         Index of 'Cluster'-list row-entry that will be processed
-    corr_array: array
-        pair correlation map
+    corr_array: ArrayLike
+        initial distance metric
+    plot: bool
+        Enables linkage feedback plots
+    metric: str
+        distance metric applied to initial metric. Choose sklearn
+        pairwise_distances metrics
+    order: int
+        applys distance metric order-times to initial metric
+    linkage_method: str
+        scipy.cluster.hierarchy linkage methods
 
     Returns
     -------
@@ -1146,7 +1034,7 @@ def create_linkage_fast(
     dist_metric: array
         distance metric
     -------
-    author: CK 2021
+    author: CK 2026
     """
     #get colomap
     parula = parula_map()
@@ -1209,6 +1097,7 @@ def create_linkage_fast(
         plt.show()
 
     return tlinkage, dist_metric
+
 
 def cluster_hierarchical(tlinkage,parameter,clusteringOption='maxclust'):
     '''
@@ -1362,8 +1251,6 @@ def process_cluster(cluster, cluster_idx, corr_array, cluster_assignment, order 
             tmp_mask[np.ix_(tmp_assignment,tmp_assignment)] = corr_array[np.ix_(tmp_assignment,tmp_assignment)]
             tmp_corr_large = tmp_mask
 
-            #tmp_corr_large = np.zeros([cluster_assignment.shape[0],cluster_assignment.shape[0]])
-            #tmp_corr_large[np.ix_(tmp_assignment,tmp_assignment)] = corr_array[np.ix_(tmp_assignment,tmp_assignment)]
             
             if len(tmp_assignment) > 1:
                 #Calculate Linkage
@@ -1380,6 +1267,326 @@ def process_cluster(cluster, cluster_idx, corr_array, cluster_assignment, order 
         cluster[cluster_idx] = {}
                             
     return cluster
+
+
+
+def iterative_hierarchical_clustering(
+    cluster: List[Dict[str, Any]],
+    initial_metric,
+    inconsistency_threshold: float,
+    plot: bool = False,
+    metric: str = "cosine",
+    order: int = 1,
+    linkage_method: str = "average",
+    depths: int = 6,
+    max_frames_per_cluster: Optional[int] = None,
+    enforce_iterations: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Iteratively applies hierarchical clustering to clusters until reclustering
+    conditions are not met, processing newly created sub-clusters as they appear.
+
+    Parameters
+    ----------
+    cluster: list of dict
+        initial list of clusters
+    initial_metric: ArrayLike
+        initial distance metric
+    inconsistency_threshold: float
+        reclustering condition: linkage inconsistency > threshold
+    plot: bool
+        Enables linkage feedback plots
+    metric: str
+        distance metric applied to initial metric. Choose sklearn
+        pairwise_distances metrics
+    order: int
+        applys distance metric order-times to initial metric
+    linkage_method: str
+        scipy.cluster.hierarchy linkage methods
+    depths: int
+        dendrogram depths levels to consider for inconsistency calculation
+    max_frames_per_cluster: int
+        reclustering condition: nr of cluster frames > max_frames_per_cluster
+    enforce_iterations: int
+        enforces clustering iteration enforce_iterations-times
+
+
+    Returns
+    -------
+    cluster: list of dict
+        list of clusters after application of clustering algorithm
+    -------
+    author: CK 2026
+    """
+
+    cluster_idx = 0
+
+    while cluster_idx < len(cluster):
+        print("")
+        print(f"=========== Clustering of Cluster Index: {cluster_idx} ===========")
+
+        cl = cluster[cluster_idx]
+        frames = cl.get("Cluster_Frames")
+
+        if frames is None:
+            print("Cluster has no frames: Skipping!")
+            cluster_idx += 1
+            continue
+
+        # Reconstruct correlation map
+        tmp_corr = reconstruct_correlation_map(frames, initial_metric)
+
+        n_frames = tmp_corr.shape[0]
+
+        # Add cluster parameters
+        cl["Nr_Frames"] = n_frames
+        cl["Threshold"] = inconsistency_threshold
+
+        if n_frames <= 1:
+            print("Small cluster size: Skipping!")
+            cluster_idx += 1
+            continue
+
+        # Create linkage
+        print("Calculating Linkage...")
+        tlinkage, _ = create_linkage_fast(
+            cluster_idx,
+            tmp_corr,
+            linkage_method=linkage_method,
+            metric=metric,
+            order=order,
+            plot=plot,
+        )
+
+        # Inconsistency coefficient
+        incons = inconsistent(tlinkage, d=depths)[-1, -1]
+        cl["Inconsistency"] = incons
+
+        # Reclustering conditions (safe with None)
+        inconsistency_ok = incons >= inconsistency_threshold
+
+        enforce_ok = cluster_idx < enforce_iterations
+
+        size_ok = (
+            max_frames_per_cluster is not None and len(frames) > max_frames_per_cluster
+        )
+
+        should_recluster = inconsistency_ok or enforce_ok or size_ok
+
+        if should_recluster:
+            print(f"Reclustering condition satisfied (Inconsistency = {incons:.2f})!")
+
+            nr_cluster = 2
+            cluster_assignment = cluster_hierarchical(
+                tlinkage, nr_cluster, clusteringOption="maxclust"
+            )
+
+            cluster = process_cluster(
+                cluster,
+                cluster_idx,
+                tmp_corr,
+                cluster_assignment,
+                order=order,
+                linkage_method=linkage_method,
+                metric=metric,
+                save=True,
+                plot=False,
+            )
+
+        else:
+            print(
+                f"Cluster {cluster_idx} does not satisfy reclustering condition "
+                f"(Inconsistency: {incons:.2f})!"
+            )
+
+        cluster_idx += 1
+
+    # Remove empty / invalid clusters explicitly
+    cluster = [
+        c
+        for c in cluster
+        if isinstance(c, dict)
+        and "Cluster_Frames" in c
+        and len(c["Cluster_Frames"]) > 0
+    ]
+
+    # Feedback plot
+    temp = [
+    c["Inconsistency"]
+    for c in cluster
+    if c.get("Nr_Frames", 0) > 1 and "Inconsistency" in c
+]
+
+    fig, ax = plt.subplots()
+    ax.hist(temp)
+    ax.set_xlabel("Inconsistency")
+    ax.set_ylabel("Frequency")
+    ax.set_title("Histogram Cluster Inconsistency")
+    ax.axvline(inconsistency_threshold, 0, np.max(temp), color="r", linewidth=3)
+
+    print("")
+    print(
+        f"You determined %d cluster! (Highest inconsistency score %.2f)"
+        % (len(cluster), np.max(temp))
+    )
+
+    
+
+    print("Iterative clustering algorithm finished!")
+    
+    return cluster
+
+
+
+
+
+
+
+
+
+
+def reorder_cluster(cluster: list, ordering_criteria: str = "time") -> list:
+    """
+    Reorders list of clusters according to criteria
+
+
+    Parameter
+    =========
+    cluster : list of dict
+        meta information of each cluster
+    criteria : str
+        ordering method:
+            "frames": number of frames (descending)
+            "time": strict chronologically
+            "median_time": chronologically according to median time
+
+    Output
+    ======
+    cluster_ordered : list of dict
+        reordered list of clusters
+    ======
+    author: ck 2026
+    """
+
+    # array for sorting criteria: first dimension is cluster idx, second is critera
+    reorder = np.vstack((np.arange(len(cluster)), np.zeros(len(cluster)))).astype(int)
+
+    # Chose criteria
+    if ordering_criteria == "frames":
+        # Number of frames: cluster with higher number of frames first
+        for i in range(len(cluster)):
+            reorder[1, i] = len(cluster[i]["Cluster_Frames"])
+
+        # Invert to descending order
+        reorder[1, :] = reorder[1, :].max() - reorder[1, :]
+
+    elif ordering_criteria == "time":
+        # Chronologically: cluster according to their occurence in time
+        for i in range(len(cluster)):
+            reorder[1, i] = np.sort(cluster[i]["Cluster_Frames"])[0]
+
+    elif ordering_criteria == "median_time":
+        # Chronologically: cluster according to their median of occurence in time
+        for i in range(len(cluster)):
+            reorder[1, i] = np.median(cluster[i]["Cluster_Frames"])
+    else:
+        raise ValueError(f"ordering_criteria {ordering_criteria} not supported!")
+
+    # Perform reordering
+    reorder = reorder[:, reorder[1, :].argsort()]
+
+    ##Rearange list
+    cluster_ordered = []
+    for i in range(len(cluster)):
+        cluster_ordered.append(cluster[reorder[0, i]])
+
+    return cluster_ordered
+
+
+def create_assignment(cluster: list, assignment_length: int) -> ArrayLike:
+    """
+    Extract assignment from list of cluster based on "cluster_frames" entry
+
+    Parameter
+    =========
+    cluster : list of dict
+        meta information of each cluster
+    assignment_length : int
+        length of assignment array
+
+    Output
+    ======
+    assignment : 1d ArrayLike
+        clustering assignment
+    ======
+    author: ck 2026
+    """
+
+    # Create raw assignment
+    assignment = np.full((assignment_length, 1), np.nan)
+
+    # Assign cluster numbers
+    for i, item in enumerate(cluster):
+        assignment[item["Cluster_Frames"]] = i
+
+    return assignment
+
+
+def compute_cluster_distance_statistics(
+    clusters: list,
+    corr_map: ArrayLike,
+    dist_metric_type: str = "braycurtis",
+    apply_dist: int = 1,
+    reducer=np.mean,
+    reducer_kwargs=None,
+):
+    """
+    Compute a statistic over pairwise distances per cluster.
+
+    Parameters
+    ----------
+    clusters : list of dict
+        Each dict must contain "Cluster_Frames".
+    corr_map : array-like
+        Correlation map used for reconstruction.
+    dist_metric_type : str
+        Distance metric (e.g. "braycurtis") from sklearn.metrics
+    apply_dist : int
+        Number of times to apply pairwise distance recursively.
+    reducer : callable
+        Function applied to the distance values (e.g. np.mean, np.median).
+    reducer_kwargs : dict or None
+        Optional keyword arguments for the reducer.
+
+    Returns
+    -------
+    stats : np.ndarray
+        Statistic per cluster (NaN if computation is not possible).
+    """
+
+    if reducer_kwargs is None:
+        reducer_kwargs = {}
+
+    stats = np.full(len(clusters), np.nan)
+
+    for idx, cluster in enumerate(clusters):
+        frames = cluster.get("Cluster_Frames", [])
+
+        # Reconstruct correlation map from frame indices
+        dist = reconstruct_correlation_map(frames, corr_map, verbose=False)
+
+        # Apply distance metric (possibly multiple times)
+        for _ in range(apply_dist):
+            dist = pairwise_distances(dist, metric=dist_metric_type, n_jobs=-1)
+
+        # Extract off-diagonal distances
+        mask = ~np.eye(dist.shape[0], dtype=bool)
+        values = dist[mask]
+
+        if values.size > 0:
+            stats[idx] = reducer(values, **reducer_kwargs)
+
+    return stats
 
 ######################
 # OTHER
