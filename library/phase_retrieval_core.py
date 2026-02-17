@@ -170,8 +170,6 @@ def _default_phase_retrieval_recipe():
 
     return recipe  
 
-
-# Main functions
 def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayLike, supportmask: ArrayLike, phase_retrieval_recipe=None):
     """
     Iterative phase retrieval (full coherence + optional partial coherence refinement)
@@ -472,6 +470,234 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
         gamma_n,
     )
 
+
+def single_helicity_phase_retrieval_algorithm(pos: ArrayLike, mask_pixel: ArrayLike, supportmask: ArrayLike, phase_retrieval_recipe=None):
+    """
+    Iterative phase retrieval (full coherence + optional partial coherence refinement)
+    for single helicity (called pos) holograms.
+
+    Parameters
+    ----------
+    pos: array_like
+        2D hologram intensity images. Values may contain NaNs.
+    mask_pixel : array_like
+        2D mask (same shape as pos). Convention assumed:
+        - mask_pixel == 0 : valid pixels
+        - mask_pixel != 0 : masked pixels
+    supportmask : array_like
+        2D support mask (same shape as pos). Used to generate a default start image.
+    phase_retrieval_recipe : dict, optional
+        Overrides for algorithm and iteration settings. Supported keys include:
+        - algorithm_list_full_coherence : list[str] (length multiple of 3)
+        - number_iterations_full_coherence : list[int] (length multiple of 3)
+        - algorithm_list_partial_coherence : list[str] (length multiple of 3)
+        - number_iterations_partial_coherence : list[int] (length multiple of 3)
+        - use_partial_coherence_algorithm : bool
+        - hologram_intensity_cutoff_vmin : float
+        - Startimage : np.ndarray or None
+        - Startgamma : np.ndarray or None
+        - partial_coherence_nr_iterations_per_RL_cycle : int
+        - partial_coherence_frequency_of_RL_cycles : int
+
+    Returns
+    -------
+    retrieved_p: ArrayLike
+        Phase retrieved positive helicity hologram with full coherence assumption
+    retrieved_p_pc: ArrayLike
+        Phase retrieved positive helicity hologram with partial coherence assumption
+    bsmask_p: ArrayLike
+        mask of invalid values for positive helicity
+    gamma_p: ArrayLike
+        mutual coherence function positive helicity
+    -------
+    author: CK 2026
+    """
+
+    # ----------------------------
+    # Recipe: defaults + overrides
+    # ----------------------------
+    recipe = _default_phase_retrieval_recipe()
+    if phase_retrieval_recipe:
+        recipe.update(phase_retrieval_recipe)
+
+    _verify_valid_algorithm_list(
+        recipe["algorithm_list_full_coherence"],
+        recipe["number_iterations_full_coherence"],
+        name="Full-coherence",
+    )
+
+    _verify_valid_algorithm_list(
+        recipe["algorithm_list_partial_coherence"],
+        recipe["number_iterations_partial_coherence"],
+        name="Partial-coherence",
+    )
+
+    # ----------------------------
+    # Prepare inputs
+    # ----------------------------
+    pos_input = pos.copy()
+
+    # Baseline subtract (ignore zeros)
+    vmin = recipe["hologram_intensity_cutoff_vmin"]
+    if vmin > 0:
+        vals = pos_input[pos_input != 0]
+        if vals.size:
+            mi, _ = np.nanpercentile(vals, [vmin, 99.9])
+            pos_input = pos_input - mi
+
+    # fill nan, then clip to >= 0
+    pos_input = np.where(np.isnan(pos_input), 0, pos_input)
+    pos_input = np.clip(pos_input, 0, None)
+
+    # Beamstop masks: inherit mask_pixel plus intensity<=0
+    bsmask_p = mask_pixel.copy()
+    bsmask_p[pos_input <= 0] = 1
+
+    # Precompute amplitudes used repeatedly
+    pos_amp = np.sqrt(pos_input)
+
+    # ----------------------------
+    # Initialize Startimage/Startgamma
+    # ----------------------------
+    if recipe["Startimage"] is None:
+        Startimage = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+    else:
+        Startimage = recipe["Startimage"].copy()
+
+    if recipe["Startgamma"] is None:
+        Startgamma = np.ones(pos_input.shape, dtype=float) * 1e-6 * 2
+        Startgamma[pos_input.shape[0] // 2, pos_input.shape[1] // 2] = 0.7
+    else:
+        Startgamma = recipe["Startgamma"].copy()
+
+    # Roughly normalize Startimage to match data scale using unmasked pixels
+    valid_pix = (mask_pixel == 0) & (pos_input > 0)
+    if np.any(valid_pix):
+        x = np.sqrt(pos_input[valid_pix]).ravel()
+        y = np.abs(Startimage[valid_pix]).ravel()
+        if x.size >= 2:
+            res = stats.linregress(x, y)
+            Startimage = Startimage - res.intercept
+            if abs(res.slope) > 1e-12:
+                Startimage = Startimage / res.slope
+
+    # ----------------------------
+    # Execute Phase Retrieval
+    # ----------------------------
+    start_time = time.time()
+
+    retrieved_p = None
+    retrieved_p_pc = None
+    gamma_p = None
+
+    for step in range(0, len(recipe["number_iterations_full_coherence"]), 3):
+        print("############ -   CDI Full Coherence")
+
+        # Positive helicity - beta_mode="arctan"
+        retrieved_p, Error_diff_p, Error_supp = PhaseRtrv_GPU(
+            diffract=pos_amp,
+            mask=supportmask,
+            mode=recipe["algorithm_list_full_coherence"][step],
+            beta_zero=0.5,
+            Nit=recipe["number_iterations_full_coherence"][step],
+            beta_mode="arctan",
+            plot_every=349,
+            Phase=Startimage,
+            seed=False,
+            real_object=False,
+            bsmask=bsmask_p,
+            average_img=30,
+            Fourier_last=True,
+        )
+
+        # Positive helicity - beta_mode="const"
+        retrieved_p, Error_diff_p2, Error_supp = PhaseRtrv_GPU(
+            diffract=pos_amp,
+            mask=supportmask,
+            mode=recipe["algorithm_list_full_coherence"][step + 1],
+            beta_zero=0.5,
+            Nit=recipe["number_iterations_full_coherence"][step + 1],
+            beta_mode="const",
+            plot_every=24,
+            Phase=retrieved_p,
+            seed=False,
+            real_object=False,
+            bsmask=bsmask_p,
+            average_img=30,
+            Fourier_last=True,
+        )
+
+        print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
+        Startimage = retrieved_p.copy()
+
+        if recipe["use_partial_coherence_algorithm"]:
+            print("############   -   CDI Partial Coherence")
+
+            # Replace beamstop region with current reconstruction intensity
+            pos_pc_input = (np.abs(retrieved_p) ** 2) * bsmask_p + pos_input * (
+                1 - bsmask_p
+            )
+
+            # Partial coherence: positive (arctan)
+            retrieved_p_pc, Error_diff_p_pc, Error_supp, gamma_p = (
+                PhaseRtrv_with_RL(
+                    diffract=np.sqrt(pos_pc_input),
+                    mask=supportmask,
+                    mode=recipe["algorithm_list_partial_coherence"][step],
+                    beta_zero=0.5,
+                    Nit=recipe["number_iterations_partial_coherence"][step],
+                    beta_mode="arctan",
+                    gamma=Startgamma,
+                    RL_freq=recipe["partial_coherence_frequency_of_RL_cycles"],
+                    RL_it=recipe["partial_coherence_nr_iterations_per_RL_cycle"],
+                    plot_every=349,
+                    Phase=Startimage,
+                    seed=False,
+                    real_object=False,
+                    bsmask=np.zeros_like(bsmask_p),
+                    average_img=30,
+                    Fourier_last=True,
+                )
+            )
+
+            # Partial coherence: positive (const)
+            retrieved_p_pc, Error_diff_p_pc2, Error_supp, gamma_p = (
+                PhaseRtrv_with_RL(
+                    diffract=np.sqrt(pos_pc_input),
+                    mask=supportmask,
+                    mode=recipe["algorithm_list_partial_coherence"][step + 1],
+                    beta_zero=0.5,
+                    Nit=recipe["number_iterations_partial_coherence"][step + 1],
+                    beta_mode="const",
+                    gamma=gamma_p,
+                    RL_freq=recipe["partial_coherence_frequency_of_RL_cycles"],
+                    RL_it=recipe["partial_coherence_nr_iterations_per_RL_cycle"],
+                    plot_every=24,
+                    Phase=retrieved_p_pc,
+                    seed=False,
+                    real_object=False,
+                    bsmask=np.zeros_like(bsmask_p),
+                    average_img=30,
+                    Fourier_last=True,
+                )
+            )
+
+            print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
+
+            Startimage = retrieved_p_pc.copy()
+            Startgamma = gamma_p.copy()
+        else:
+            retrieved_p_pc = retrieved_p.copy()
+            gamma_p = Startgamma.copy()
+
+    print("Phase Retrieval Done!")
+
+    return (
+        retrieved_p,
+        retrieved_p_pc,
+        bsmask_p,
+        gamma_p,
+    )
 
 #############################################################
 #       PHASE RETRIEVAL FUNCTIONS HELPER
