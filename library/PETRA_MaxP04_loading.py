@@ -19,7 +19,7 @@ import numpy as np
 # Commonly used hdf5 entries. MaxP04 nexus file structure specific
 mnemonics = dict()
 mnemonics["images"] = "ccd"
-mnemonics["magnet_mT"] = "/scan/instrument/collection/m_magnett_read"
+mnemonics["magnet_mT"] = "/scan/data/m_caena"
 mnemonics["magnet_A"] = "/scan/data/m_magnetA"
 mnemonics["data"] = "/scan/data"
 mnemonics["collection"] = "/scan/instrument/collection"
@@ -29,6 +29,7 @@ mnemonics["measurement"] = "/scan/instrument/collection"
 mnemonics["helicity"] = "measurement/pre_scan_snapshot/und_shift"
 mnemonics["nx_marana"] = "/entry/instrument/detector/data"
 mnemonics["framerate"] = "/entry/instrument/detector/framerate"
+mnemonics["temperature"] = "/scan/data/cryoin4"
 
 ##########################################################################
 
