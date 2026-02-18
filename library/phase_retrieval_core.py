@@ -699,6 +699,210 @@ def single_helicity_phase_retrieval_algorithm(pos: ArrayLike, mask_pixel: ArrayL
         gamma_p,
     )
 
+
+def phase_retrieval_algorithm_on_second_helicity_only(new_helicity: ArrayLike, topo: ArrayLike, retrieved_topo: ArrayLike, retrieved_topo_pc: ArrayLike, gamma_topo: ArrayLike, mask_pixel: ArrayLike, supportmask: ArrayLike, phase_retrieval_recipe=None):
+    """
+    Iterative phase retrieval which will be applied to the second helicity only,
+    taking the already retrieved phases from a previous routine
+
+    Parameters
+    ----------
+    topo, new_helicity : array_like
+        2D hologram intensity images (same shape). Values may contain NaNs.
+    mask_pixel : array_like
+        2D mask (same shape as topo/new_helicity). Convention assumed:
+        - mask_pixel == 0 : valid pixels
+        - mask_pixel != 0 : masked pixels
+    supportmask : array_like
+        2D support mask (same shape as topo/new_helicity). Used to generate a default start image.
+    phase_retrieval_recipe : dict, optional
+        Overrides for algorithm and iteration settings. Supported keys include:
+        - algorithm_list_full_coherence : list[str] (length multiple of 3)
+        - number_iterations_full_coherence : list[int] (length multiple of 3)
+        - algorithm_list_partial_coherence : list[str] (length multiple of 3)
+        - number_iterations_partial_coherence : list[int] (length multiple of 3)
+        - use_partial_coherence_algorithm : bool
+        - hologram_intensity_cutoff_vmin : float
+        - Startimage : np.ndarray or None
+        - Startgamma : np.ndarray or None
+        - partial_coherence_nr_iterations_per_RL_cycle : int
+        - partial_coherence_frequency_of_RL_cycles : int
+
+    Returns
+    -------
+    retrieved_new: ArrayLike
+        Phase retrieved new helicity hologram with full coherence assumption
+    retrieved_new_pc: ArrayLike
+        Phase retrieved new helicity hologram with partial coherence assumption
+    bsmask_new: ArrayLike
+        mask of invalid values for positive helicity
+    gamma_new: ArrayLike
+        mutual coherence function positive helicity
+    -------
+    author: CK 2026
+    """
+
+    # ----------------------------
+    # Recipe: defaults + overrides
+    # ----------------------------
+    recipe = _default_phase_retrieval_recipe()
+    if phase_retrieval_recipe:
+        recipe.update(phase_retrieval_recipe)
+
+    _verify_valid_algorithm_list(
+        recipe["algorithm_list_full_coherence"],
+        recipe["number_iterations_full_coherence"],
+        name="Full-coherence",
+    )
+
+    _verify_valid_algorithm_list(
+        recipe["algorithm_list_partial_coherence"],
+        recipe["number_iterations_partial_coherence"],
+        name="Partial-coherence",
+    )
+
+    # ----------------------------
+    # Prepare inputs
+    # ----------------------------
+    topo_input = topo.copy()
+    new_helicity_input = new_helicity.copy()
+
+    # Baseline subtract (ignore zeros)
+    vmin = recipe["hologram_intensity_cutoff_vmin"]
+    if vmin > 0:
+        vals = topo_input[topo_input != 0]
+        if vals.size:
+            mi, _ = np.nanpercentile(vals, [vmin, 99.9])
+            topo_input = topo_input - mi
+
+        vals = new_helicity_input[new_helicity_input != 0]
+        if vals.size:
+            mi, _ = np.nanpercentile(vals, [vmin, 99.9])
+            new_helicity_input = new_helicity_input - mi
+
+    # fill nan, then clip to >= 0
+    topo_input = np.where(np.isnan(topo_input), 0, topo_input)
+    new_helicity_input = np.where(np.isnan(new_helicity_input), 0, new_helicity_input)
+    topo_input = np.clip(topo_input, 0, None)
+    new_helicity_input = np.clip(new_helicity_input, 0, None)
+
+    # Beamstop masks: inherit mask_pixel plus intensity<=0
+    bsmask_topo = mask_pixel.copy()
+    bsmask_topo[topo_input <= 0] = 1
+    bsmask_new = mask_pixel.copy()
+    bsmask_new[new_helicity_input <= 0] = 1
+
+    # Precompute amplitudes
+    new_helicity_amp = np.sqrt(new_helicity_input)
+
+    # Normalization factor for initializing new helicity phase
+    topo_sum = float(np.sum(topo_input))
+    new_helicity_sum = float(np.sum(new_helicity_input))
+    norm_factor = np.sqrt(new_helicity_sum / topo_sum) if topo_sum > 0 else 1.0
+
+    # ----------------------------
+    # Initialize Startimage/Startgamma
+    # ----------------------------
+    if recipe["Startimage"] is None:
+        Startimage = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+    else:
+        Startimage = recipe["Startimage"].copy()
+
+    if recipe["Startgamma"] is None:
+        Startgamma = np.ones(topo_input.shape, dtype=float) * 1e-6 * 2
+        Startgamma[topo_input.shape[0] // 2, topo_input.shape[1] // 2] = 0.7
+    else:
+        Startgamma = recipe["Startgamma"].copy()
+
+    # Roughly normalize Startimage to match data scale using unmasked pixels
+    valid_pix = (mask_pixel == 0) & (topo_input > 0)
+    if np.any(valid_pix):
+        x = np.sqrt(topo_input[valid_pix]).ravel()
+        y = np.abs(Startimage[valid_pix]).ravel()
+        if x.size >= 2:
+            res = stats.linregress(x, y)
+            Startimage = Startimage - res.intercept
+            if abs(res.slope) > 1e-12:
+                Startimage = Startimage / res.slope
+
+    # ----------------------------
+    # Execute Phase Retrieval
+    # ----------------------------
+    start_time = time.time()
+
+    retrieved_new = retrieved_new_pc = None
+    gamma_new = None
+
+    for step in range(0, len(recipe["number_iterations_full_coherence"]), 3):
+        print("############ -   CDI Full Coherence")
+
+        # New helicity - beta_mode="const"
+        retrieved_new, Error_diff_new2, Error_supp = PhaseRtrv_GPU(
+            diffract=new_helicity_amp,
+            mask=supportmask,
+            mode=recipe["algorithm_list_full_coherence"][step + 2],
+            beta_zero=0.5,
+            Nit=recipe["number_iterations_full_coherence"][step + 2],
+            beta_mode="const",
+            plot_every=24,
+            Phase=retrieved_topo * norm_factor,
+            seed=False,
+            real_object=False,
+            bsmask=bsmask_new,
+            average_img=30,
+            Fourier_last=True,
+        )
+
+        print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
+        Startimage = retrieved_topo.copy()
+
+        if recipe["use_partial_coherence_algorithm"]:
+            print("############   -   CDI Partial Coherence")
+
+            # Replace beamstop region with current reconstruction intensity
+            new_helicity_pc_input = (np.abs(retrieved_new) ** 2) * bsmask_new + new_helicity_input * (
+                1 - bsmask_new
+            )
+
+            # Partial coherence: new helicity (const) (use gamma_topo as in original)
+            retrieved_new_pc, Error_diff_new_pc2, Error_supp, gamma_new = (
+                PhaseRtrv_with_RL(
+                    diffract=np.sqrt(new_helicity_pc_input),
+                    mask=supportmask,
+                    mode=recipe["algorithm_list_partial_coherence"][step + 2],
+                    beta_zero=0.5,
+                    Nit=recipe["number_iterations_partial_coherence"][step + 2],
+                    beta_mode="const",
+                    gamma=gamma_topo,
+                    RL_freq=recipe["partial_coherence_frequency_of_RL_cycles"],
+                    RL_it=recipe["partial_coherence_nr_iterations_per_RL_cycle"],
+                    plot_every=24,
+                    Phase=retrieved_topo_pc * norm_factor,
+                    seed=False,
+                    real_object=False,
+                    bsmask=np.zeros_like(bsmask_new),
+                    average_img=30,
+                    Fourier_last=True,
+                )
+            )
+
+            print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
+
+            Startimage = retrieved_topo_pc.copy()
+            Startgamma = gamma_topo.copy()
+        else:
+            retrieved_new_pc = retrieved_new.copy()
+            gamma_new = Startgamma.copy()
+
+    print("Phase Retrieval Done!")
+
+    return (
+        retrieved_new,
+        retrieved_new_pc,
+        bsmask_new,
+        gamma_new,
+    )
+
 #############################################################
 #       PHASE RETRIEVAL FUNCTIONS HELPER
 # ############################################################
