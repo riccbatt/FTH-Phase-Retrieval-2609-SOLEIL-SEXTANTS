@@ -1211,6 +1211,9 @@ def focusCDI(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100)
         image_p = FFT(propagate(pos, x*1e-6, experimental_setup)* np.exp(1j*y))
         image_n = FFT(propagate(neg, x*1e-6, experimental_setup)* np.exp(1j*y))
         
+        image_n = shift_image(image_n, [fx, fy])
+        maskroi=(mask)[roi]
+        
         if operation== "-":
             image= (image_p-image_n)
         elif operation== "+":
@@ -1221,26 +1224,24 @@ def focusCDI(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100)
             image= np.log(np.abs(image_p/image_n))* np.exp(1j*np.angle(image_p/image_n))
         elif operation=="-/+":
             image= (image_p-image_n)/(image_p+image_n) * np.exp(1j*y)
-            
-        image=np.nan_to_num(image, nan=0, posinf=0, neginf=0)
-        simage =shift_image(image, [fx, fy])[roi]
-        maskroi=(image*0+mask)[roi]
-        simage_mask=simage[maskroi==1]        
+
+        image=np.nan_to_num(image, nan=0, posinf=0, neginf=0)[roi]
+        simage_mask=image[maskroi==1]
     
         mi,ma=np.percentile(np.abs(simage_mask), scale)
-        ax1 = axs[0,0].imshow(np.abs(simage),cmap = 'gray', vmin=mi, vmax=ma)
+        ax1 = axs[0,0].imshow(np.abs(image),cmap = 'gray', vmin=mi, vmax=ma)
         axs[0,0].set_title("Abs")
         
         mi,ma=np.percentile(np.angle(simage_mask), scale)
-        ax2 = axs[0,1].imshow(np.angle(simage), cmap='gray', vmin=mi, vmax=ma)
+        ax2 = axs[0,1].imshow(np.angle(image), cmap='gray', vmin=mi, vmax=ma)
         axs[0,1].set_title("Phase")
         
         mi,ma=np.percentile(np.real(simage_mask), scale)
-        ax3 = axs[1,0].imshow(np.real(simage), cmap='gray', vmin=mi, vmax=ma)
+        ax3 = axs[1,0].imshow(np.real(image), cmap='gray', vmin=mi, vmax=ma)
         axs[1,0].set_title("Real Part")
         
         mi,ma=np.percentile(np.imag(simage_mask), scale)
-        ax4 = axs[1,1].imshow(np.imag(simage), cmap='gray', vmin=mi, vmax=ma)
+        ax4 = axs[1,1].imshow(np.imag(image), cmap='gray', vmin=mi, vmax=ma)
         axs[1,1].set_title("Imaginary Part")
         #fig.tight_layout()
         return
