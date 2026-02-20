@@ -76,15 +76,18 @@ def shift_image(image,shift,interpolation = True):
     -------
     author: CK 2023
     '''
+
+    if np.sum(np.abs(np.array(shift))) > 1e-12:
+        #Shift Image
+        if interpolation is True:
+            shifted_image = scipy_shift(image,shift,mode = 'reflect')
+        else:
+            shifted_image = fourier_shift(scp.fft.fft2(image), shift)
+            shifted_image = scp.fft.ifft2(shifted_image)
     
-    #Shift Image
-    if interpolation is True:
-        shifted_image = scipy_shift(image,shift,mode = 'reflect')
+        return shifted_image
     else:
-        shifted_image = fourier_shift(scp.fft.fft2(image), shift)
-        shifted_image = scp.fft.ifft2(shifted_image)
-    
-    return shifted_image
+        return image
 
 
 def shift_image_stack(image_stack,shift,interpolation = True, chunk_sz = None):

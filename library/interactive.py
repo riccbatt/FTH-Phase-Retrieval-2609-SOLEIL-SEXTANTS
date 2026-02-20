@@ -1033,9 +1033,9 @@ class Shift_Scale_Mask:
             layout=ipywidgets.Layout(width="500px"),
             ),
             "shift_ver": widgets.FloatSlider(
-                min=-self.shape[1]/4, max=self.shape[1]/4, value=self.shift[0], step=0.5, description="shift_ver",layout=ipywidgets.Layout(width="350px")),
+                min=-self.shape[1]/4, max=self.shape[1]/4, value=self.shift[0], step=1, description="shift_ver",layout=ipywidgets.Layout(width="350px")),
             "shift_hor": widgets.FloatSlider(
-                min=-self.shape[1]/4, max=self.shape[1]/4, value=self.shift[1], step=0.5, description="shift_hor",layout=ipywidgets.Layout(width="350px")),
+                min=-self.shape[1]/4, max=self.shape[1]/4, value=self.shift[1], step=1, description="shift_hor",layout=ipywidgets.Layout(width="350px")),
             "scale": widgets.IntSlider(min=-20, max=20, value=self.scale,description="scale"),
                     }
 
