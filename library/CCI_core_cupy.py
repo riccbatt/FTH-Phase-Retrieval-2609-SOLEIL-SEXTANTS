@@ -79,22 +79,25 @@ def shift_image(image,shift,interpolation = True,out_dtype = 'numpy'):
     -------
     author: CK 2023
     '''
-    
-    #Shift Image
-    image = cp.array(image)
 
-    if interpolation is True:
-        shift_image = scipy_shift(image,shift,mode = 'reflect')
+    if np.sum(np.abs(np.array(shift))) > 1e-12:
+        #Shift Image
+        image = cp.array(image)
+    
+        if interpolation is True:
+            shift_image = scipy_shift(image,shift,mode = 'reflect')
+        else:
+            shift_image = fourier_shift(cp.fft.fft2(image), shift)
+            shift_image = cp.fft.ifft2(shift_image)
+        
+        if out_dtype == 'numpy':
+            shift_image = cp.asnumpy(shift_image.real)
+        elif out_dtype == 'cupy':
+            pass
+        
+        return shift_image
     else:
-        shift_image = fourier_shift(cp.fft.fft2(image), shift)
-        shift_image = cp.fft.ifft2(shift_image)
-    
-    if out_dtype == 'numpy':
-        shift_image = cp.asnumpy(shift_image.real)
-    elif out_dtype == 'cupy':
-        pass
-    
-    return shift_image
+        return image
 
 
 
