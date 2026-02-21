@@ -26,6 +26,7 @@ mnemonics["helicity"] = "measurement/pre_scan_snapshot/helicity"
 mnemonics["magOOP"] = "measurement/pre_scan_snapshot/magOOP"
 mnemonics["magIP"] = "measurement/pre_scan_snapshot/magIP"
 mnemonics["cmos"] = "measurement/cmossoftimax"
+mnemonics["sample_rotation"] = "measurement/pre_scan_snapshot/srotz"
 
 ##########################################################################
 
