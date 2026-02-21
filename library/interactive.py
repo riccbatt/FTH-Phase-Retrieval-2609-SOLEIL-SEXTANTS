@@ -173,19 +173,22 @@ def shift_image(image,shift,interpolation = True,out_dtype = 'numpy'):
 ###########################################
 
 
-
-
-def cimshow(im, **kwargs):
+def cimshow(im, title = None, **kwargs):
     """Simple 2d image plot with adjustable contrast.
     
     Returns matplotlib figure and axis created.
     """
     im = np.array(im).astype("float")
     fig, ax = plt.subplots(figsize=(7,7))
+
+    if title is not None:
+        title0 = title[0] if len(im.shape) == 3 else title
+        ax.set_title(title0)
+    
     im0 = im[0] if len(im.shape) == 3 else im
     mm = ax.imshow(im0, **kwargs)
 
-    cmin, cmax, vmin, vmax = np.nanpercentile(im, [.1, 99.9, .001, 99.999])
+    cmin, cmax, vmin, vmax = np.nanpercentile(im, [.1, 99.9, .0001, 99.9999])
     # vmin, vmax = np.nanmin(im), np.nanmax(im)
     sl_contrast = FloatRangeSlider(
         value=(cmin, cmax), min=vmin, max=vmax, step=(vmax - vmin) / 500,
@@ -201,9 +204,12 @@ def cimshow(im, **kwargs):
         @ipywidgets.interact(nr=w_image)
         def set_image(nr):
             mm.set_data(im[nr])
-    
+
+            if title is not None:
+                ax.set_title(title[nr])
     
     return fig, ax
+
 
 
 class InteractiveCenter:
@@ -1273,7 +1279,7 @@ def propagate_phase(holo, ROI, phase=0, prop_dist=0, scale=(0,100), experimental
     '''
     ph_flip = False
     style = {'description_width': 'initial'}
-    fig, axs = plt.subplots(1,3,figsize=(9,3))
+    fig, axs = plt.subplots(1,3,figsize=(9,4))
     def p(x,y):
         image = reconstruct(propagate(holo, x*1e-6, experimental_setup = experimental_setup)*np.exp(1j*y))
         mir, mar = np.percentile(np.real(image[ROI]), scale)
