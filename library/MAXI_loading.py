@@ -16,7 +16,7 @@ import numpy as np
 
 ##########################################################################
 
-# Commonly used hdf5 entries. MaxP04 nexus file structure specific
+# Commonly used hdf5 entries. MAXI nexus file structure specific
 mnemonics = dict()
 mnemonics["measurement"] = "measurement"
 mnemonics["ccd"] = "measurement/ccd2"
@@ -27,6 +27,9 @@ mnemonics["magOOP"] = "measurement/pre_scan_snapshot/magOOP"
 mnemonics["magIP"] = "measurement/pre_scan_snapshot/magIP"
 mnemonics["cmos"] = "measurement/cmossoftimax"
 mnemonics["sample_rotation"] = "measurement/pre_scan_snapshot/srotz"
+mnemonics["diode_software"] = "measurement/adc2sw"
+mnemonics["diode"] = "measurement/adc2"
+mnemonics["cmos_images"] = "/entry_0000/MAXI/sCMOS/data"
 
 ##########################################################################
 
