@@ -20,6 +20,8 @@ import time
 import numpy as np
 from numpy.typing import ArrayLike
 
+import matplotlib.pyplot as plt
+
 from scipy import stats
 
     
@@ -75,69 +77,8 @@ def to_numpy(array, xp):
 #       PHASE RETRIEVAL Algorithm
 # ############################################################
 
-# Helper functions
-def _verify_valid_algorithm_list(
-    algorithms: list, iterations: list, name="Full-coherence"
-):
-    """
-    Validate algorithm and iteration lists for phase retrieval.
 
-    Parameters
-    ----------
-    algorithms : sequence of str
-        Algorithm names.
-    iterations : sequence of int
-        Iteration counts corresponding to algorithms.
-    name : str
-        Descriptive name used in error messages.
-
-    Raises
-    ------
-    ValueError
-        If validation fails.
-    ------
-    author: CK 2026
-    """
-
-    allowed_algorithms = {
-        "ER",
-        "SF",
-        "HAPRE",
-        "RAAR",
-        "HIOs",
-        "HIO",
-        "OSS",
-        "CHIO",
-        "HPR",
-    }
-
-    # Length consistency
-    if len(algorithms) != len(iterations):
-        raise ValueError(
-            f"{name}: algorithm list and iteration list must have the same length."
-        )
-
-    # Block structure check
-    if len(algorithms) % 3 != 0:
-        raise ValueError(
-            f"{name}: lists must have length that is a multiple of 3 "
-            "(3 steps per block)."
-        )
-
-    # Iteration validity
-    if not all(isinstance(n, int) and n > 0 for n in iterations):
-        raise ValueError(f"{name}: all iteration counts must be positive integers.")
-
-    # Algorithm validity
-    invalid = [a for a in algorithms if a not in allowed_algorithms]
-    if invalid:
-        raise ValueError(
-            f"{name}: invalid algorithm(s) detected: {invalid}. "
-            f"Allowed algorithms are: {sorted(allowed_algorithms)}"
-        )
-
-
-def _default_phase_retrieval_recipe():
+def default_phase_retrieval_recipe():
     """
     Returns dict that contains default phase retrieval setup parameter:
         - algorithm_list_full_coherence : list[str] (length multiple of 3)
@@ -223,7 +164,7 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
     # ----------------------------
     # Recipe: defaults + overrides
     # ----------------------------
-    recipe = _default_phase_retrieval_recipe()
+    recipe = default_phase_retrieval_recipe()
     if phase_retrieval_recipe:
         recipe.update(phase_retrieval_recipe)
 
@@ -313,6 +254,9 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
     retrieved_p_pc = retrieved_n_pc = None
     gamma_p = gamma_n = None
 
+    # Initialize error lists
+    error_p_it_1 = error_p_it_2 = error_n_it_3 = error_p_pc_it_1 = error_p_pc_it_2 = error_n_pc_it_3 = []
+    
     for step in range(0, len(recipe["number_iterations_full_coherence"]), 3):
         print("############ -   CDI Full Coherence")
 
@@ -366,6 +310,9 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
             average_img=30,
             Fourier_last=True,
         )
+
+        # Append errors to lists
+        error_p_it_1, error_p_it_2, error_n_it_3 = Error_diff_p, Error_diff_p2, Error_diff_n2
 
         print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
         Startimage = retrieved_p.copy()
@@ -447,6 +394,9 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
                 )
             )
 
+            # Append errors to lists
+            error_p_pc_it_1, error_p_pc_it_2, error_n_pc_it_3 = Error_diff_p_pc, Error_diff_p_pc2, Error_diff_n_pc2
+
             print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
 
             Startimage = retrieved_p_pc.copy()
@@ -457,6 +407,15 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
             gamma_p = Startgamma.copy()
             gamma_n = Startgamma.copy()
 
+    # Create dictionary for error data
+    error = {
+        "error_p_it_1": np.stack(error_p_it_1),
+        "error_p_it_2": np.stack(error_p_it_2),
+        "error_n_it_3": np.stack(error_n_it_3),
+        "error_p_pc_it_1": np.stack(error_p_pc_it_1),
+        "error_p_pc_it_2": np.stack(error_p_pc_it_2),
+        "error_n_pc_it_3": np.stack(error_n_pc_it_3),
+    }
     print("Phase Retrieval Done!")
 
     return (
@@ -468,6 +427,7 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
         bsmask_n,
         gamma_p,
         gamma_n,
+        error
     )
 
 
@@ -516,7 +476,7 @@ def single_helicity_phase_retrieval_algorithm(pos: ArrayLike, mask_pixel: ArrayL
     # ----------------------------
     # Recipe: defaults + overrides
     # ----------------------------
-    recipe = _default_phase_retrieval_recipe()
+    recipe = default_phase_retrieval_recipe()
     if phase_retrieval_recipe:
         recipe.update(phase_retrieval_recipe)
 
@@ -745,7 +705,7 @@ def phase_retrieval_algorithm_on_second_helicity_only(new_helicity: ArrayLike, t
     # ----------------------------
     # Recipe: defaults + overrides
     # ----------------------------
-    recipe = _default_phase_retrieval_recipe()
+    recipe = default_phase_retrieval_recipe()
     if phase_retrieval_recipe:
         recipe.update(phase_retrieval_recipe)
 
@@ -903,10 +863,154 @@ def phase_retrieval_algorithm_on_second_helicity_only(new_helicity: ArrayLike, t
         gamma_new,
     )
 
+def plot_phase_retrieval_errors(error, phase_retrieval_recipe, ax=None):
+    """
+    Plot tracked phase retrieval errors and return concatenated error list.
+
+    Returns
+    -------
+    full_error_list : list
+        Concatenated list of all tracked errors.
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    """
+    
+    # Initialize default algorithm lists if it is not provided
+    default_recipe = default_phase_retrieval_recipe()
+    for key in ["algorithm_list_full_coherence",
+                "algorithm_list_partial_coherence"]:
+        phase_retrieval_recipe.setdefault(key, default_recipe[key])
+            
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    counter = 0
+    full_error_list = []
+
+    full_keys = ["error_p_it_1", "error_p_it_2", "error_n_it_3"]
+    pc_keys = ["error_p_pc_it_1", "error_p_pc_it_2", "error_n_pc_it_3"]
+
+    # -------------------------
+    # Full coherence
+    # -------------------------
+    for i, key in enumerate(full_keys):
+        if key not in error:
+            continue
+
+        alg = phase_retrieval_recipe["algorithm_list_full_coherence"][i]
+        label = f"Full coherence - {alg}"
+
+        error_list = np.asarray(error[key])
+
+        full_error_list.extend(error_list.tolist())
+
+        x = counter + np.arange(len(error_list))
+        counter = x[-1] + 1
+
+        ax.plot(x, error_list, label=label)
+
+    # -------------------------
+    # Partial coherence
+    # -------------------------
+    for i, key in enumerate(pc_keys):
+        if key not in error:
+            continue
+
+        alg = phase_retrieval_recipe["algorithm_list_partial_coherence"][i]
+        label = f"Partial coherence - {alg}"
+
+        error_list = np.asarray(error[key])
+
+        full_error_list.extend(error_list.tolist())
+
+        x = counter + np.arange(len(error_list))
+        counter = x[-1] + 1
+
+        ax.plot(x, error_list, label=label)
+
+    # -------------------------
+    # Final formatting
+    # -------------------------
+    if len(full_error_list) > 0:
+        ax.set_title(f"Final error: {full_error_list[-1]:.2f} dB")
+
+    ax.legend()
+    ax.set_xlabel("Tracked errors")
+    ax.set_ylabel("log(Error) [dB]")
+    ax.grid(True)
+
+    return full_error_list, fig, ax
+
+
 #############################################################
 #       PHASE RETRIEVAL FUNCTIONS HELPER
 # ############################################################
-   
+
+
+def _verify_valid_algorithm_list(
+    algorithms: list, iterations: list, name="Full-coherence"
+):
+    """
+    Validate algorithm and iteration lists for phase retrieval.
+
+    Parameters
+    ----------
+    algorithms : sequence of str
+        Algorithm names.
+    iterations : sequence of int
+        Iteration counts corresponding to algorithms.
+    name : str
+        Descriptive name used in error messages.
+
+    Raises
+    ------
+    ValueError
+        If validation fails.
+    ------
+    author: CK 2026
+    """
+
+    allowed_algorithms = {
+        "ER",
+        "SF",
+        "HAPRE",
+        "RAAR",
+        "HIOs",
+        "HIO",
+        "OSS",
+        "CHIO",
+        "HPR",
+    }
+
+    # Length consistency
+    if len(algorithms) != len(iterations):
+        raise ValueError(
+            f"{name}: algorithm list and iteration list must have the same length."
+        )
+
+    # Block structure check
+    if len(algorithms) % 3 != 0:
+        raise ValueError(
+            f"{name}: lists must have length that is a multiple of 3 "
+            "(3 steps per block)."
+        )
+
+    # Iteration validity
+    if not all(isinstance(n, int) and n > 0 for n in iterations):
+        raise ValueError(f"{name}: all iteration counts must be positive integers.")
+
+    # Algorithm validity
+    invalid = [a for a in algorithms if a not in allowed_algorithms]
+    if invalid:
+        raise ValueError(
+            f"{name}: invalid algorithm(s) detected: {invalid}. "
+            f"Allowed algorithms are: {sorted(allowed_algorithms)}"
+        )
+
+
+
 # ----------------------------
 # Beta schedule (CPU-side)
 # ----------------------------
@@ -1167,7 +1271,7 @@ def PhaseRtrv_GPU(
     Error_diffr_list : list
         Sampled diffraction errors over iterations.
     Error_supp_list : list
-        Support errors (kept for compatibility; not filled).
+        Support errors (kept for compatibility; not filled). Future implementation shrink wrap
     ------
     author: CK 2026
     """
@@ -1506,4 +1610,4 @@ def Error_diffract_cp(guess, diffract):
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
     Error=10*xp.log10(Error)
-    return Error
+    return to_numpy(Error, xp)
