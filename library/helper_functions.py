@@ -270,9 +270,9 @@ def binning(array, binning_factor):
 
 def make_square_shape(images):
     """Crops last two dimenions of n-d images to square shape"""
-    crop = np.min(np.array([images.shape[-2], images.shape[-1]]))
-    images = images[..., :crop, :crop]
-
+    if images.shape[-2] != images.shape[-1]:
+        crop = np.min(np.array([images.shape[-2], images.shape[-1]]))
+        images = images[..., :crop, :crop]
     return images
 
 def drop_inhomogenous_part(image_list):
