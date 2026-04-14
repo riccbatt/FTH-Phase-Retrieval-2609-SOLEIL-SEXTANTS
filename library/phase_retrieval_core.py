@@ -412,10 +412,15 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
         "error_p_it_1": np.stack(error_p_it_1),
         "error_p_it_2": np.stack(error_p_it_2),
         "error_n_it_3": np.stack(error_n_it_3),
+        }
+
+    if recipe["use_partial_coherence_algorithm"]:
+        error.update({
         "error_p_pc_it_1": np.stack(error_p_pc_it_1),
         "error_p_pc_it_2": np.stack(error_p_pc_it_2),
         "error_n_pc_it_3": np.stack(error_n_pc_it_3),
-    }
+        })
+                     
     print("Phase Retrieval Done!")
 
     return (
@@ -914,21 +919,22 @@ def plot_phase_retrieval_errors(error, phase_retrieval_recipe, ax=None):
     # -------------------------
     # Partial coherence
     # -------------------------
-    for i, key in enumerate(pc_keys):
-        if key not in error:
-            continue
+    if phase_retrieval_recipe["use_partial_coherence_algorithm"]:
+        for i, key in enumerate(pc_keys):
+            if key not in error:
+                continue
+    
+            alg = phase_retrieval_recipe["algorithm_list_partial_coherence"][i]
+            label = f"Partial coherence - {alg}"
+    
+            error_list = np.asarray(error[key])
+    
+            full_error_list.extend(error_list.tolist())
+    
+            x = counter + np.arange(len(error_list))
+            counter = x[-1] + 1
 
-        alg = phase_retrieval_recipe["algorithm_list_partial_coherence"][i]
-        label = f"Partial coherence - {alg}"
-
-        error_list = np.asarray(error[key])
-
-        full_error_list.extend(error_list.tolist())
-
-        x = counter + np.arange(len(error_list))
-        counter = x[-1] + 1
-
-        ax.plot(x, error_list, label=label)
+            ax.plot(x, error_list, label=label)
 
     # -------------------------
     # Final formatting
