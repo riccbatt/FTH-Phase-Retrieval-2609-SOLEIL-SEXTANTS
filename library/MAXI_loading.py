@@ -30,6 +30,7 @@ mnemonics["sample_rotation"] = "measurement/pre_scan_snapshot/srotz"
 mnemonics["diode_software"] = "measurement/adc2sw"
 mnemonics["diode"] = "measurement/adc2"
 mnemonics["cmos_images"] = "/entry_0000/MAXI/sCMOS/data"
+mnemonics["mono"] = "measurement/mono"
 
 ##########################################################################
 
