@@ -940,7 +940,7 @@ def plot_phase_retrieval_errors(error, phase_retrieval_recipe, ax=None):
     # Final formatting
     # -------------------------
     if len(full_error_list) > 0:
-        ax.set_title(f"Final error: {full_error_list[-1]:.2f} dB")
+        ax.set_title(f"Smallest Error: {np.min(full_error_list):.2f} dB, Final error: {full_error_list[-1]:.2f} dB")
 
     ax.legend()
     ax.set_xlabel("Tracked errors")
