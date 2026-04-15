@@ -318,7 +318,6 @@ def dyn_factor(image,image_ref,method = 'scalarproduct', crop=0 ,plot = False, v
             ax.set_xlabel('Intensity Ref')
             ax.set_ylabel('Intensity')
             ax.set_title(f'Linear Fit: {factor:0.4f}*x + {offset:0.4f}')
-            plt.tight_layout()
             
     return factor, offset
 
