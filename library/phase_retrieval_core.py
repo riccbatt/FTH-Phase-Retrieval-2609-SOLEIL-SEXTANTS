@@ -107,6 +107,7 @@ def default_phase_retrieval_recipe():
         # RL_freq<=Nit means partial coherence with Richardson-Lucy updates.
         "RL_its": [0, 0, 0, 50, 50, 50],
         "RL_freqs": [1e9, 1e9, 1e9, 20, 20, 20],
+        "TV_freqs": [1e9, 1e9, 1e9, 1e9, 1e9, 1e9],
 
         "plot_every": [349, 24, 24, 349, 24, 24],
         "average_img": [30, 30, 30, 30, 30, 30],
@@ -116,7 +117,6 @@ def default_phase_retrieval_recipe():
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
-
     return recipe
 
 
@@ -182,6 +182,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "alpha_mode",
         "RL_its",
         "RL_freqs",
+        "TV_freqs",
         "plot_every",
         "average_img",
         "Fourier_last",
@@ -233,7 +234,10 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(f > 0 for f in recipe["RL_freqs"]):
         raise ValueError("All RL_freqs values must be > 0.")
-
+    
+    if not all(f > 0 for f in recipe["TV_freqs"]):
+        raise ValueError("All TV_freqs values must be > 0.")
+    
     if not all(n > 0 for n in recipe["plot_every"]):
         raise ValueError("All plot_every values must be > 0.")
 
@@ -580,6 +584,7 @@ def phase_retrieval_algorithm(
             gamma=gamma_in,
             RL_freq=RL_freq,
             RL_it=RL_it,
+            TV_freq=recipe["TV_freqs"][i],
         )
 
         retrieved[h] = result
@@ -941,6 +946,7 @@ def PhaseRtrv_core(
     gamma=None,
     RL_freq=None,
     RL_it=0,
+    TV_freq=2e9,
 ):
     """
     Unified full/partial-coherence phase-retrieval kernel.
@@ -1061,8 +1067,8 @@ def PhaseRtrv_core(
 
         inv = fft2(guess_cp)
 
-        if alpha > 0:
-            inv = inv - alpha * TV(inv) * mask_cp
+        if ((s%TV_freq)==0) and alpha > 0:
+            inv=  (inv + alpha* TV(inv, 1) )
 
         inv = proj_fn(inv, prev, mask_cp, beta, s, Nit)
         prev = inv.copy()
@@ -1141,37 +1147,87 @@ def PhaseRtrv_core(
 #############################################################
 #    TOTAL VARIATION FUNCTION
 # ############################################################
-def TV(inv, eps=1e-8):
+
+def _grad_backward_1D_cp(u, ax):
+    out = xp.empty_like(u, dtype=u.dtype)
+
+    s1 = [slice(None)] * u.ndim
+    s2 = [slice(None)] * u.ndim
+
+    s1[ax] = slice(1, None)
+    s2[ax] = slice(None, -1)
+
+    out[tuple(s1)] = u[tuple(s1)] - u[tuple(s2)]
+
+    s1[ax] = 0
+    #s2[ax] = -1
+
+    out[tuple(s1)] = 0
+    #out[tuple(s2)] = 0
+
+    return out
+
+
+def _grad_forward_1D_cp(u, ax):
+    out = xp.empty_like(u, dtype=u.dtype)
+
+    s1 = [slice(None)] * u.ndim
+    s2 = [slice(None)] * u.ndim
+
+    s1[ax] = slice(1, None)
+    s2[ax] = slice(None, -1)
+
+    out[tuple(s2)] = u[tuple(s1)] - u[tuple(s2)]
+
+    s1[ax] = -1
+    #s2[ax] = 0
+
+    out[tuple(s1)] = 0
+    #out[tuple(s2)] = 0
+
+    return out
+
+
+def _tv_grad_malm_cp(u, ep=1e-4):
     """
-    Total-variation descent direction for a complex real-space image.
-
-    Parameters
-    ----------
-    inv : xp.ndarray
-        Real-space complex image.
-    eps : float
-        Small stabilizer to avoid division by zero.
-
-    Returns
-    -------
-    tv_grad : xp.ndarray
-        Approximate TV gradient.
+    Equivalent to Erik Malm's _tv_grad().
+    This is the true TV gradient direction.
     """
 
-    dx = xp.roll(inv, -1, axis=0) - inv
-    dy = xp.roll(inv, -1, axis=1) - inv
+    grad_u = xp.array([
+        _grad_backward_1D_cp(u, ax)
+        for ax in range(u.ndim)
+    ])
 
-    norm = xp.sqrt(xp.abs(dx) ** 2 + xp.abs(dy) ** 2 + eps)
+    grad_mag = xp.sqrt(xp.sum(xp.abs(grad_u)**2, axis=0))
+    grad_mag = ep + grad_mag
 
-    px = dx / norm
-    py = dy / norm
+    tv_grad = xp.zeros_like(u)
 
-    div_x = px - xp.roll(px, 1, axis=0)
-    div_y = py - xp.roll(py, 1, axis=1)
-
-    tv_grad = -(div_x + div_y)
+    for ax in range(u.ndim):
+        tv_grad -= _grad_forward_1D_cp(grad_u[ax] / grad_mag, ax)
 
     return tv_grad
+
+
+def TV(u, mask=1, ep=1e-4):
+    """
+    TV descent direction compatible with your current update:
+
+        u = u + alpha * TV(u, mask)
+
+    This is equivalent to Erik's:
+
+        u = u - stepsize * _tv_grad(u)
+
+    Therefore:
+
+        TV = -_tv_grad
+    """
+
+    tv_descent_direction = -_tv_grad_malm_cp(u, ep=ep)
+
+    return tv_descent_direction * mask
 
 #############################################################
 #    FILTER FOR OSS
