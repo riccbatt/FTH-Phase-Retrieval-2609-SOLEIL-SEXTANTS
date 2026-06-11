@@ -589,12 +589,12 @@ def phase_retrieval_algorithm(
             TV_freq=recipe["TV_freqs"][i],
         )
 
-    retrieved[h] = result
+        retrieved[h] = result
 
-    if use_RL:
-        retrieved_pc[h] = result
-    else:
-        retrieved_fc[h] = result
+        if use_RL:
+            retrieved_pc[h] = result
+        else:
+            retrieved_fc[h] = result
 
 
         if gamma_out is not None:
