@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 import os
 import time
-import CCI_core_py as cci
+import CCI_core_cupy as cci
 import numpy as np
 from numpy.typing import ArrayLike
 
@@ -500,6 +500,8 @@ def phase_retrieval_algorithm(
     }
 
     retrieved = {"pos": None, "neg": None}
+    retrieved_fc = {"pos": None, "neg": None}
+    retrieved_pc = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
 
 
@@ -587,7 +589,13 @@ def phase_retrieval_algorithm(
             TV_freq=recipe["TV_freqs"][i],
         )
 
-        retrieved[h] = result
+    retrieved[h] = result
+
+    if use_RL:
+        retrieved_pc[h] = result
+    else:
+        retrieved_fc[h] = result
+
 
         if gamma_out is not None:
             gamma[h] = gamma_out
@@ -614,8 +622,10 @@ def phase_retrieval_algorithm(
     print("Phase Retrieval Done!")
 
     return (
-        retrieved["pos"],
-        retrieved["neg"],
+        retrieved_fc["pos"],
+        retrieved_fc["neg"],
+        retrieved_pc["pos"],
+        retrieved_pc["neg"],
         bsmask_p,
         bsmask_n,
         gamma["pos"],
