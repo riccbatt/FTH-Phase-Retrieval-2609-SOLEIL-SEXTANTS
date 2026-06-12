@@ -6,6 +6,81 @@ from library import phase_retrieval_core_multienergy as multi
 
 
 class PhaseRetrievalCoreMultienergyTests(unittest.TestCase):
+    def test_fourier_svd_dispatch_matches_explicit_log_object_pipeline(self):
+        rng = np.random.default_rng(17)
+        fields = (
+            rng.normal(size=(5, 4, 6))
+            + 1j * rng.normal(size=(5, 4, 6))
+        )
+        settings = {
+            "rank": 2,
+            "static_mode": "mean",
+            "weights": np.linspace(1.0, 2.0, fields.shape[0]),
+            "relaxation": 0.6,
+        }
+
+        log_objects = multi.fourier_field_to_object_log(fields)
+        expected_logs, expected_components = (
+            multi.project_log_object_low_rank(
+                log_objects,
+                return_components=True,
+                **settings,
+            )
+        )
+        expected = multi.object_log_to_fourier_field(expected_logs)
+
+        projected, components = multi.project_fourier_fields_multi_energy(
+            fields,
+            projection_model="svd",
+            return_components=True,
+            **settings,
+        )
+
+        np.testing.assert_allclose(projected, expected, atol=1e-12)
+        np.testing.assert_allclose(
+            components["static_log_object"],
+            expected_components["static_log_object"],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            components["energy_dependent_log_object"],
+            expected_components["energy_dependent_log_object"],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            components["singular_values"],
+            expected_components["singular_values"],
+            atol=1e-12,
+        )
+
+    def test_fourier_rank1_dispatch_matches_explicit_log_object_pipeline(self):
+        rng = np.random.default_rng(18)
+        fields = (
+            rng.normal(size=(6, 5, 4))
+            + 1j * rng.normal(size=(6, 5, 4))
+        )
+        settings = {
+            "static_mode": "first",
+            "weights": np.linspace(0.5, 1.5, fields.shape[0]),
+            "relaxation": 0.7,
+            "spectral_constraint": "free",
+        }
+
+        log_objects = multi.fourier_field_to_object_log(fields)
+        expected_logs = multi.project_log_object_rank1_spectral(
+            log_objects,
+            **settings,
+        )
+        expected = multi.object_log_to_fourier_field(expected_logs)
+
+        projected = multi.project_fourier_fields_multi_energy(
+            fields,
+            projection_model="rank1_spectral",
+            **settings,
+        )
+
+        np.testing.assert_allclose(projected, expected, atol=1e-12)
+
     def test_explicit_free_model_recovers_exact_rank1_log_object(self):
         rng = np.random.default_rng(0)
         n_energy = 7

@@ -374,7 +374,7 @@ The energy channels are reconstructed independently.
 $$
 L_E(\mathbf r) = C(\mathbf r) + \Delta_E(\mathbf r),
 \qquad
-\operatorname{rank}_E(\Delta) \le K.
+\mathrm{rank}_E(\Delta) \le K.
 $$
 
 Use:
@@ -441,11 +441,23 @@ $$
 ##### Weighted truncated SVD
 
 If `energy_weights` are provided, the code normalizes them to have unit mean
-and forms:
+and defines the diagonal weight matrix
+
+$$
+\mathbf W^{1/2}
+=
+\begin{bmatrix}
+\sqrt{w_1} &        & 0 \\
+           & \ddots &   \\
+0          &        & \sqrt{w_{n_E}}
+\end{bmatrix}.
+$$
+
+The weighted residual is:
 
 $$
 \boldsymbol\Delta_w
-= \boldsymbol\Delta\,\operatorname{diag}(\sqrt{w_E}).
+= \boldsymbol\Delta\mathbf W^{1/2}.
 $$
 
 Consequently, channels with larger weights influence the low-rank fit more
@@ -472,7 +484,7 @@ the static component:
 $$
 \boldsymbol\Delta_K
 = \boldsymbol\Delta_{w,K}
-  \operatorname{diag}(1/\sqrt{w_E}),
+  \mathbf W^{-1/2},
 \qquad
 \mathbf L_{\mathrm{SVD}}
 = \mathbf C\mathbf 1^{\mathsf T}+\boldsymbol\Delta_K.
@@ -887,7 +899,7 @@ where $p_j$ appears in the column for state $s(j)$. The decomposition is unique
 only when:
 
 $$
-\operatorname{rank}(\mathbf A)=S+1.
+\mathrm{rank}(\mathbf A)=S+1.
 $$
 
 For the state-specific design used by this library, this has a simple practical
@@ -1086,7 +1098,7 @@ $$
 m_{z,s}(\mathbf r)
 =
 \frac{
-  \operatorname{Re}\!\left[
+  \mathrm{Re}\!\left[
     q^*(\mathbf r)M_s(\mathbf r)
   \right]
 }{
@@ -1274,19 +1286,23 @@ holograms determine only:
 
 $$
 kt\delta_m
-\qquad\text{and}\qquad
+\qquad,\qquad
 kt\beta_m.
 $$
 
 They cannot determine $t$, $\delta_m$, and $\beta_m$ independently. Absolute
 $\delta_m$ and $\beta_m$ require an independently known sample thickness:
 
+Let $\Phi_m=\mathrm{Im}(q)$ denote the retrieved magnetic phase shift and
+$A_m=-\mathrm{Re}(q)$ denote the retrieved magnetic log attenuation.
+Then:
+
 $$
 \delta_m
-= \frac{\text{magnetic phase shift}}{kt},
+= \frac{\Phi_m}{kt},
 \qquad
 \beta_m
-= \frac{\text{magnetic log attenuation}}{kt}.
+= \frac{A_m}{kt}.
 $$
 
 Without independently known $t$, the retrieval cannot distinguish refractive
@@ -1314,12 +1330,15 @@ recipe = {
 }
 ```
 
-These dimensionless bounds map directly to the inferred complex response:
+These dimensionless bounds map directly to the inferred complex response. If
+the lower and upper values of `kt_delta_m_range` are denoted by
+$d_{\min}$ and $d_{\max}$, and those of `kt_beta_m_range` by
+$b_{\min}$ and $b_{\max}$, then:
 
 $$
-\operatorname{Im}(q) \in \texttt{kt\_delta\_m\_range},
+\mathrm{Im}(q) \in [d_{\min},d_{\max}],
 \qquad
--\operatorname{Re}(q) \in \texttt{kt\_beta\_m\_range}.
+-\mathrm{Re}(q) \in [b_{\min},b_{\max}].
 $$
 
 The projection clips the two components independently before refitting the

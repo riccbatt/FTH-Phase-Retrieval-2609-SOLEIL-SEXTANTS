@@ -1558,33 +1558,6 @@ def project_log_object_low_rank(
     return Lproj
 
 
-def project_fourier_fields_low_rank(
-    phase_stack,
-    rank=1,
-    static_mode="mean",
-    weights=None,
-    relaxation=1.0,
-    log_floor=1e-12,
-    return_components=False,
-):
-    """Apply the SVD static + low-rank projection to Fourier-domain fields."""
-    L = fourier_field_to_object_log(phase_stack, log_floor=log_floor)
-    projected = project_log_object_low_rank(
-        L,
-        rank=rank,
-        static_mode=static_mode,
-        weights=weights,
-        relaxation=relaxation,
-        return_components=return_components,
-    )
-
-    if return_components:
-        Lproj, components = projected
-        return object_log_to_fourier_field(Lproj), components
-
-    return object_log_to_fourier_field(projected)
-
-
 # -------------------------------------------------------------------------
 #  Explicit spectral model: L_E(r) = C(r) + M(r) a_E
 # -------------------------------------------------------------------------
@@ -2001,53 +1974,6 @@ def project_log_object_rank1_spectral(
     return Lproj
 
 
-def project_fourier_fields_rank1_spectral(
-    phase_stack,
-    static_mode="mean",
-    weights=None,
-    relaxation=1.0,
-    log_floor=1e-12,
-    spectral_constraint="free",
-    energy_values=None,
-    known_beta_spectrum=None,
-    known_delta_spectrum=None,
-    absorption_part="real",
-    kk_sign=1.0,
-    kk_subtract_baseline=True,
-    kk_normalize_input=False,
-    known_beta_normalization="none",
-    fit_known_beta_scale=True,
-    fit_known_beta_offset=True,
-    return_components=False,
-):
-    """Apply the explicit C + M*a_E projection to Fourier-domain fields."""
-    L = fourier_field_to_object_log(phase_stack, log_floor=log_floor)
-    projected = project_log_object_rank1_spectral(
-        L,
-        static_mode=static_mode,
-        weights=weights,
-        relaxation=relaxation,
-        spectral_constraint=spectral_constraint,
-        energy_values=energy_values,
-        known_beta_spectrum=known_beta_spectrum,
-        known_delta_spectrum=known_delta_spectrum,
-        absorption_part=absorption_part,
-        kk_sign=kk_sign,
-        kk_subtract_baseline=kk_subtract_baseline,
-        kk_normalize_input=kk_normalize_input,
-        known_beta_normalization=known_beta_normalization,
-        fit_known_beta_scale=fit_known_beta_scale,
-        fit_known_beta_offset=fit_known_beta_offset,
-        return_components=return_components,
-    )
-
-    if return_components:
-        Lproj, components = projected
-        return object_log_to_fourier_field(Lproj), components
-
-    return object_log_to_fourier_field(projected)
-
-
 def project_fourier_fields_multi_energy(
     phase_stack,
     projection_model="svd",
@@ -2070,7 +1996,11 @@ def project_fourier_fields_multi_energy(
     return_components=False,
 ):
     """
-    Dispatcher for the selectable multi-energy projection models.
+    Apply a selected multi-energy projection to Fourier-domain fields.
+
+    This is the representation boundary used by the reconstruction drivers:
+    it converts Fourier fields to complex log-objects once, applies the chosen
+    log-object projection, and converts the result back once.
 
     projection_model options
     ------------------------
@@ -2089,23 +2019,41 @@ def project_fourier_fields_multi_energy(
         return phase_stack
 
     if model in {"svd", "low_rank", "low-rank"}:
-        return project_fourier_fields_low_rank(
-            phase_stack,
+        projection_kind = "svd"
+    elif model in {
+        "rank1_spectral",
+        "spectral",
+        "explicit",
+        "cma",
+        "c+m*a",
+    }:
+        projection_kind = "rank1_spectral"
+    else:
+        raise ValueError(
+            "projection_model must be 'none', 'svd'/'low_rank', "
+            "or 'rank1_spectral'."
+        )
+
+    log_objects = fourier_field_to_object_log(
+        phase_stack,
+        log_floor=log_floor,
+    )
+
+    if projection_kind == "svd":
+        projected = project_log_object_low_rank(
+            log_objects,
             rank=rank,
             static_mode=static_mode,
             weights=weights,
             relaxation=relaxation,
-            log_floor=log_floor,
             return_components=return_components,
         )
-
-    if model in {"rank1_spectral", "spectral", "explicit", "cma", "c+m*a"}:
-        return project_fourier_fields_rank1_spectral(
-            phase_stack,
+    else:
+        projected = project_log_object_rank1_spectral(
+            log_objects,
             static_mode=static_mode,
             weights=weights,
             relaxation=relaxation,
-            log_floor=log_floor,
             spectral_constraint=spectral_constraint,
             energy_values=energy_values,
             known_beta_spectrum=known_beta_spectrum,
@@ -2120,9 +2068,11 @@ def project_fourier_fields_multi_energy(
             return_components=return_components,
         )
 
-    raise ValueError(
-        "projection_model must be 'none', 'svd'/'low_rank', or 'rank1_spectral'."
-    )
+    if return_components:
+        projected_logs, components = projected
+        return object_log_to_fourier_field(projected_logs), components
+
+    return object_log_to_fourier_field(projected)
 
 
 # -------------------------------------------------------------------------
