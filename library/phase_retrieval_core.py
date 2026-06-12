@@ -1,5 +1,18 @@
 """
-Python library for Phase retrieval in Python using functions. Functions taken and adapted from code base of:
+Single-mode phase retrieval for a pair of positive/negative holograms.
+
+The low-level :func:`PhaseRtrv_core` kernel alternates between the measured
+Fourier-amplitude constraint and a selected real-space projection (ER, HAPRE,
+RAAR, HIO, and related algorithms). The high-level
+:func:`phase_retrieval_algorithm` executes a recipe across the two input
+holograms and can optionally include total-variation and partial-coherence
+Richardson-Lucy updates.
+
+Arrays returned by the reconstruction functions use the Fourier-field
+convention expected by :func:`PhaseRtrv_core`; they are not directly the
+real-space sample exit wave.
+
+Functions were taken and adapted from the code base associated with:
 
 Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai Litzius, Josefin Fuchs, Christopher Klose, Kathinka Gerlinger, Kai Bagschik, Christian M. Günther, Dieter Engel, Claus Ropers, Stefan Eisebitt, Bastian Pfau, Felix Büttner, and Sergey Zayko, "Coherent x-ray magnetic imaging with 5 nm resolution," Optica 11, 234-237 (2024)
 
@@ -57,11 +70,13 @@ else:
     import scipy.fft as fft
     from scipy.fft import fft2, ifft2
 
-    # Change number of workers fot fft
+    # Use all available CPU workers for FFT operations.
     def fft2(array, **kwargs):
+        """Run a two-dimensional FFT using all available CPU workers."""
         return fft.fft2(array, workers=os.cpu_count(), **kwargs)
     
     def ifft2(array, **kwargs):
+        """Run a two-dimensional inverse FFT using all CPU workers."""
         return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
 
 
@@ -473,7 +488,7 @@ def phase_retrieval_algorithm(
     bsmask_n[neg_input < 0] = 1
 
 
-    # clip positive intensities to zero to avoid NaNs in the square root.
+    # Clip negative corrected intensities to zero before taking square roots.
     pos_input = np.clip(pos_input, 0, None)
     neg_input = np.clip(neg_input, 0, None)
 

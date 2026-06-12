@@ -8,6 +8,11 @@ This module composes:
 - ``phase_retrieval_core_multimode`` for the modal Fourier constraint
   ``I = sum_m |Psi_m|**2`` and modal phase-retrieval updates.
 
+Cross-energy object projections are applied independently to each mode. This
+assumes that a given mode index describes the corresponding physical mode at
+all energies; the driver preserves mode order but cannot resolve arbitrary
+permutations or unitary mixing between degenerate modes.
+
 For ``Nmodes > 1``, reconstructed fields have shape
 ``(nE, Nmodes, nx, ny)``. For ``Nmodes == 1``, the mode axis is squeezed and
 the API matches ``phase_retrieval_core_multienergy``.
@@ -335,6 +340,18 @@ def multi_energy_phase_retrieval_algorithm(
         at every energy during each outer iteration. Stage-specific beta,
         alpha, and TV controls use the same convention as the single-mode
         multi-energy driver.
+
+    Returns
+    -------
+    retrieved : ndarray
+        Shape ``(nE, nx, ny)`` for one mode or
+        ``(nE, Nmodes, nx, ny)`` for multiple modes.
+    components : dict
+        Per-mode cross-energy projection results under ``mode_components``.
+    bsmasks : ndarray
+        Energy-dependent invalid-pixel masks with shape ``(nE, nx, ny)``.
+    errors : dict
+        Update and projection diagnostics.
     """
     recipe = default_multi_energy_phase_retrieval_recipe()
     if multi_energy_recipe is not None:

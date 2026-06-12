@@ -1,5 +1,23 @@
 """
-Python library for Phase retrieval in Python using functions. Functions taken and adapted from code base of:
+Joint phase retrieval for a stack of holograms measured across photon energy.
+
+Each outer iteration performs a configurable sequence of ordinary
+single-energy phase-retrieval updates and then projects the resulting
+real-space complex log-exit-waves onto a cross-energy model:
+
+``none``
+    Independent reconstructions.
+``svd``
+    A common energy-independent component plus a low-rank residual.
+``rank1_spectral``
+    ``L_E(r) = C(r) + M(r) a_E``, optionally constrained by known beta spectra
+    and Kramers-Kronig dispersion.
+
+The standalone :mod:`kramers_kronig` module prepares beta/delta spectra. This
+module consumes those arrays but does not query or integrate external
+databases.
+
+Functions were taken and adapted from the code base associated with:
 
 Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai Litzius, Josefin Fuchs, Christopher Klose, Kathinka Gerlinger, Kai Bagschik, Christian M. Günther, Dieter Engel, Claus Ropers, Stefan Eisebitt, Bastian Pfau, Felix Büttner, and Sergey Zayko, "Coherent x-ray magnetic imaging with 5 nm resolution," Optica 11, 234-237 (2024)
 
@@ -62,11 +80,13 @@ else:
     import scipy.fft as fft
     from scipy.fft import fft2, ifft2
 
-    # Change number of workers fot fft
+    # Use all available CPU workers for FFT operations.
     def fft2(array, **kwargs):
+        """Run a two-dimensional FFT using all available CPU workers."""
         return fft.fft2(array, workers=os.cpu_count(), **kwargs)
     
     def ifft2(array, **kwargs):
+        """Run a two-dimensional inverse FFT using all CPU workers."""
         return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
 
 
@@ -2248,7 +2268,7 @@ def _broadcast_stage_parameter(value, stage_count, key):
         if len(values) != stage_count:
             raise ValueError(
                 f"{key} must be a scalar or have the same length as the "
-                f"corresponding mode/Nit schedule "
+                f"corresponding mode/iteration schedule "
                 f"({stage_count}); got {len(values)}."
             )
         return values
@@ -2541,8 +2561,9 @@ def multi_energy_phase_retrieval_algorithm(
     Jointly reconstruct several same-sample holograms measured at different
     photon energies.
 
-    Each outer iteration runs the complete ``mode``/``Nit`` schedule at every
-    energy before applying the selected cross-energy projection. For example::
+    Each outer iteration runs the complete ``inner_mode``/``inner_Nit``
+    schedule at every energy before applying the selected cross-energy
+    projection. For example::
 
         inner_mode = ["HAPRE", "ER"]
         inner_Nit = [700, 50]

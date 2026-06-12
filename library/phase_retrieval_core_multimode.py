@@ -1,5 +1,16 @@
 """
-Python library for Phase retrieval in Python using functions. Functions taken and adapted from code base of:
+Incoherent-multimode extension of :mod:`phase_retrieval_core`.
+
+For ``Nmodes > 1``, the measured intensity is modeled as
+
+    I(q) = sum_m |Psi_m(q)|**2.
+
+The Fourier constraint therefore rescales all modal fields together so that
+their summed intensity matches the measured hologram. Real-space projections
+are then applied independently to each mode. With ``Nmodes == 1`` the public
+API and numerical behavior reduce to the single-mode implementation.
+
+Functions were taken and adapted from the code base associated with:
 
 Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai Litzius, Josefin Fuchs, Christopher Klose, Kathinka Gerlinger, Kai Bagschik, Christian M. Günther, Dieter Engel, Claus Ropers, Stefan Eisebitt, Bastian Pfau, Felix Büttner, and Sergey Zayko, "Coherent x-ray magnetic imaging with 5 nm resolution," Optica 11, 234-237 (2024)
 
@@ -57,11 +68,13 @@ else:
     import scipy.fft as fft
     from scipy.fft import fft2, ifft2
 
-    # Change number of workers fot fft
+    # Use all available CPU workers for FFT operations.
     def fft2(array, **kwargs):
+        """Run a two-dimensional FFT using all available CPU workers."""
         return fft.fft2(array, workers=os.cpu_count(), **kwargs)
     
     def ifft2(array, **kwargs):
+        """Run a two-dimensional inverse FFT using all CPU workers."""
         return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
 
 
