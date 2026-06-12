@@ -518,7 +518,6 @@ def phase_retrieval_algorithm(
             "because no reconstruction exists yet."
         )
 
-
     if Startimage.shape != pos_input.shape:
         raise ValueError("Startimage must have the same shape as pos/neg.")
 
@@ -539,7 +538,6 @@ def phase_retrieval_algorithm(
 
     if Startgamma.shape != pos_input.shape:
         raise ValueError("Startgamma must have the same shape as pos/neg.")
-
 
 
     first_helicity = recipe["helicity"][0]
@@ -838,6 +836,7 @@ BETA_SCHEDULES = {
     "linear_to_0": _beta_linear_to_0,
     "steps": _beta_steps,
 }
+ALPHA_SCHEDULES = BETA_SCHEDULES.copy()
 
 
 def make_beta_schedule(beta_mode, Nit, beta_zero):
@@ -870,8 +869,6 @@ def make_beta_schedule(beta_mode, Nit, beta_zero):
         raise RuntimeError("Beta schedule returned wrong length.")
     return beta
 
-
-ALPHA_SCHEDULES = BETA_SCHEDULES.copy()
 def make_alpha_schedule(alpha_mode, Nit, alpha_zero):
     """Create an alpha schedule using the same schedule definitions as beta."""
     return make_beta_schedule(alpha_mode, Nit, alpha_zero)
@@ -1210,12 +1207,7 @@ def PhaseRtrv_core(
         guess = to_numpy(guess_cp, xp)
         gamma = to_numpy(gamma_cp, xp)
 
-        return (
-            np.fft.ifftshift(guess),
-            Error_diffr_list,
-            Error_supp_list,
-            np.fft.ifftshift(gamma),
-        )
+        return np.fft.ifftshift(guess),Error_diffr_list,Error_supp_list,np.fft.ifftshift(gamma)
 
     else:
         if Fourier_last:
