@@ -111,18 +111,32 @@ flowchart TD
     D --> E{Partial<br/>coherence?}
     E -- No --> F[Apply measured<br/>Fourier amplitude]
     E -- Yes --> G[Apply convolved<br/>intensity constraint]
-    G --> H[Richardson-Lucy<br/>coherence update]
-    F --> I[Transform to<br/>real space]
-    H --> I
-    I --> J[Optional TV update]
-    J --> K[Apply selected<br/>support projection]
-    K --> L{More iterations<br/>in this step?}
-    L -- Yes --> E
-    L -- No --> M[Store helicity result]
-    M --> N{More recipe<br/>steps?}
-    N -- Yes --> D
-    N -- No --> O[Return fields, masks,<br/>coherence, and errors]
+    F --> H[Transform to<br/>support space]
+    G --> H
+    H --> I[Optional TV update]
+    I --> J[Apply selected<br/>support projection]
+    J --> K[Transform back to<br/>Fourier space]
+    K --> L{Partial<br/>coherence?}
+    L -- No --> Q{More iterations<br/>in this step?}
+    L -- Yes --> M{RL update<br/>due?}
+    M -- Yes --> N[Update gamma with<br/>Richardson-Lucy]
+    M -- No --> O[Keep current gamma]
+    N --> P[Recompute convolved<br/>intensity]
+    O --> P
+    P --> Q
+    Q -- Yes --> E
+    Q -- No --> R[Store helicity result]
+    R --> S{More recipe<br/>steps?}
+    S -- Yes --> D
+    S -- No --> T[Return fields, masks,<br/>coherence, and errors]
 ```
+
+The Richardson-Lucy update is therefore **after** the support projection and
+the transform back to Fourier space. It is not applied directly after the
+Fourier-intensity correction. In the implementation, `gamma` is updated only
+when partial coherence is active and the zero-based iteration index satisfies
+`s > RL_freq` and `s % RL_freq == 0`. The convolved intensity is then
+recomputed from the updated Fourier field and kernel for the next iteration.
 
 ### Recipe structure
 
@@ -271,15 +285,23 @@ three-dimensional start may instead provide one field per mode.
 %%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 24, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
     A[Load pos/neg<br/>intensities] --> B[Initialize<br/>Nmodes fields]
-    B --> C[Sum modal<br/>intensities]
-    C --> D[Jointly rescale modes<br/>to measured intensity]
-    D --> E[Transform all modes<br/>to real space]
-    E --> F[Project each mode<br/>inside support]
-    F --> G[Transform modes<br/>to Fourier space]
-    G --> H{More iterations?}
-    H -- Yes --> C
-    H -- No --> I[Store modal<br/>reconstruction]
-    I --> J[Return Nmodes x nx x ny<br/>field arrays]
+    B --> C{Partial<br/>coherence?}
+    C -- No --> D[Sum modal<br/>intensities]
+    C -- Yes --> E[Convolve each modal<br/>intensity, then sum]
+    D --> F[Jointly rescale modes<br/>to measured intensity]
+    E --> F
+    F --> G[Transform all modes<br/>to support space]
+    G --> H[Optional TV and support<br/>projection per mode]
+    H --> I[Transform modes back<br/>to Fourier space]
+    I --> J{Partial coherence<br/>and RL update due?}
+    J -- Yes --> K[Update each modal<br/>gamma with RL]
+    J -- No --> L[Keep current<br/>coherence model]
+    K --> M[Recompute modal<br/>intensity model]
+    L --> M
+    M --> N{More iterations?}
+    N -- Yes --> C
+    N -- No --> O[Store modal<br/>reconstruction]
+    O --> P[Return Nmodes x nx x ny<br/>field arrays]
 ```
 
 ### Usage
@@ -344,7 +366,9 @@ flowchart TD
     B --> C[Optional warmup<br/>at every energy]
     C --> D[Start outer iteration]
     D --> E[Run inner schedule<br/>at every energy]
-    E --> G{Projection model}
+    E --> F{Projection due at<br/>this outer iteration?}
+    F -- No --> P{More outer iterations?}
+    F -- Yes --> G{Projection model}
     G -- none --> H[Keep independent fields]
     G -- SVD --> I[Common component<br/>plus low-rank residual]
     G -- rank1 --> J[Fit C plus M a_E]
@@ -360,7 +384,12 @@ flowchart TD
     N --> P
     O --> P
     P -- Yes --> D
-    P -- No --> Q[Apply final projection<br/>and measured amplitudes]
+    P -- No --> Q[Apply final selected<br/>multi-energy projection]
+    Q --> R{Final Fourier<br/>constraint?}
+    R -- Yes --> S[Apply measured<br/>Fourier amplitudes]
+    R -- No --> T[Keep projected fields]
+    S --> U[Return fields and<br/>model components]
+    T --> U
 ```
 
 ### Staged update recipes
@@ -839,16 +868,23 @@ the multimode recipe table instead.
 %%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 24, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
     A[Load energy stack] --> B[Initialize Nmodes fields<br/>at every energy]
-    B --> C[Run multimode updates<br/>at every energy]
-    C --> D[Collect mode m<br/>across energies]
-    D --> E[Apply multi-energy<br/>projection to mode m]
-    E --> F{More modes?}
-    F -- Yes --> D
-    F -- No --> G[Reassemble energy-mode<br/>field stack]
-    G --> H{More outer<br/>iterations?}
-    H -- Yes --> C
-    H -- No --> I[Enforce measured<br/>summed intensity]
-    I --> J[Return nE x Nmodes<br/>x nx x ny fields]
+    B --> C[Optional warmup<br/>at every energy]
+    C --> D[Run multimode updates<br/>at every energy]
+    D --> E{Projection due at<br/>this outer iteration?}
+    E -- No --> J{More outer<br/>iterations?}
+    E -- Yes --> F[Collect mode m<br/>across energies]
+    F --> G[Apply multi-energy<br/>projection to mode m]
+    G --> H{More modes?}
+    H -- Yes --> F
+    H -- No --> I[Reassemble energy-mode<br/>field stack]
+    I --> J
+    J -- Yes --> D
+    J -- No --> K[Apply final projection<br/>to every mode]
+    K --> L{Final Fourier<br/>constraint?}
+    L -- Yes --> M[Enforce measured<br/>summed intensity]
+    L -- No --> N[Keep projected fields]
+    M --> O[Return nE x Nmodes<br/>x nx x ny fields]
+    N --> O
 ```
 
 ### Usage
@@ -962,22 +998,29 @@ flowchart TD
     A[Load holograms, states,<br/>and polarization signs] --> B[Initialize one field<br/>per observation]
     B --> C[Optional warmup]
     C --> D[Run inner schedule<br/>for every observation]
-    D --> E[Convert to complex<br/>log-exit waves]
-    E --> F{Dichroic projection}
-    F -- none --> G[Keep independent<br/>reconstructions]
-    F -- shared charge --> H[Fit common charge and<br/>state magnetic terms]
-    F -- saturated --> I[Fit charge and<br/>magnetic terms]
-    I --> J[Infer q from<br/>saturated states]
-    J --> K{Optional kt-delta<br/>or kt-beta bounds?}
-    K -- No --> L[Keep data-inferred q]
-    K -- Yes --> M[Clip corresponding<br/>q components]
-    L --> N[Fit real mz maps<br/>for all states]
-    M --> N
-    G --> O{More outer<br/>iterations?}
-    H --> O
-    N --> O
+    D --> E{Joint projection due<br/>at this outer iteration?}
+    E -- No --> O{More outer<br/>iterations?}
+    E -- Yes --> F[Convert to complex<br/>log-exit waves]
+    F --> G{Dichroic projection}
+    G -- shared charge --> I[Fit common charge and<br/>state magnetic terms]
+    G -- saturated --> J[Fit charge and<br/>magnetic terms]
+    J --> K[Infer q from<br/>saturated states]
+    K --> L{Optional kt-delta<br/>or kt-beta bounds?}
+    L -- No --> M[Keep data-inferred q]
+    L -- Yes --> N[Clip corresponding<br/>q components]
+    M --> P[Fit real mz maps<br/>for all states]
+    N --> P
+    I --> O
+    P --> O
     O -- Yes --> D
-    O -- No --> P[Apply measured amplitudes<br/>and return components]
+    O -- No --> Q{Projection model<br/>is none?}
+    Q -- No --> R[Apply final selected<br/>dichroic projection]
+    Q -- Yes --> S{Final Fourier<br/>constraint?}
+    R --> S
+    S -- Yes --> T[Apply measured<br/>Fourier amplitudes]
+    S -- No --> U[Keep current fields]
+    T --> V[Return fields and<br/>dichroic components]
+    U --> V
 ```
 
 ### Shared-charge projection
