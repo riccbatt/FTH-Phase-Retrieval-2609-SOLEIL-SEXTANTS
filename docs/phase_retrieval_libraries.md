@@ -17,7 +17,7 @@ scope.
 For a coherent measurement, the detector records an intensity
 
 $$
-I(\mathbf q) = \left|\Psi(\mathbf q)\right|^2,
+I(\mathbf q)=|\Psi(\mathbf q)|^2.
 $$
 
 but not the Fourier phase of $\Psi$. Phase retrieval alternates between two
@@ -74,9 +74,7 @@ fields = object_log_to_fourier_field(L)
 The complex log representation is
 
 $$
-L(\mathbf r)
-= \log\!\left|O(\mathbf r)\right|
-+ i\,\arg O(\mathbf r),
+L(\mathbf r)=\log|O(\mathbf r)|+i\arg O(\mathbf r).
 $$
 
 where $O(\mathbf r)$ is the sample exit wave.
@@ -160,6 +158,32 @@ Richardson-Lucy partial coherence is active when:
 RL_its[i] > 0 and RL_freqs[i] <= number_iterations[i].
 ```
 
+### Base recipe reference
+
+This table applies to `phase_retrieval_core.phase_retrieval_algorithm()`.
+Except for `hologram_intensity_cutoff_vmin`, every default below is a list with
+one value per reconstruction step. All step-wise lists must have the same
+length.
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `algorithm_list` | `["HAPRE", "ER", "ER", "HAPRE", "ER", "ER"]` | Real-space projection algorithm used by each step. |
+| `number_iterations` | `[700, 50, 50, 700, 50, 50]` | Number of iterations in each step. |
+| `helicity` | `["pos", "pos", "neg", "pos", "pos", "neg"]` | Selects the positive or negative input hologram for each step. |
+| `beta_zero` | `[0.5, 0.5, 0.5, 0.5, 0.5, 0.5]` | Initial or constant feedback parameter for each projection step. |
+| `beta_mode` | `["arctan", "const", "const", "arctan", "const", "const"]` | Feedback schedule used to generate beta during each step. |
+| `alpha_zero` | `[0, 0, 0, 0, 0, 0]` | Total-variation descent strength. Zero disables TV descent. |
+| `alpha_mode` | `["const", "const", "const", "const", "const", "const"]` | Schedule used to generate the TV strength. |
+| `RL_its` | `[0, 0, 0, 50, 50, 50]` | Richardson-Lucy iterations per coherence update. Zero selects full coherence. |
+| `RL_freqs` | `[1e9, 1e9, 1e9, 20, 20, 20]` | Interval between Richardson-Lucy updates. Values larger than the step length disable them. |
+| `TV_freqs` | `[1e9, 1e9, 1e9, 1e9, 1e9, 1e9]` | Interval between TV updates. A very large value effectively disables repeated TV updates. |
+| `plot_every` | `[349, 24, 24, 349, 24, 24]` | Error-sampling and optional plotting interval passed to the core. |
+| `average_img` | `[30, 30, 30, 30, 30, 30]` | Number of low-error late iterations averaged for the returned field. |
+| `Fourier_last` | `[True, True, True, True, True, True]` | If true, return the result in the Fourier-field convention. |
+| `hologram_intensity_cutoff_vmin` | `-1` | Lower-percentile background subtraction. A negative value disables subtraction. |
+| `Startimage` | `[None, "pos", "pos", "pos", "pos", "pos"]` | Starting field for each step: default support start, explicit array, or latest `pos`/`neg` result. |
+| `Startgamma` | `[None, None, None, None, "pos", "pos"]` | Starting mutual-coherence estimate: default, explicit array, or latest `pos`/`neg` estimate. |
+
 ### Usage
 
 ```python
@@ -200,8 +224,7 @@ File: `library/phase_retrieval_core_multimode.py`
 An incoherent modal mixture produces
 
 $$
-I(\mathbf q)
-= \sum_m \left|\Psi_m(\mathbf q)\right|^2.
+I(\mathbf q)=\sum_m|\Psi_m(\mathbf q)|^2.
 $$
 
 The modes do not interfere. The Fourier constraint rescales all modes by a
@@ -228,6 +251,19 @@ fields have shape:
 ```
 
 while measured holograms remain two-dimensional.
+
+### Multimode recipe reference
+
+`phase_retrieval_core_multimode.phase_retrieval_algorithm()` accepts every key
+in the [base recipe table](#base-recipe-reference), with the same defaults and
+meaning, plus:
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `Nmodes` | `1` | Number of mutually incoherent modes. `1` reproduces single-mode phase retrieval. |
+
+For `Nmodes > 1`, a two-dimensional `Startimage` is copied to every mode. A
+three-dimensional start may instead provide one field per mode.
 
 ### Flowchart
 
@@ -359,6 +395,75 @@ Set `"warmup_Nit": 0` to disable it. The optional `warmup_beta_zero`,
 `warmup_beta_mode`, `warmup_alpha_zero`, `warmup_alpha_mode`, and
 `warmup_TV_freq` keys override inherited inner controls.
 
+### Multi-energy recipe reference
+
+This table applies to
+`phase_retrieval_core_multienergy.multi_energy_phase_retrieval_algorithm()`.
+The ordinary two-helicity `phase_retrieval_algorithm()` also exposed by that
+module uses the base recipe table instead.
+
+Stage controls such as `beta_zero` may be scalars, which are broadcast to every
+stage, or lists matching the corresponding mode/iteration schedule.
+
+#### Update schedule and numerical controls
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `inner_mode` | `["HAPRE", "ER"]` | Ordered phase-retrieval algorithms run at every energy during each outer iteration. |
+| `inner_Nit` | `[700, 50]` | Iteration count for each inner stage. |
+| `outer_iterations` | `100` | Number of cycles containing all energy updates and the joint projection. |
+| `warmup_mode` | `["HAPRE", "ER"]` | Independent algorithms run once at every energy before joint iterations. |
+| `warmup_Nit` | `[700, 50]` | Warmup iterations per stage. Set to `0` to disable warmup. |
+| `shuffle_energies` | `True` | Randomize energy update order during each outer iteration. |
+| `random_seed` | `None` | Seed used for energy shuffling. `None` uses nondeterministic initialization. |
+| `beta_zero` | `0.5` | Inner-stage feedback strength; scalar or one value per inner stage. |
+| `beta_mode` | `"arctan"` | Inner-stage beta schedule; scalar or one value per inner stage. |
+| `alpha_zero` | `0.0` | Inner-stage TV strength. Zero disables TV descent. |
+| `alpha_mode` | `"const"` | Inner-stage alpha schedule. |
+| `TV_freq` | `1e9` | Inner-stage interval between TV updates. |
+| `warmup_beta_zero` | `None` | Warmup beta strength. `None` inherits `beta_zero`. |
+| `warmup_beta_mode` | `None` | Warmup beta schedule. `None` inherits `beta_mode`. |
+| `warmup_alpha_zero` | `None` | Warmup TV strength. `None` inherits `alpha_zero`. |
+| `warmup_alpha_mode` | `None` | Warmup alpha schedule. `None` inherits `alpha_mode`. |
+| `warmup_TV_freq` | `None` | Warmup TV interval. `None` inherits `TV_freq`. |
+| `plot_every` | `1e9` | Error-sampling and optional plotting interval passed to each core call. |
+| `average_img` | `1` | Number of low-error late iterations averaged within each stage. |
+| `Fourier_last` | `True` | Return each stage in the Fourier-field convention. |
+| `final_fourier_constraint` | `True` | Reapply measured amplitudes after the final cross-energy projection. |
+| `hologram_intensity_cutoff_vmin` | `-1` | Lower-percentile background subtraction per energy. Negative disables it. |
+
+#### Cross-energy projection
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `projection_model` | `"svd"` | Cross-energy model: `"none"`, `"svd"`, or `"rank1_spectral"`. |
+| `rank` | `1` | Rank retained by the SVD residual projection. Ignored by the other models. |
+| `projection_every` | `1` | Apply the joint projection every this many outer iterations. |
+| `projection_relaxation` | `1.0` | Mixing strength between current and projected log-objects. |
+| `projection_start` | `0` | First outer-iteration index at which coupling is applied. |
+| `projection_static_mode` | `"mean"` | Static component: weighted energy mean, first channel, or none. |
+| `energy_weights` | `None` | Optional positive weight per energy used by projection fits. |
+| `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
+
+#### Rank-one spectral constraints
+
+These settings are used only when `projection_model="rank1_spectral"`, except
+that harmless defaults may remain present for other models.
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `spectral_constraint` | `"free"` | Spectrum mode: `"free"`, `"kk"`, `"known_beta"`, or `"known_beta_kk"`. |
+| `energy_values` | `None` | One photon energy per hologram; required for KK calculations. |
+| `known_beta_spectrum` | `None` | Known imaginary refractive-index spectrum used by known-beta constraints. |
+| `known_delta_spectrum` | `None` | Optional known real refractive-index spectrum for `known_beta_kk`. |
+| `absorption_part` | `"real"` | Places the absorption-like coefficient in the real or imaginary part of the fitted spectrum. |
+| `kk_sign` | `1.0` | Sign convention multiplying the KK-calculated dispersion. |
+| `kk_subtract_baseline` | `True` | Subtract the absorption endpoint average before the finite-window KK transform. |
+| `kk_normalize_input` | `False` | Normalize absorption before KK calculation. |
+| `known_beta_normalization` | `"none"` | Optional normalization of supplied beta: none, max-absolute, L2, or standard deviation. |
+| `fit_known_beta_scale` | `True` | Fit the scale relating supplied beta to the retrieved spectral coefficient. |
+| `fit_known_beta_offset` | `True` | Fit an additive offset for the supplied beta spectrum. |
+
 ### Projection models
 
 #### No coupling
@@ -424,16 +529,13 @@ The static component $\mathbf C\in\mathbb C^P$ is estimated according to
 For the default weighted mean,
 
 $$
-C(\mathbf r_p)
-= \frac{\sum_E w_E L_E(\mathbf r_p)}
-       {\sum_E w_E}.
+C(\mathbf r_p)=\frac{\sum_E w_E L_E(\mathbf r_p)}{\sum_E w_E}.
 $$
 
 The residual matrix is then
 
 $$
-\boldsymbol\Delta
-= \mathbf L-\mathbf C\mathbf 1^{\mathsf T}.
+\boldsymbol\Delta=\mathbf L-\mathbf C\mathbf 1^{\mathsf T}.
 $$
 
 ##### Weighted truncated SVD
@@ -443,7 +545,7 @@ and defines a diagonal weight matrix $\mathbf W^{1/2}$. Its diagonal entries
 are:
 
 $$
-\left(\mathbf W^{1/2}\right)_{EE}=\sqrt{w_E}.
+(\mathbf W^{1/2})_{EE}=\sqrt{w_E}.
 $$
 
 All off-diagonal entries are zero.
@@ -451,8 +553,7 @@ All off-diagonal entries are zero.
 The weighted residual is:
 
 $$
-\boldsymbol\Delta_w
-= \boldsymbol\Delta\mathbf W^{1/2}.
+\boldsymbol\Delta_w=\boldsymbol\Delta\mathbf W^{1/2}.
 $$
 
 Consequently, channels with larger weights influence the low-rank fit more
@@ -461,15 +562,13 @@ strongly. The code requires every weight to be finite and strictly positive.
 It then calculates:
 
 $$
-\boldsymbol\Delta_w
-= \mathbf U\boldsymbol\Sigma\mathbf V^\dagger.
+\boldsymbol\Delta_w=\mathbf U\boldsymbol\Sigma\mathbf V^\dagger.
 $$
 
 Only the first $K$ singular components are retained:
 
 $$
-\boldsymbol\Delta_{w,K}
-= \mathbf U_K\boldsymbol\Sigma_K\mathbf V_K^\dagger.
+\boldsymbol\Delta_{w,K}=\mathbf U_K\boldsymbol\Sigma_K\mathbf V_K^\dagger.
 $$
 
 This is the best rank-$K$ approximation to the weighted residual in the
@@ -477,21 +576,16 @@ least-squares Frobenius norm. The code then removes the weighting and restores
 the static component:
 
 $$
-\boldsymbol\Delta_K
-= \boldsymbol\Delta_{w,K}
-  \mathbf W^{-1/2},
+\boldsymbol\Delta_K=\boldsymbol\Delta_{w,K}\mathbf W^{-1/2},
 \qquad
-\mathbf L_{\mathrm{SVD}}
-= \mathbf C\mathbf 1^{\mathsf T}+\boldsymbol\Delta_K.
+\mathbf L_{\mathrm{SVD}}=\mathbf C\mathbf 1^{\mathsf T}+\boldsymbol\Delta_K.
 $$
 
 Finally, `projection_relaxation` mixes the projected and unprojected
 log-objects:
 
 $$
-\mathbf L_{\mathrm{new}}
-= (1-\lambda)\mathbf L
-+ \lambda\mathbf L_{\mathrm{SVD}},
+\mathbf L_{\mathrm{new}}=(1-\lambda)\mathbf L+\lambda\mathbf L_{\mathrm{SVD}},
 \qquad 0\le\lambda\le1.
 $$
 
@@ -723,6 +817,22 @@ Consequently, mode indices must remain physically corresponding across energy.
 The code preserves mode order during updates, but it cannot identify arbitrary
 mode permutations or unitary mixing between degenerate modes.
 
+### Multi-energy multimode recipe reference
+
+`phase_retrieval_core_multienergy_multimode.multi_energy_phase_retrieval_algorithm()`
+accepts every key in the multi-energy recipe tables above, with identical
+defaults and meaning, plus:
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `Nmodes` | `1` | Number of mutually incoherent modes reconstructed at every energy. |
+| `mode_initialization_seed` | `0` | Random seed used to create nondegenerate initial modes. May be `None`. |
+
+The cross-energy projection is applied separately to each mode using the same
+`projection_model`, rank, weights, and spectral settings.
+The ordinary `phase_retrieval_algorithm()` exposed by this combined module uses
+the multimode recipe table instead.
+
 ### Flowchart
 
 ```mermaid
@@ -789,14 +899,60 @@ For observation `j`, magnetic state `s(j)`, and polarization coefficient `p_j`,
 the shared-charge model is:
 
 $$
-L_j(\mathbf r)
-= C(\mathbf r)
-+ p_j M_{s(j)}(\mathbf r).
+L_j(\mathbf r)=C(\mathbf r)+p_jM_{s(j)}(\mathbf r).
 $$
 
 `state_labels[j]` identifies the sample state, while
 `polarization_signs[j]` is normally `+1` or `-1`. These names deliberately
 separate sample state from helicity.
+
+### Dichroic recipe reference
+
+These tables apply to
+`phase_retrieval_core_dichroic.dichroic_phase_retrieval_algorithm()`.
+
+#### Observation updates
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `inner_mode` | `["HAPRE"]` | Ordered phase-retrieval algorithms run for each observation during every outer iteration. |
+| `inner_Nit` | `[1]` | Iteration count for each inner stage. |
+| `outer_iterations` | `300` | Number of observation-update and dichroic-projection cycles. |
+| `warmup_mode` | `["HAPRE"]` | Independent algorithm schedule run once before joint iterations. |
+| `warmup_Nit` | `[20]` | Warmup iterations per stage. Set to `0` to disable warmup. |
+| `shuffle_observations` | `True` | Randomize observation order in each outer iteration. |
+| `random_seed` | `None` | Seed used for observation shuffling. |
+| `beta_zero` | `0.5` | Inner-stage feedback strength; scalar or one value per inner stage. |
+| `beta_mode` | `"arctan"` | Inner-stage beta schedule. |
+| `alpha_zero` | `0.0` | Inner-stage TV strength. Zero disables TV descent. |
+| `alpha_mode` | `"const"` | Inner-stage alpha schedule. |
+| `TV_freq` | `1e9` | Inner-stage interval between TV updates. |
+| `warmup_beta_zero` | `None` | Warmup beta strength. `None` inherits `beta_zero`. |
+| `warmup_beta_mode` | `None` | Warmup beta schedule. `None` inherits `beta_mode`. |
+| `warmup_alpha_zero` | `None` | Warmup TV strength. `None` inherits `alpha_zero`. |
+| `warmup_alpha_mode` | `None` | Warmup alpha schedule. `None` inherits `alpha_mode`. |
+| `warmup_TV_freq` | `None` | Warmup TV interval. `None` inherits `TV_freq`. |
+| `plot_every` | `1e9` | Error-sampling and optional plotting interval passed to each core call. |
+| `average_img` | `1` | Number of low-error late iterations averaged within each stage. |
+| `Fourier_last` | `True` | Return each stage in the Fourier-field convention. |
+| `final_fourier_constraint` | `True` | Reapply every hologram's measured amplitudes after the final projection. |
+| `hologram_intensity_cutoff_vmin` | `-1` | Lower-percentile background subtraction per hologram. Negative disables it. |
+
+#### Dichroic projection
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `projection_model` | `"shared_charge"` | Coupling model: `"none"`, `"shared_charge"`, or `"saturated_reference"`. |
+| `projection_every` | `1` | Apply the dichroic projection every this many outer iterations. |
+| `projection_start` | `0` | First outer-iteration index at which the projection is applied. |
+| `projection_relaxation` | `1.0` | Mixing strength between current and dichroically projected fields. |
+| `observation_weights` | `None` | Optional positive least-squares weight for each hologram. |
+| `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary pseudoinverse gauge. |
+| `saturated_states` | `None` | Sequence interpreted as saturated `+1` states, or dictionary mapping state labels to `+1`/`-1`. |
+| `clip_magnetization` | `False` | Clip fitted nonsaturated `m_z` maps to the interval `[-1, 1]`. |
+| `kt_delta_m_range` | `None` | Optional lower/upper bounds for the retrieved product `k*t*delta_m`. |
+| `kt_beta_m_range` | `None` | Optional lower/upper bounds for the retrieved product `k*t*beta_m`. |
+| `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
 
 ### Flowchart
 
@@ -843,9 +999,7 @@ reconstruction artefact. The physical model instead says that all observations
 are generated from a smaller collection of latent images:
 
 $$
-L_j(\mathbf r)
-= C(\mathbf r)
-+ p_jM_{s(j)}(\mathbf r).
+L_j(\mathbf r)=C(\mathbf r)+p_jM_{s(j)}(\mathbf r).
 $$
 
 For $n_s$ magnetic states, the observation stack is therefore generated by at
@@ -853,8 +1007,7 @@ most $1+n_s$ complex spatial components: one shared charge component and one
 magnetic component per state. In matrix form:
 
 $$
-\mathbf L
-= \mathbf X\mathbf A^{\mathsf T},
+\mathbf L=\mathbf X\mathbf A^{\mathsf T}.
 $$
 
 where:
@@ -911,8 +1064,7 @@ anchored, a single-polarization observation of another state is sufficient to
 determine that state's unconstrained complex magnetic term:
 
 $$
-M_s(\mathbf r)
-= \frac{L_j(\mathbf r)-C(\mathbf r)}{p_j}.
+M_s(\mathbf r)=\frac{L_j(\mathbf r)-C(\mathbf r)}{p_j}.
 $$
 
 The state carrying the opposite-polarization pair can be any state. It does not
@@ -1015,12 +1167,10 @@ This estimates the magnetic response from the reconstructed saturated state and
 then enforces:
 
 $$
-L_j(\mathbf r)
-= C(\mathbf r)
-+ p_j q(\mathbf r)m_{z,s(j)}(\mathbf r),
+L_j(\mathbf r)=C(\mathbf r)+p_jq(\mathbf r)m_{z,s(j)}(\mathbf r).
 $$
 
-where $q(\mathbf r)$ is inferred from the data and $m_z$ is real. With
+where $q(\mathbf r)$ is inferred from the data and `m_z` is real. With
 
 $$
 n_m = -(\delta_m+i\beta_m)m_z,
@@ -1059,8 +1209,7 @@ The current implementation applies the constraint in two stages.
 First, it performs the full-rank shared-charge fit:
 
 $$
-L_j(\mathbf r)
-= C(\mathbf r)+p_jM_{s(j)}(\mathbf r).
+L_j(\mathbf r)=C(\mathbf r)+p_jM_{s(j)}(\mathbf r).
 $$
 
 This stage must already satisfy the design-rank conditions described above.
@@ -1070,17 +1219,13 @@ Second, for each saturated state $s$, whose magnetization is supplied as
 $m_{z,s}^{\mathrm{sat}}=+1$ or $-1$, it forms a response estimate:
 
 $$
-q_s(\mathbf r)
-= \frac{M_s(\mathbf r)}
-       {m_{z,s}^{\mathrm{sat}}}.
+q_s(\mathbf r)=\frac{M_s(\mathbf r)}{m_{z,s}^{\mathrm{sat}}}.
 $$
 
 With multiple saturated states, the current code averages these estimates:
 
 $$
-q(\mathbf r)
-= \frac{1}{N_{\mathrm{sat}}}
-  \sum_{s\in\mathcal S_{\mathrm{sat}}} q_s(\mathbf r).
+q(\mathbf r)=\frac{1}{N_{\mathrm{sat}}}\sum_{s\in\mathcal S_{\mathrm{sat}}}q_s(\mathbf r).
 $$
 
 Optional `kt_delta_m_range` and `kt_beta_m_range` bounds are then applied to
@@ -1091,15 +1236,7 @@ obtained by projecting its complex magnetic term onto the complex direction
 defined by $q$:
 
 $$
-m_{z,s}(\mathbf r)
-=
-\frac{
-  \mathrm{Re}\!\left[
-    q^*(\mathbf r)M_s(\mathbf r)
-  \right]
-}{
-  \left|q(\mathbf r)\right|^2
-}.
+m_{z,s}(\mathbf r)=\frac{\Re[q^*(\mathbf r)M_s(\mathbf r)]}{|q(\mathbf r)|^2}.
 $$
 
 This is a real least-squares fit of
@@ -1111,12 +1248,10 @@ determine a magnetization coefficient and returns zero.
 The projected observations are finally rebuilt as:
 
 $$
-L_j^{\mathrm{proj}}(\mathbf r)
-= C(\mathbf r)
-+ p_jq(\mathbf r)m_{z,s(j)}(\mathbf r).
+L_j^{\mathrm{proj}}(\mathbf r)=C(\mathbf r)+p_jq(\mathbf r)m_{z,s(j)}(\mathbf r).
 $$
 
-This real-$m_z$ constraint is what gives the saturated-reference model more
+This real-`m_z` constraint is what gives the saturated-reference model more
 stabilizing power than the unconstrained `shared_charge` model. Complex
 state-dependent fluctuations that do not lie along the response direction
 $q(\mathbf r)$ are rejected.
@@ -1147,7 +1282,7 @@ saturated_states = {"saturated": +1}
 
 The opposite-polarization pair determines $C$ and the saturated magnetic term.
 The remaining observation determines the domain-state magnetic term, which is
-then constrained to the real-$m_z$ direction.
+then constrained to the real-`m_z` direction.
 
 This alternative is also algebraically identifiable:
 
@@ -1191,12 +1326,12 @@ saturated-reference model also assumes:
    same photon energy, sample thickness distribution, composition, and magnetic
    optical constants across the state series.
 4. **Real scalar magnetization.** State changes must be representable by a real
-   out-of-plane factor $m_z(\mathbf r)$. A changing complex response, additional
+   out-of-plane factor `m_z(r)`. A changing complex response, additional
    magnetic components, or polarization-dependent nonmagnetic effects are not
    represented by this model.
 5. **Correct saturation metadata.** A state marked `+1` or `-1` must have that
    known uniform magnetization over the reconstructed magnetic region. Partial
-   saturation biases both $q$ and every subsequently retrieved $m_z$ map.
+   saturation biases both $q$ and every subsequently retrieved `m_z` map.
 6. **Spatial registration.** Corresponding pixels must represent the same
    sample location in all holograms. Drift is otherwise interpreted as a
    state-dependent magnetic signal.
@@ -1246,7 +1381,7 @@ The amount of actual regularization also depends on the measurement design:
 - A single saturated state measured at both polarizations identifies $C$ and
   $q$, but contains no unknown magnetization state to stabilize.
 - One saturated state plus at least one nonsaturated state lets the
-  saturated-reference projection impose the real-$m_z$ condition on the
+  saturated-reference projection impose the real-`m_z` condition on the
   nonsaturated reconstruction. This is the smallest design that uses the
   saturated response to constrain an unknown state.
 - Additional polarizations, repeated acquisitions, or additional states make
@@ -1294,11 +1429,9 @@ $A_m=-\mathrm{Re}(q)$ denote the retrieved magnetic log attenuation.
 Then:
 
 $$
-\delta_m
-= \frac{\Phi_m}{kt},
+\delta_m=\frac{\Phi_m}{kt},
 \qquad
-\beta_m
-= \frac{A_m}{kt}.
+\beta_m=\frac{A_m}{kt}.
 $$
 
 Without independently known $t$, the retrieval cannot distinguish refractive
@@ -1334,7 +1467,7 @@ $b_{\min}$ and $b_{\max}$, then:
 $$
 \mathrm{Im}(q) \in [d_{\min},d_{\max}],
 \qquad
--\mathrm{Re}(q) \in [b_{\min},b_{\max}].
+\mathrm{Re}(-q) \in [b_{\min},b_{\max}].
 $$
 
 The projection clips the two components independently before refitting the
