@@ -142,13 +142,7 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
         charge = np.full((3, 4), 0.02 + 0.01j)
         response = np.full((3, 4), -0.5 + 0.8j)
         log_objects = np.stack([charge + response, charge - response])
-        photon_energy_eV = 100.0
-        thickness_range_m = (1e-9, 2e-9)
-        beta_range = (0.01, 0.02)
-        wave_number = dichroic._wave_number_from_energy(photon_energy_eV)
-        maximum_attenuation = (
-            wave_number * thickness_range_m[1] * beta_range[1]
-        )
+        kt_beta_range = (0.01, 0.02)
 
         projected, components = (
             dichroic.project_log_objects_saturated_reference(
@@ -156,16 +150,14 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
                 state_labels=["saturated", "saturated"],
                 polarization_signs=[1, -1],
                 saturated_states=["saturated"],
-                photon_energy_eV=photon_energy_eV,
-                beta_m_range=beta_range,
-                thickness_range_m=thickness_range_m,
+                kt_beta_m_range=kt_beta_range,
                 return_components=True,
             )
         )
 
         expected_response = np.full(
             (3, 4),
-            -maximum_attenuation + 0.8j,
+            -kt_beta_range[1] + 0.8j,
         )
         np.testing.assert_allclose(
             components["magnetic_response_unconstrained"],
@@ -193,21 +185,36 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
             components["response_bounds"],
         )
 
-    def test_physical_ranges_require_energy_and_thickness(self):
+    def test_optional_delta_range_constrains_phase_only(self):
+        response = np.full((2, 2), -0.5 + 0.8j)
+        constrained, info = dichroic._constrain_magnetic_response(
+            response,
+            kt_delta_m_range=(0.1, 0.2),
+        )
+
+        np.testing.assert_allclose(constrained, -0.5 + 0.2j)
+        self.assertEqual(
+            info["response_bounds"]["magnetic_phase_shift"],
+            (0.1, 0.2),
+        )
+        self.assertNotIn(
+            "magnetic_log_attenuation",
+            info["response_bounds"],
+        )
+
+    def test_product_ranges_are_validated_directly(self):
         response = np.ones((2, 2), dtype=complex)
 
-        with self.assertRaisesRegex(ValueError, "thickness_range_m"):
+        with self.assertRaisesRegex(ValueError, "kt_beta_m_range"):
             dichroic._constrain_magnetic_response(
                 response,
-                beta_m_range=(0.01, 0.02),
-                photon_energy_eV=100.0,
+                kt_beta_m_range=(0.02, 0.01),
             )
 
-        with self.assertRaisesRegex(ValueError, "photon_energy_eV"):
+        with self.assertRaisesRegex(ValueError, "kt_delta_m_range"):
             dichroic._constrain_magnetic_response(
                 response,
-                beta_m_range=(0.01, 0.02),
-                thickness_range_m=(1e-9, 2e-9),
+                kt_delta_m_range=(0.01, np.inf),
             )
 
     def test_saturated_reference_accepts_negative_saturation_flag(self):

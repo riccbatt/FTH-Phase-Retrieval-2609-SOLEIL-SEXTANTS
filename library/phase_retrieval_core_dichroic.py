@@ -32,10 +32,9 @@ The retrieved complex response is proportional to
 ``k * t * (delta_m + i beta_m)``. Holograms alone do not separate the
 refractive-index terms from an unknown thickness ``t``.
 
-Optional ranges for ``delta_m``, ``beta_m``, and thickness may constrain this
-response. They are never required: with all ranges set to ``None``, the
-reconstruction remains exclusively data driven. When ranges are used, the
-known illumination energy determines ``k``.
+Optional ranges for the directly observable products ``k*t*delta_m`` and
+``k*t*beta_m`` may constrain this response. They are never required: with both
+ranges set to ``None``, the reconstruction remains exclusively data driven.
 """
 
 import time
@@ -88,10 +87,8 @@ def default_dichroic_phase_retrieval_recipe():
         "rank_deficient": "error",
         "saturated_states": None,
         "clip_magnetization": False,
-        "photon_energy_eV": None,
-        "delta_m_range": None,
-        "beta_m_range": None,
-        "thickness_range_m": None,
+        "kt_delta_m_range": None,
+        "kt_beta_m_range": None,
         "log_floor": 1e-12,
     }
 
@@ -295,104 +292,51 @@ def _normalize_physical_range(value, name, strictly_positive=False):
     return minimum, maximum
 
 
-def _product_interval(first, second):
-    """Return exact bounds for the product of two closed real intervals."""
-    products = (
-        first[0] * second[0],
-        first[0] * second[1],
-        first[1] * second[0],
-        first[1] * second[1],
-    )
-    return min(products), max(products)
-
-
-def _wave_number_from_energy(photon_energy_eV):
-    """Return the vacuum wave number in m^-1 for photon energy in eV."""
-    if (
-        photon_energy_eV is None
-        or isinstance(photon_energy_eV, bool)
-        or not isinstance(photon_energy_eV, (int, float, np.number))
-        or not np.isfinite(photon_energy_eV)
-        or photon_energy_eV <= 0
-    ):
-        raise ValueError("photon_energy_eV must be a finite positive number.")
-
-    # CODATA relation: hbar*c = 1.973269804e-7 eV m.
-    hbar_c_eV_m = 1.973269804e-7
-    return float(photon_energy_eV) / hbar_c_eV_m
-
-
 def _constrain_magnetic_response(
     response,
-    photon_energy_eV=None,
-    delta_m_range=None,
-    beta_m_range=None,
-    thickness_range_m=None,
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
 ):
     """
-    Project the inferred response onto optional physical product intervals.
+    Project the inferred response onto optional observable-product intervals.
 
     The response convention is
-    ``imag(q)=k*t*delta_m`` and ``-real(q)=k*t*beta_m``. Delta and beta bounds
-    are applied independently, so either component may remain data driven.
+    ``imag(q)=k*t*delta_m`` and ``-real(q)=k*t*beta_m``. The two dimensionless
+    product bounds are applied independently.
     """
     delta_range = _normalize_physical_range(
-        delta_m_range,
-        "delta_m_range",
+        kt_delta_m_range,
+        "kt_delta_m_range",
     )
     beta_range = _normalize_physical_range(
-        beta_m_range,
-        "beta_m_range",
-    )
-    thickness_range = _normalize_physical_range(
-        thickness_range_m,
-        "thickness_range_m",
-        strictly_positive=True,
+        kt_beta_m_range,
+        "kt_beta_m_range",
     )
     uses_prior = delta_range is not None or beta_range is not None
 
     if not uses_prior:
         return np.asarray(response, dtype=np.complex128).copy(), {
             "physical_response_bounds_applied": False,
-            "photon_energy_eV": photon_energy_eV,
-            "wave_number_m_inv": None,
-            "delta_m_range": delta_range,
-            "beta_m_range": beta_range,
-            "thickness_range_m": thickness_range,
+            "kt_delta_m_range": delta_range,
+            "kt_beta_m_range": beta_range,
             "response_bounds": {},
         }
-    if thickness_range is None:
-        raise ValueError(
-            "thickness_range_m is required when delta_m_range or "
-            "beta_m_range is supplied."
-        )
-
-    wave_number = _wave_number_from_energy(photon_energy_eV)
     constrained = np.asarray(response, dtype=np.complex128).copy()
     response_bounds = {}
 
     if delta_range is not None:
-        product_bounds = _product_interval(thickness_range, delta_range)
-        phase_bounds = tuple(wave_number * value for value in product_bounds)
-        constrained.imag = np.clip(constrained.imag, *phase_bounds)
-        response_bounds["magnetic_phase_shift"] = phase_bounds
+        constrained.imag = np.clip(constrained.imag, *delta_range)
+        response_bounds["magnetic_phase_shift"] = delta_range
 
     if beta_range is not None:
-        product_bounds = _product_interval(thickness_range, beta_range)
-        attenuation_bounds = tuple(
-            wave_number * value for value in product_bounds
-        )
-        attenuation = np.clip(-constrained.real, *attenuation_bounds)
+        attenuation = np.clip(-constrained.real, *beta_range)
         constrained.real = -attenuation
-        response_bounds["magnetic_log_attenuation"] = attenuation_bounds
+        response_bounds["magnetic_log_attenuation"] = beta_range
 
     return constrained, {
         "physical_response_bounds_applied": True,
-        "photon_energy_eV": float(photon_energy_eV),
-        "wave_number_m_inv": wave_number,
-        "delta_m_range": delta_range,
-        "beta_m_range": beta_range,
-        "thickness_range_m": thickness_range,
+        "kt_delta_m_range": delta_range,
+        "kt_beta_m_range": beta_range,
         "response_bounds": response_bounds,
     }
 
@@ -406,10 +350,8 @@ def project_log_objects_saturated_reference(
     relaxation=1.0,
     rank_deficient="error",
     clip_magnetization=False,
-    photon_energy_eV=None,
-    delta_m_range=None,
-    beta_m_range=None,
-    thickness_range_m=None,
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
     return_components=False,
 ):
     """
@@ -425,9 +367,9 @@ def project_log_objects_saturated_reference(
     rank deficient even when the reference is marked saturated.
 
     The complex response is inferred from the reconstructed saturated state.
-    Optional ``delta_m_range``, ``beta_m_range``, and ``thickness_range_m``
-    bounds may then constrain it. They require the known ``photon_energy_eV``.
-    With all ranges omitted, no physical prior is applied.
+    Optional ``kt_delta_m_range`` and ``kt_beta_m_range`` bounds may constrain
+    the directly observable phase-shift and attenuation products. With both
+    ranges omitted, no physical prior is applied.
     """
     original_log_objects = core._as_energy_stack(
         log_objects,
@@ -458,10 +400,8 @@ def project_log_objects_saturated_reference(
     response_unconstrained = np.mean(response_candidates, axis=0)
     response, physical_info = _constrain_magnetic_response(
         response_unconstrained,
-        photon_energy_eV=photon_energy_eV,
-        delta_m_range=delta_m_range,
-        beta_m_range=beta_m_range,
-        thickness_range_m=thickness_range_m,
+        kt_delta_m_range=kt_delta_m_range,
+        kt_beta_m_range=kt_beta_m_range,
     )
     response_power = np.abs(response) ** 2
     valid_response = response_power > 1e-30
@@ -570,10 +510,8 @@ def project_fourier_fields_saturated_reference(
     relaxation=1.0,
     rank_deficient="error",
     clip_magnetization=False,
-    photon_energy_eV=None,
-    delta_m_range=None,
-    beta_m_range=None,
-    thickness_range_m=None,
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
     log_floor=1e-12,
     return_components=False,
 ):
@@ -592,10 +530,8 @@ def project_fourier_fields_saturated_reference(
         relaxation=relaxation,
         rank_deficient=rank_deficient,
         clip_magnetization=clip_magnetization,
-        photon_energy_eV=photon_energy_eV,
-        delta_m_range=delta_m_range,
-        beta_m_range=beta_m_range,
-        thickness_range_m=thickness_range_m,
+        kt_delta_m_range=kt_delta_m_range,
+        kt_beta_m_range=kt_beta_m_range,
         return_components=return_components,
     )
     if return_components:
@@ -627,10 +563,8 @@ def _project_fields(fields, labels, signs, recipe, relaxation):
             relaxation=relaxation,
             rank_deficient=recipe["rank_deficient"],
             clip_magnetization=recipe["clip_magnetization"],
-            photon_energy_eV=recipe["photon_energy_eV"],
-            delta_m_range=recipe["delta_m_range"],
-            beta_m_range=recipe["beta_m_range"],
-            thickness_range_m=recipe["thickness_range_m"],
+            kt_delta_m_range=recipe["kt_delta_m_range"],
+            kt_beta_m_range=recipe["kt_beta_m_range"],
             log_floor=recipe["log_floor"],
             return_components=True,
         )
@@ -692,10 +626,8 @@ def _verify_recipe(recipe, n_observations):
         raise ValueError("clip_magnetization must be bool.")
     _constrain_magnetic_response(
         np.zeros((1, 1), dtype=np.complex128),
-        photon_energy_eV=recipe["photon_energy_eV"],
-        delta_m_range=recipe["delta_m_range"],
-        beta_m_range=recipe["beta_m_range"],
-        thickness_range_m=recipe["thickness_range_m"],
+        kt_delta_m_range=recipe["kt_delta_m_range"],
+        kt_beta_m_range=recipe["kt_beta_m_range"],
     )
     if recipe["rank_deficient"] not in {"error", "minimum_norm"}:
         raise ValueError(

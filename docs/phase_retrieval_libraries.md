@@ -16,14 +16,14 @@ scope.
 
 For a coherent measurement, the detector records an intensity
 
-```text
-I(q) = |Psi(q)|^2,
-```
+$$
+I(\mathbf q) = \left|\Psi(\mathbf q)\right|^2,
+$$
 
-but not the Fourier phase of `Psi`. Phase retrieval alternates between two
+but not the Fourier phase of $\Psi$. Phase retrieval alternates between two
 constraint spaces:
 
-1. In Fourier space, replace the amplitude at measured pixels by `sqrt(I)`.
+1. In Fourier space, replace the amplitude at measured pixels by $\sqrt{I}$.
 2. Transform to real space and apply a support-based projection.
 3. Transform back and repeat.
 
@@ -73,11 +73,13 @@ fields = object_log_to_fourier_field(L)
 
 The complex log representation is
 
-```text
-L(r) = log(|O(r)|) + i arg(O(r)),
-```
+$$
+L(\mathbf r)
+= \log\!\left|O(\mathbf r)\right|
++ i\,\arg O(\mathbf r),
+$$
 
-where `O(r)` is the sample exit wave.
+where $O(\mathbf r)$ is the sample exit wave.
 
 ## 2. Base Library
 
@@ -103,24 +105,25 @@ plot_phase_retrieval_errors(...)
 ### Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 24, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
-    A[Load pos and neg intensities] --> B[Prepare amplitudes and masks]
-    B --> C[Build initial Fourier field]
+    A[Load pos/neg<br/>intensities] --> B[Prepare amplitudes<br/>and masks]
+    B --> C[Initialize<br/>Fourier field]
     C --> D[Read next recipe step]
-    D --> E{Partial coherence enabled?}
-    E -- No --> F[Apply measured Fourier amplitude]
-    E -- Yes --> G[Apply convolved intensity constraint]
-    G --> H[Update mutual coherence with Richardson-Lucy]
-    F --> I[Transform to real space]
+    D --> E{Partial<br/>coherence?}
+    E -- No --> F[Apply measured<br/>Fourier amplitude]
+    E -- Yes --> G[Apply convolved<br/>intensity constraint]
+    G --> H[Richardson-Lucy<br/>coherence update]
+    F --> I[Transform to<br/>real space]
     H --> I
     I --> J[Optional TV update]
-    J --> K[Apply ER, HAPRE, RAAR, HIO, or other projection]
-    K --> L{More iterations in step?}
+    J --> K[Apply selected<br/>support projection]
+    K --> L{More iterations<br/>in this step?}
     L -- Yes --> E
     L -- No --> M[Store helicity result]
-    M --> N{More recipe steps?}
+    M --> N{More recipe<br/>steps?}
     N -- Yes --> D
-    N -- No --> O[Return reconstructions, masks, gamma, and errors]
+    N -- No --> O[Return fields, masks,<br/>coherence, and errors]
 ```
 
 ### Recipe structure
@@ -196,9 +199,10 @@ File: `library/phase_retrieval_core_multimode.py`
 
 An incoherent modal mixture produces
 
-```text
-I(q) = sum_m |Psi_m(q)|^2.
-```
+$$
+I(\mathbf q)
+= \sum_m \left|\Psi_m(\mathbf q)\right|^2.
+$$
 
 The modes do not interfere. The Fourier constraint rescales all modes by a
 common factor so their summed intensity matches the measurement. Real-space
@@ -228,17 +232,18 @@ while measured holograms remain two-dimensional.
 ### Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 24, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
-    A[Load pos and neg intensities] --> B[Initialize Nmodes complex fields]
-    B --> C[Compute summed modal intensity]
-    C --> D[Jointly rescale all modes to measured amplitude]
-    D --> E[Transform every mode to real space]
-    E --> F[Apply support projection independently to each mode]
-    F --> G[Transform modes back to Fourier space]
+    A[Load pos/neg<br/>intensities] --> B[Initialize<br/>Nmodes fields]
+    B --> C[Sum modal<br/>intensities]
+    C --> D[Jointly rescale modes<br/>to measured intensity]
+    D --> E[Transform all modes<br/>to real space]
+    E --> F[Project each mode<br/>inside support]
+    F --> G[Transform modes<br/>to Fourier space]
     G --> H{More iterations?}
     H -- Yes --> C
-    H -- No --> I[Store modal reconstruction]
-    I --> J[Return fields with shape Nmodes by nx by ny]
+    H -- No --> I[Store modal<br/>reconstruction]
+    I --> J[Return Nmodes x nx x ny<br/>field arrays]
 ```
 
 ### Usage
@@ -297,21 +302,21 @@ The output remains a stack of Fourier fields with shape `(nE, nx, ny)`.
 ### Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 16, "rankSpacing": 22, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
-    A[Load hologram stack across energy] --> B[Initialize one field per energy]
-    B --> C[Optional warmup schedule at every energy]
+    A[Load energy-resolved<br/>holograms] --> B[Initialize one field<br/>per energy]
+    B --> C[Optional warmup<br/>at every energy]
     C --> D[Start outer iteration]
-    D --> E[Run full inner schedule at energy 1]
-    E --> F[Repeat inner schedule for all energies]
-    F --> G{Projection model}
+    D --> E[Run inner schedule<br/>at every energy]
+    E --> G{Projection model}
     G -- none --> H[Keep independent fields]
-    G -- SVD --> I[Project log-exit waves to common plus low rank]
-    G -- rank1 spectral --> J[Fit C plus M times a_E]
-    J --> K{Spectral constraint}
-    K -- free --> L[Keep retrieved complex spectrum]
-    K -- KK --> M[Calculate dispersion from retrieved absorption]
-    K -- known beta --> N[Impose supplied beta spectrum]
-    K -- known beta plus KK --> O[Impose beta and delta relation]
+    G -- SVD --> I[Common component<br/>plus low-rank residual]
+    G -- rank1 --> J[Fit C plus M a_E]
+    J --> K{Spectral<br/>constraint}
+    K -- free --> L[Retrieve complex<br/>spectrum]
+    K -- KK --> M[Infer dispersion<br/>from absorption]
+    K -- known beta --> N[Impose supplied<br/>beta spectrum]
+    K -- beta + KK --> O[Impose beta-delta<br/>relation]
     H --> P{More outer iterations?}
     I --> P
     L --> P
@@ -319,7 +324,7 @@ flowchart TD
     N --> P
     O --> P
     P -- Yes --> D
-    P -- No --> Q[Apply final projection and measured amplitudes]
+    P -- No --> Q[Apply final projection<br/>and measured amplitudes]
 ```
 
 ### Staged update recipes
@@ -366,10 +371,11 @@ The energy channels are reconstructed independently.
 
 #### SVD low rank
 
-```text
-L_E(r) = C(r) + Delta_E(r)
-rank_E(Delta) <= K
-```
+$$
+L_E(\mathbf r) = C(\mathbf r) + \Delta_E(\mathbf r),
+\qquad
+\operatorname{rank}_E(\Delta) \le K.
+$$
 
 Use:
 
@@ -382,9 +388,9 @@ This is flexible and does not require a known spectral line shape.
 
 #### Explicit rank-one spectrum
 
-```text
-L_E(r) = C(r) + M(r) a_E
-```
+$$
+L_E(\mathbf r) = C(\mathbf r) + M(\mathbf r)\,a_E.
+$$
 
 Use:
 
@@ -392,8 +398,8 @@ Use:
 "projection_model": "rank1_spectral"
 ```
 
-`C(r)` is energy independent, `M(r)` is the spatial map of the energy-dependent
-component, and `a_E` is its complex spectrum.
+$C(\mathbf r)$ is energy independent, $M(\mathbf r)$ is the spatial map of the
+energy-dependent component, and $a_E$ is its complex spectrum.
 
 Available spectral constraints are:
 
@@ -478,18 +484,19 @@ mode permutations or unitary mixing between degenerate modes.
 ### Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 24, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
-    A[Load energy stack] --> B[Initialize Nmodes fields at every energy]
-    B --> C[Run multimode Fourier and real-space updates per energy]
-    C --> D[Collect mode index m across all energies]
-    D --> E[Apply selected multi-energy projection to mode m]
+    A[Load energy stack] --> B[Initialize Nmodes fields<br/>at every energy]
+    B --> C[Run multimode updates<br/>at every energy]
+    C --> D[Collect mode m<br/>across energies]
+    D --> E[Apply multi-energy<br/>projection to mode m]
     E --> F{More modes?}
     F -- Yes --> D
-    F -- No --> G[Reassemble energy-mode field stack]
-    G --> H{More outer iterations?}
+    F -- No --> G[Reassemble energy-mode<br/>field stack]
+    G --> H{More outer<br/>iterations?}
     H -- Yes --> C
-    H -- No --> I[Enforce measured summed modal intensity]
-    I --> J[Return nE by Nmodes by nx by ny fields]
+    H -- No --> I[Enforce measured<br/>summed intensity]
+    I --> J[Return nE x Nmodes<br/>x nx x ny fields]
 ```
 
 ### Usage
@@ -539,9 +546,11 @@ File: `library/phase_retrieval_core_dichroic.py`
 For observation `j`, magnetic state `s(j)`, and polarization coefficient `p_j`,
 the shared-charge model is:
 
-```text
-L_j(r) = C(r) + p_j M_s(j)(r).
-```
+$$
+L_j(\mathbf r)
+= C(\mathbf r)
++ p_j M_{s(j)}(\mathbf r).
+$$
 
 `state_labels[j]` identifies the sample state, while
 `polarization_signs[j]` is normally `+1` or `-1`. These names deliberately
@@ -550,26 +559,27 @@ separate sample state from helicity.
 ### Flowchart
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 15, "rankSpacing": 22, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart TD
-    A[Load holograms, state labels, and polarization signs] --> B[Initialize one field per observation]
-    B --> C[Optional warmup schedule]
-    C --> D[Run inner phase-retrieval schedule for every observation]
-    D --> E[Convert fields to complex log-exit waves]
+    A[Load holograms, states,<br/>and polarization signs] --> B[Initialize one field<br/>per observation]
+    B --> C[Optional warmup]
+    C --> D[Run inner schedule<br/>for every observation]
+    D --> E[Convert to complex<br/>log-exit waves]
     E --> F{Dichroic projection}
-    F -- none --> G[Keep independent reconstructions]
-    F -- shared charge --> H[Fit L_j equals C plus p_j M_state]
-    F -- saturated reference --> I[Fit shared charge and state magnetic terms]
-    I --> J[Infer complex response q from saturated states]
-    J --> K{Optional delta, beta, thickness bounds?}
+    F -- none --> G[Keep independent<br/>reconstructions]
+    F -- shared charge --> H[Fit common charge and<br/>state magnetic terms]
+    F -- saturated --> I[Fit charge and<br/>magnetic terms]
+    I --> J[Infer q from<br/>saturated states]
+    J --> K{Optional kt-delta<br/>or kt-beta bounds?}
     K -- No --> L[Keep data-inferred q]
-    K -- Yes --> M[Compute k from photon energy and bound q components]
-    L --> N[Fit real mz maps for all states]
+    K -- Yes --> M[Clip corresponding<br/>q components]
+    L --> N[Fit real mz maps<br/>for all states]
     M --> N
-    G --> O{More outer iterations?}
+    G --> O{More outer<br/>iterations?}
     H --> O
     N --> O
     O -- Yes --> D
-    O -- No --> P[Apply final measured amplitudes and return components]
+    O -- No --> P[Apply measured amplitudes<br/>and return components]
 ```
 
 ### Shared-charge projection
@@ -606,25 +616,29 @@ two-image problem.
 This estimates the magnetic response from the reconstructed saturated state and
 then enforces:
 
-```text
-L_j(r) = C(r) + p_j q(r) mz_s(j)(r),
-```
+$$
+L_j(\mathbf r)
+= C(\mathbf r)
++ p_j q(\mathbf r)m_{z,s(j)}(\mathbf r),
+$$
 
-where `q(r)` is inferred from the data and `mz` is real. With
+where $q(\mathbf r)$ is inferred from the data and $m_z$ is real. With
 
-```text
-n_m = -(delta_m + i beta_m) mz
-phi = phi_c exp(-i k t n_m),
-```
+$$
+n_m = -(\delta_m+i\beta_m)m_z,
+\qquad
+\phi = \phi_c\exp(-ikt\,n_m),
+$$
 
 the inferred unit-magnetization log response is:
 
-```text
-q = i k t (delta_m + i beta_m).
-```
+$$
+q = ikt(\delta_m+i\beta_m)
+  = -kt\beta_m + i\,kt\delta_m.
+$$
 
-The user does not supply `delta_m`, `beta_m`, thickness, or `q`. Instead, the
-user flags at least one state with known saturated magnetization:
+The user does not need to supply $\delta_m$, $\beta_m$, thickness, or $q$.
+Instead, the user flags at least one state with known saturated magnetization:
 
 ```python
 saturated_states = ["saturated_up"]  # interpreted as mz=+1
@@ -649,66 +663,64 @@ components["magnetic_phase_shift"]      #  imag(q) = k*t*delta_m
 components["magnetization_by_state"]
 ```
 
-These are the refractive-index-thickness products measured by the exit wave.
-Absolute `delta_m` and `beta_m` require wavelength and sample thickness:
+These are the dimensionless refractive-index-thickness products measured by
+the exit wave. Even though `k` is known from the illumination energy, the
+holograms determine only:
 
-```text
-delta_m = magnetic_phase_shift / (k t)
-beta_m  = magnetic_log_attenuation / (k t)
-```
+$$
+kt\delta_m
+\qquad\text{and}\qquad
+kt\beta_m.
+$$
 
-Without independently known `t`, holograms cannot distinguish refractive index
-from thickness.
+They cannot determine $t$, $\delta_m$, and $\beta_m$ independently. Absolute
+$\delta_m$ and $\beta_m$ require an independently known sample thickness:
 
-### Optional physical ranges
+$$
+\delta_m
+= \frac{\text{magnetic phase shift}}{kt},
+\qquad
+\beta_m
+= \frac{\text{magnetic log attenuation}}{kt}.
+$$
+
+Without independently known $t$, the retrieval cannot distinguish refractive
+index from thickness.
+
+### Optional product ranges
 
 The default recipe is exclusively data driven and contains no required
 refractive-index prior:
 
 ```python
 {
-    "photon_energy_eV": None,
-    "delta_m_range": None,
-    "beta_m_range": None,
-    "thickness_range_m": None,
+    "kt_delta_m_range": None,
+    "kt_beta_m_range": None,
 }
 ```
 
-If approximate physical ranges are available, they may be imposed as bounds
-inside the joint projection:
+If approximate ranges for the observable products are available, they may be
+imposed directly inside the joint projection:
 
 ```python
 recipe = {
-    "photon_energy_eV": photon_energy_eV,
-    "delta_m_range": (delta_min, delta_max),
-    "beta_m_range": (beta_min, beta_max),
-    "thickness_range_m": (thickness_min_m, thickness_max_m),
+    "kt_delta_m_range": (kt_delta_min, kt_delta_max),
+    "kt_beta_m_range": (kt_beta_min, kt_beta_max),
 }
 ```
 
-The illumination energy is known experimentally and determines the wave number:
+These dimensionless bounds map directly to the inferred complex response:
 
-```text
-k = E / (hbar c).
-```
+$$
+\operatorname{Im}(q) \in \texttt{kt\_delta\_m\_range},
+\qquad
+-\operatorname{Re}(q) \in \texttt{kt\_beta\_m\_range}.
+$$
 
-`photon_energy_eV` is specified in electronvolts and `thickness_range_m` in
-meters. Photon energy and a thickness range are required only when at least one
-of the refractive-index ranges is supplied.
-
-The projection converts these intervals into allowed response-component
-ranges:
-
-```text
-imag(q)  in k * thickness_range_m * delta_m_range
--real(q) in k * thickness_range_m * beta_m_range
-```
-
-and clips the data-inferred response to those intervals before refitting the
-real magnetization maps. The real and imaginary response bounds are applied
-independently, making this a conservative rectangular constraint in complex
-response space. `projection_relaxation` controls how strongly the bounded
-projection is mixed into the current reconstruction.
+The projection clips the two components independently before refitting the
+real magnetization maps. This gives a conservative rectangular constraint in
+complex response space. `projection_relaxation` controls how strongly the
+bounded projection is mixed into the current reconstruction.
 
 The returned diagnostics distinguish the raw and constrained estimates:
 
@@ -719,19 +731,17 @@ components["physical_response_bounds_applied"]
 components["response_bounds"]
 ```
 
-Any subset of `delta_m_range` and `beta_m_range` may be supplied. For example,
-to constrain only `beta_m`:
+Either range may be supplied independently. For example, to constrain only the
+magnetic attenuation product:
 
 ```python
 recipe = {
-    "photon_energy_eV": 780.0,
-    "beta_m_range": (0.01, 0.02),
-    "thickness_range_m": (15e-9, 25e-9),
+    "kt_beta_m_range": (0.01, 0.02),
 }
 ```
 
 This constrains attenuation while leaving the magnetic phase shift data driven.
-If all four entries remain `None`, no such constraint is applied.
+If both entries remain `None`, no such constraint is applied.
 
 ### Opposite-polarization pair
 
@@ -744,11 +754,9 @@ recipe = {
     "outer_iterations": 100,
     "warmup_Nit": 0,
 
-    # Optional; omit all four entries for a data-only reconstruction.
-    "photon_energy_eV": photon_energy_eV,
-    "delta_m_range": (delta_min, delta_max),
-    "beta_m_range": (beta_min, beta_max),
-    "thickness_range_m": (thickness_min_m, thickness_max_m),
+    # Optional; omit both entries for a data-only reconstruction.
+    "kt_delta_m_range": (kt_delta_min, kt_delta_max),
+    "kt_beta_m_range": (kt_beta_min, kt_beta_max),
 }
 
 fields, components, bsmasks, errors = (
@@ -849,5 +857,5 @@ Before interpreting a reconstruction:
 
 The physical projections improve stability only when their assumptions match
 the experiment. A numerically excellent constrained fit can still be biased by
-incorrect spectral data, polarization signs, thickness, magnetic response, or
-state labels.
+incorrect spectral data, polarization signs, response-product bounds, magnetic
+response, or state labels.
