@@ -1457,6 +1457,7 @@ def fourier_field_to_object_log(
     phase = np.angle(obj)
     if unwrap_energy_phase:
         phase = np.unwrap(phase, axis=0)
+
     return np.log(amp) + 1j * phase
 
 
@@ -2573,7 +2574,7 @@ def multi_energy_phase_retrieval_algorithm(
     ``warmup_beta_*``, ``warmup_alpha_*``, and ``warmup_TV_freq`` settings
     override its inherited controls.
 
-    Selectable projection models
+    Selectable projection models (check Eckart–Young–Mirsky theorem for optimal low-rank approximation)
     ----------------------------
     projection_model='none'
         Independent single-energy updates with no cross-energy constraint.
