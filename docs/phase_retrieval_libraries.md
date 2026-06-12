@@ -400,16 +400,14 @@ shape.
 After each energy has undergone its independent phase-retrieval updates, the
 Fourier fields are converted to complex real-space log-objects. Each
 two-dimensional image is flattened, and the energy channels are placed in the
-columns of a matrix:
+columns of a matrix $\mathbf L\in\mathbb C^{P\times n_E}$ defined by:
 
 $$
-\mathbf L =
-\begin{bmatrix}
-L_{1}(\mathbf r_1) & \cdots & L_{n_E}(\mathbf r_1) \\
-\vdots              &        & \vdots \\
-L_{1}(\mathbf r_P) & \cdots & L_{n_E}(\mathbf r_P)
-\end{bmatrix}
-\in \mathbb C^{P\times n_E},
+L_{pE}=L_E(\mathbf r_p),
+\qquad
+p=1,\ldots,P,
+\qquad
+E=1,\ldots,n_E.
 $$
 
 where $P=n_xn_y$ is the number of pixels. A row therefore contains the energy
@@ -441,17 +439,14 @@ $$
 ##### Weighted truncated SVD
 
 If `energy_weights` are provided, the code normalizes them to have unit mean
-and defines the diagonal weight matrix
+and defines a diagonal weight matrix $\mathbf W^{1/2}$. Its diagonal entries
+are:
 
 $$
-\mathbf W^{1/2}
-=
-\begin{bmatrix}
-\sqrt{w_1} &        & 0 \\
-           & \ddots &   \\
-0          &        & \sqrt{w_{n_E}}
-\end{bmatrix}.
+\left(\mathbf W^{1/2}\right)_{EE}=\sqrt{w_E}.
 $$
+
+All off-diagonal entries are zero.
 
 The weighted residual is:
 
@@ -885,18 +880,19 @@ C(\mathbf r),\ M_1(\mathbf r),\ldots,M_S(\mathbf r).
 $$
 
 There are therefore $S+1$ unknown complex values at each pixel. Observation
-$j$, belonging to state $s(j)$, contributes the design-matrix row
+$j$, belonging to state $s(j)$, contributes a design-matrix row whose first
+entry is one, whose entry for state $s(j)$ is $p_j$, and whose other
+state entries are zero. Equivalently:
 
 $$
-\mathbf A_j
-=
-\begin{bmatrix}
-1 & 0 & \cdots & p_j & \cdots & 0
-\end{bmatrix},
+A_{j0}=1,
+\qquad
+A_{j,s(j)}=p_j.
 $$
 
-where $p_j$ appears in the column for state $s(j)$. The decomposition is unique
-only when:
+All other state entries in row $j$ are zero.
+
+The decomposition is unique only when:
 
 $$
 \mathrm{rank}(\mathbf A)=S+1.
