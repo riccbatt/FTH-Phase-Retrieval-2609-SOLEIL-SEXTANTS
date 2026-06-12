@@ -18,17 +18,17 @@ log = logging.getLogger(__name__)
 
 import os
 import time
-try:
-    import CCI_core_cupy as cci
-except ImportError:
-    cci = None
-    log.warning("Could not import CCI_core_cupy; helicity rescaling via cci.dyn_factor will be unavailable.")
 import numpy as np
 from numpy.typing import ArrayLike
 
 import matplotlib.pyplot as plt
 
 from scipy import stats
+
+try:
+    from . import kramers_kronig as kk
+except ImportError:
+    import kramers_kronig as kk
 
     
 #############################################################
@@ -141,7 +141,7 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     if isinstance(start_spec, np.ndarray):
         return start_spec.copy()
 
-    if start_spec in {"pos", "neg"}:
+    if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
         if latest[start_spec] is None:
             raise ValueError(
                 f"{name} requested latest '{start_spec}', "
@@ -278,9 +278,9 @@ def _scale_phase_between_helicities(
     Rescale a reconstruction when it is reused as the starting guess for the
     opposite helicity.
 
-    The scale factor is estimated from the measured hologram intensities using
-    cci.dyn_factor(..., method="correlation"), while excluding invalid pixels
-    from both helicities using bsmask_p/bsmask_n.
+    The scale factor is estimated from a linear fit of the measured hologram
+    intensities, while excluding invalid pixels from both helicities using
+    bsmask_p/bsmask_n.
 
     Parameters
     ----------
@@ -296,8 +296,10 @@ def _scale_phase_between_helicities(
         If True, also apply the fitted offset approximately at intensity level.
         For phase/amplitude fields, the offset treatment is approximate and is
         usually better left False.
-    crop, plot, verbose
-        Passed to cci.dyn_factor.
+    crop : int
+        Number of pixels excluded from every image edge before fitting.
+    plot, verbose : bool
+        Optionally display or print the fitted intensity relation.
 
     Returns
     -------
@@ -318,33 +320,58 @@ def _scale_phase_between_helicities(
 
     valid = (bsmasks[source_helicity] == 0) & (bsmasks[target_helicity] == 0)
 
-    source_masked = np.where(valid, source_intensity, 0)
-    target_masked = np.where(valid, target_intensity, 0)
+    if not isinstance(crop, int) or crop < 0:
+        raise ValueError("crop must be a non-negative integer.")
+    if crop:
+        if 2 * crop >= min(source_intensity.shape):
+            raise ValueError("crop removes the complete intensity image.")
+        interior = np.zeros_like(valid, dtype=bool)
+        interior[crop:-crop, crop:-crop] = True
+        valid &= interior
 
-    if cci is None:
-        raise ImportError("CCI_core_cupy is required for _scale_phase_between_helicities.")
+    xdata = source_intensity[valid].astype(float, copy=False)
+    ydata = target_intensity[valid].astype(float, copy=False)
+    finite = np.isfinite(xdata) & np.isfinite(ydata)
+    xdata = xdata[finite]
+    ydata = ydata[finite]
 
-    factor, offset = cci.dyn_factor(
-        image=target_masked,
-        image_ref=source_masked,
-        method="correlation",
-        crop=crop,
-        plot=plot,
-        verbose=verbose,
-    )
+    if xdata.size < 2:
+        raise ValueError(
+            "At least two jointly valid pixels are required to scale helicities."
+        )
 
-    if factor < 0:
+    source_variance = np.var(xdata)
+    if source_variance > np.finfo(float).eps:
+        factor = np.cov(xdata, ydata, ddof=0)[0, 1] / source_variance
+        offset = np.mean(ydata) - factor * np.mean(xdata)
+    else:
+        source_sum = np.sum(xdata)
+        if abs(source_sum) <= np.finfo(float).eps:
+            raise ValueError("Cannot scale from zero source intensity.")
+        factor = np.sum(ydata) / source_sum
+        offset = 0.0
+
+    if not np.isfinite(factor) or factor < 0:
         raise ValueError(
             f"Negative helicity scaling factor obtained: {factor}. "
             "Check masks/intensities before using this result."
         )
 
-    # dyn_factor fits:
-    #     target_intensity ≈ factor * source_intensity + offset
-    #
     # The reconstruction field amplitude scales as sqrt(intensity).
     factor = max(factor, 1e-12)
     scaled_phase = phase * np.sqrt(factor)
+
+    if verbose:
+        print(f"Linear fit: {factor:.4f}*x + {offset:.4f}")
+
+    if plot:
+        fig, ax = plt.subplots()
+        ax.scatter(xdata, ydata, s=5)
+        order = np.argsort(xdata)
+        ax.plot(xdata[order], factor * xdata[order] + offset, "r-")
+        ax.set_xlabel("Source intensity")
+        ax.set_ylabel("Target intensity")
+        ax.set_title(f"Linear fit: {factor:.4f}*x + {offset:.4f}")
 
     if use_offset:
         # Approximate amplitude-level offset correction.
@@ -380,8 +407,7 @@ def phase_retrieval_algorithm(
         np.ndarray  -> use the supplied array directly
 
     When a reconstruction from a different helicity is reused, it is rescaled
-    using the masked correlation-based normalization from
-    cci.dyn_factor(..., method="correlation").
+    using a masked correlation-based linear normalization.
 
 
     Returns
@@ -399,7 +425,15 @@ def phase_retrieval_algorithm(
 
     # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
-    if phase_retrieval_recipe:
+    if phase_retrieval_recipe is not None:
+        if not isinstance(phase_retrieval_recipe, dict):
+            raise TypeError("phase_retrieval_recipe must be a dictionary.")
+        unknown_keys = set(phase_retrieval_recipe) - set(recipe)
+        if unknown_keys:
+            raise ValueError(
+                "Unknown phase-retrieval recipe key(s): "
+                f"{sorted(unknown_keys)}"
+            )
         recipe.update(phase_retrieval_recipe)
     _verify_valid_phase_retrieval_recipe(recipe)
 
@@ -419,12 +453,12 @@ def phase_retrieval_algorithm(
     # ignoring zeros because zeros usually represent invalid/masked pixels.
     vmin = recipe["hologram_intensity_cutoff_vmin"]
     if vmin >= 0:
-        vals = pos_input.copy()
+        vals = pos_input[(pos_input != 0) & np.isfinite(pos_input)]
         if vals.size:
             mi = np.nanpercentile(vals, vmin)
             pos_input = pos_input - mi
 
-        vals = neg_input.copy()
+        vals = neg_input[(neg_input != 0) & np.isfinite(neg_input)]
         if vals.size:
             mi = np.nanpercentile(vals, vmin)
             neg_input = neg_input - mi
@@ -434,8 +468,8 @@ def phase_retrieval_algorithm(
     pos_input = np.where(np.isnan(pos_input), 0, pos_input)
     neg_input = np.where(np.isnan(neg_input), 0, neg_input)
 
-    # Full-coherence beamstop masks inherit the external mask and mark pixels
-    # with nonpositive corrected intensity as unconstrained.
+    # Full-coherence beamstop masks inherit the external mask and mark negative
+    # corrected intensities as unconstrained. Zero intensity remains constrained.
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
     bsmask_p[pos_input < 0] = 1
@@ -471,11 +505,16 @@ def phase_retrieval_algorithm(
     # Initial mutual-coherence estimate for RL-enabled steps.
     first_startgamma = recipe["Startgamma"][0]
 
-    if first_startgamma is None or isinstance(first_startgamma, str):
+    if first_startgamma is None:
         Startgamma = np.ones(pos_input.shape, dtype=float) * 1e-6 * 2
         Startgamma[pos_input.shape[0] // 2, pos_input.shape[1] // 2] = 0.7
-    else:
+    elif isinstance(first_startgamma, np.ndarray):
         Startgamma = np.asarray(first_startgamma).copy()
+    else:
+        raise ValueError(
+            "The first Startgamma entry cannot be 'pos' or 'neg' "
+            "because no coherence estimate exists yet."
+        )
 
 
     if Startgamma.shape != pos_input.shape:
@@ -496,7 +535,7 @@ def phase_retrieval_algorithm(
         x = np.sqrt(first_input[valid_pix]).ravel()
         y = np.abs(Startimage[valid_pix]).ravel()
 
-        if x.size >= 2:
+        if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
             res = stats.linregress(x, y)
             if abs(res.slope) > 1e-12:
                 Startimage = Startimage / res.slope
@@ -564,7 +603,7 @@ def phase_retrieval_algorithm(
             name="Startimage",
         )
 
-        if start_spec in {"pos", "neg"}:
+        if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
             Phase = _scale_phase_between_helicities(
                 Phase,
                 source_helicity=start_spec,
@@ -988,6 +1027,12 @@ def PhaseRtrv_core(
         raise ValueError("average_img must be > 0.")
     if plot_every <= 0:
         raise ValueError("plot_every must be > 0.")
+    if RL_freq is not None and RL_freq <= 0:
+        raise ValueError("RL_freq must be > 0.")
+    if RL_it < 0:
+        raise ValueError("RL_it must be >= 0.")
+    if TV_freq <= 0:
+        raise ValueError("TV_freq must be > 0.")
 
     l, n = diffract.shape
 
@@ -1037,7 +1082,10 @@ def PhaseRtrv_core(
     if use_RL:
         gamma = np.fft.fftshift(np.asarray(gamma))
         gamma_cp = xp.asarray(gamma)
-        gamma_cp /= xp.sum(gamma_cp)
+        gamma_sum = xp.sum(gamma_cp)
+        if not bool(xp.isfinite(gamma_sum)) or bool(xp.abs(gamma_sum) == 0):
+            raise ValueError("gamma must have a finite, non-zero sum.")
+        gamma_cp /= gamma_sum
 
         convolved = ifft2(fft2(xp.abs(guess_cp) ** 2) * fft2(gamma_cp))
 
@@ -1060,13 +1108,14 @@ def PhaseRtrv_core(
     Error_diffr_list = []
     Error_supp_list = []
 
-    Best_guess = xp.zeros((average_img, l, n), dtype=xp.complex64)
-    Best_error = xp.full((average_img,), xp.inf, dtype=xp.float64)
+    n_best = min(average_img, Nit)
+    Best_guess = xp.zeros((n_best, l, n), dtype=xp.complex64)
+    Best_error = xp.full((n_best,), xp.inf, dtype=xp.float64)
 
     if use_RL:
-        Best_gamma = xp.zeros((average_img, l, n), dtype=xp.complex64)
+        Best_gamma = xp.zeros((n_best, l, n), dtype=xp.complex64)
 
-    start_best_at = max(0, Nit - average_img * 2)
+    start_best_at = max(0, Nit - n_best * 2)
 
     for s in range(Nit):
         beta = float(Beta[s])
@@ -1281,18 +1330,20 @@ def Error_diffract_cp(guess, diffract):
     Num=xp.abs(diffract-guess)**2
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
-    Error=10*xp.log10(Error)
+    with xp.errstate(divide="ignore", invalid="ignore"):
+        Error=10*xp.log10(Error)
     return to_numpy(Error, xp)
+
 
 
 #############################################################
 #       MULTI-ENERGY PHASE RETRIEVAL EXTENSION
-# ############################################################
+#############################################################
 
 
 def _as_energy_stack(holograms, name="holograms"):
     """
-    Validate and return a float array with shape (nE, nx, ny).
+    Validate and return an array with shape (nE, nx, ny).
     """
     arr = np.asarray(holograms)
     if arr.ndim != 3:
@@ -1302,49 +1353,59 @@ def _as_energy_stack(holograms, name="holograms"):
     return arr
 
 
+def _as_energy_mask(mask_pixel, nE, image_shape):
+    """
+    Return an energy-dependent mask stack with shape (nE, nx, ny).
+
+    Accepts either:
+      - mask_pixel.shape == (nx, ny), shared by all energies
+      - mask_pixel.shape == (nE, nx, ny), energy dependent
+    """
+    mask_pixel = np.asarray(mask_pixel)
+    if mask_pixel.shape == image_shape:
+        return np.broadcast_to(mask_pixel, (nE,) + image_shape).copy()
+    if mask_pixel.shape == (nE,) + image_shape:
+        return mask_pixel.copy()
+    raise ValueError(
+        "mask_pixel must have shape (nx, ny) or (nE, nx, ny). "
+        f"Got {mask_pixel.shape}, expected {image_shape} or {(nE,) + image_shape}."
+    )
+
+
 def _prepare_energy_amplitudes(
     holograms,
     mask_pixel,
     hologram_intensity_cutoff_vmin=-1,
 ):
     """
-    Prepare measured amplitudes and beamstop masks for a stack of holograms.
+    Prepare measured amplitudes and energy-specific beamstop/invalid masks.
 
     Parameters
     ----------
     holograms : array, shape (nE, nx, ny)
         Intensity holograms / diffraction intensities, one per energy.
-    mask_pixel : array, shape (nx, ny)
-        External Fourier mask. Nonzero values are treated as unconstrained.
+    mask_pixel : array, shape (nx, ny) or (nE, nx, ny)
+        External Fourier mask(s). Nonzero values are treated as unconstrained.
     hologram_intensity_cutoff_vmin : float
         If >= 0, subtract this percentile independently from each energy before
         clipping negative values to zero.
 
     Returns
     -------
-    amplitudes : array, shape (nE, nx, ny)
-        sqrt(clipped intensity).
-    intensities : array, shape (nE, nx, ny)
-        Cleaned intensity stack.
-    bsmasks : array, shape (nE, nx, ny)
-        Energy-specific masks. Pixels are masked where the external mask is
-        nonzero or where the corrected intensity was negative.
+    amplitudes, intensities, bsmasks : arrays, shape (nE, nx, ny)
     """
     intensities = _as_energy_stack(holograms).astype(float, copy=True)
-    mask_pixel = np.asarray(mask_pixel)
-
-    if mask_pixel.shape != intensities.shape[1:]:
-        raise ValueError("mask_pixel must have shape (nx, ny).")
-
-    nE = intensities.shape[0]
-    bsmasks = np.broadcast_to(mask_pixel, intensities.shape).copy()
+    nE, nx, ny = intensities.shape
+    bsmasks = _as_energy_mask(mask_pixel, nE=nE, image_shape=(nx, ny))
 
     for j in range(nE):
         img = intensities[j]
 
         if hologram_intensity_cutoff_vmin >= 0:
-            mi = np.nanpercentile(img, hologram_intensity_cutoff_vmin)
-            img = img - mi
+            finite = img[(img != 0) & np.isfinite(img)]
+            if finite.size:
+                mi = np.nanpercentile(finite, hologram_intensity_cutoff_vmin)
+                img = img - mi
 
         img = np.where(np.isnan(img), 0, img)
         bsmasks[j, img < 0] = 1
@@ -1354,49 +1415,39 @@ def _prepare_energy_amplitudes(
     return amplitudes, intensities, bsmasks
 
 
-def fourier_field_to_object_log(phase_stack, log_floor=1e-12):
+def fourier_field_to_object_log(
+    phase_stack,
+    log_floor=1e-12,
+    unwrap_energy_phase=True,
+):
     """
-    Convert returned Fourier-domain fields to real-space log-objects.
+    Convert Fourier-domain fields returned by PhaseRtrv_core to real-space
+    complex log-objects.
 
-    ``PhaseRtrv_core`` stores and returns the Fourier-domain field in the same
-    convention as the original library. Inside the core, the corresponding
-    support-domain field is approximately::
+    Inside PhaseRtrv_core, the support-domain object estimate is approximately
 
         object = fft2(fftshift(phase))
 
-    This helper applies that conversion energy by energy and then takes a safe
-    complex logarithm.
-
-    Parameters
-    ----------
-    phase_stack : array, shape (nE, nx, ny)
-        Current Fourier-domain reconstructions.
-    log_floor : float
-        Lower bound for the modulus before taking the logarithm.
-
-    Returns
-    -------
-    L : complex array, shape (nE, nx, ny)
-        Complex log-object stack.
+    for the returned field convention.
     """
     phase_stack = _as_energy_stack(phase_stack, name="phase_stack")
+    if not np.isfinite(log_floor) or log_floor <= 0:
+        raise ValueError("log_floor must be finite and > 0.")
     obj = np.empty_like(phase_stack, dtype=np.complex128)
 
     for j in range(phase_stack.shape[0]):
         obj[j] = np.fft.fft2(np.fft.fftshift(phase_stack[j]))
 
     amp = np.maximum(np.abs(obj), log_floor)
-    return np.log(amp) + 1j * np.angle(obj)
+    phase = np.angle(obj)
+    if unwrap_energy_phase:
+        phase = np.unwrap(phase, axis=0)
+    return np.log(amp) + 1j * phase
 
 
 def object_log_to_fourier_field(L_stack):
     """
     Convert real-space log-objects back to Fourier-domain fields.
-
-    This is the inverse of ``fourier_field_to_object_log`` up to the safe-log
-    clipping used there::
-
-        phase = ifftshift(ifft2(exp(L)))
     """
     L_stack = _as_energy_stack(L_stack, name="L_stack")
     phase_stack = np.empty_like(L_stack, dtype=np.complex128)
@@ -1406,6 +1457,10 @@ def object_log_to_fourier_field(L_stack):
 
     return phase_stack
 
+
+# -------------------------------------------------------------------------
+#  Generic SVD low-rank projection: L_E(r) = C(r) + low-rank residual
+# -------------------------------------------------------------------------
 
 def project_log_object_low_rank(
     L_stack,
@@ -1421,46 +1476,19 @@ def project_log_object_low_rank(
         L_E(r) = C(r) + Delta_E(r),
 
     where C(r) is energy independent and Delta_E(r) has rank ``rank`` over the
-    energy axis.
-
-    Parameters
-    ----------
-    L_stack : complex array, shape (nE, nx, ny)
-        Complex log-object stack.
-    rank : int
-        Number of singular modes retained for the energy-dependent residual.
-        Use rank=1 for one Co-density mode; rank=2 if phase/absorption require
-        two independent spectral modes.
-    static_mode : {"mean", "first", "none"}
-        How to define the energy-independent component before the SVD.
-        "mean" is recommended unless one energy is known to be off-resonance.
-    weights : array-like or None, shape (nE,)
-        Optional positive energy weights for the static mean and SVD. Use this
-        to down-weight noisy energies. The output is returned in the original
-        unweighted coordinates.
-    relaxation : float
-        1.0 applies the projection fully. Values in (0, 1) mix the original and
-        projected log-objects, useful during early iterations.
-    return_components : bool
-        If True, also return C and Delta_rank.
-
-    Returns
-    -------
-    L_projected : complex array, shape (nE, nx, ny)
-        Projected log-object stack.
-    components : dict, optional
-        Returned only when return_components=True.
+    energy axis. This is the unconstrained SVD option.
     """
     L_stack = _as_energy_stack(L_stack, name="L_stack")
 
+    if isinstance(rank, bool) or not isinstance(rank, (int, np.integer)):
+        raise ValueError("rank must be a non-negative integer.")
     if rank < 0:
-        raise ValueError("rank must be >= 0.")
+        raise ValueError("rank must be a non-negative integer.")
     if not (0 <= relaxation <= 1):
         raise ValueError("relaxation must be between 0 and 1.")
 
     nE, nx, ny = L_stack.shape
     rank = min(int(rank), nE)
-
     Lmat = L_stack.reshape(nE, -1).T  # pixels x energies
 
     if weights is None:
@@ -1490,8 +1518,6 @@ def project_log_object_low_rank(
         Delta_rank = np.zeros_like(Delta)
         singular_values = np.array([], dtype=float)
     else:
-        # Weighted low-rank approximation over the energy axis. The weighting
-        # is useful when one hologram is much noisier than another.
         Delta_w = Delta * sqrt_w[None, :]
         U, s, Vh = np.linalg.svd(Delta_w, full_matrices=False)
         Delta_rank_w = (U[:, :rank] * s[:rank]) @ Vh[:rank, :]
@@ -1506,6 +1532,7 @@ def project_log_object_low_rank(
 
     if return_components:
         components = {
+            "projection_model": "svd",
             "static_log_object": C.reshape(nx, ny),
             "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
             "singular_values": singular_values,
@@ -1524,10 +1551,7 @@ def project_fourier_fields_low_rank(
     log_floor=1e-12,
     return_components=False,
 ):
-    """
-    Apply the static + low-rank multi-energy projection directly to the current
-    Fourier-domain phase-retrieval fields.
-    """
+    """Apply the SVD static + low-rank projection to Fourier-domain fields."""
     L = fourier_field_to_object_log(phase_stack, log_floor=log_floor)
     projected = project_log_object_low_rank(
         L,
@@ -1545,24 +1569,563 @@ def project_fourier_fields_low_rank(
     return object_log_to_fourier_field(projected)
 
 
+# -------------------------------------------------------------------------
+#  Explicit spectral model: L_E(r) = C(r) + M(r) a_E
+# -------------------------------------------------------------------------
+
+def _energy_axis_for_kk(energy_values, nE):
+    if energy_values is None:
+        raise ValueError("energy_values must be provided for KK-based constraints.")
+    energy_values = np.asarray(energy_values, dtype=float)
+    if energy_values.shape != (nE,):
+        raise ValueError("energy_values must have shape (nE,).")
+    if np.any(~np.isfinite(energy_values)):
+        raise ValueError("energy_values contains non-finite values.")
+    if np.any(energy_values <= 0):
+        raise ValueError("energy_values must be strictly positive for the KK transform.")
+    if np.any(np.diff(energy_values) <= 0):
+        raise ValueError("energy_values must be strictly increasing.")
+    return energy_values
+
+
+def _normalize_vector(v, mode="l2"):
+    v = np.asarray(v, dtype=float)
+    if mode == "none":
+        return v.copy()
+    if mode == "maxabs":
+        scale = np.nanmax(np.abs(v))
+    elif mode == "l2":
+        scale = np.linalg.norm(v)
+    elif mode == "std":
+        scale = np.nanstd(v)
+    else:
+        raise ValueError("normalization mode must be 'none', 'maxabs', 'l2', or 'std'.")
+    if not np.isfinite(scale) or scale <= 0:
+        return v.copy()
+    return v / scale
+
+
+def _fit_scale_offset(reference, target, fit_offset=True):
+    """
+    Fit target ≈ scale * reference + offset using real least squares.
+    """
+    reference = np.asarray(reference, dtype=float)
+    target = np.asarray(target, dtype=float)
+    ok = np.isfinite(reference) & np.isfinite(target)
+    if np.count_nonzero(ok) < 2:
+        return 1.0, 0.0
+    x = reference[ok]
+    y = target[ok]
+    if fit_offset:
+        A = np.column_stack([x, np.ones_like(x)])
+        scale, offset = np.linalg.lstsq(A, y, rcond=None)[0]
+    else:
+        denom = np.dot(x, x)
+        scale = 1.0 if denom <= 0 else np.dot(x, y) / denom
+        offset = 0.0
+    return float(scale), float(offset)
+
+
+def _canonicalize_rank1_factors(
+    spatial_factor,
+    spectral_factor,
+    known_beta_spectrum=None,
+    absorption_part="real",
+):
+    """
+    Fix the arbitrary complex phase/sign of a rank-1 factorization.
+
+    The factors M and a can be transformed as
+    ``M -> M*exp(-i*theta)``, ``a -> a*exp(i*theta)`` without changing M*a.
+    Choose theta so that M is as real-valued as possible. If a known absorption
+    spectrum is available, use it to select the remaining sign.
+    """
+    spatial_factor = np.asarray(spatial_factor, dtype=np.complex128).copy()
+    spectral_factor = np.asarray(spectral_factor, dtype=np.complex128).copy()
+
+    phase_moment = np.sum(spatial_factor**2)
+    if np.isfinite(phase_moment) and abs(phase_moment) > 0:
+        theta = 0.5 * np.angle(phase_moment)
+        spatial_factor *= np.exp(-1j * theta)
+        spectral_factor *= np.exp(1j * theta)
+
+    flip = False
+    if known_beta_spectrum is not None:
+        known = np.asarray(known_beta_spectrum, dtype=float)
+        retrieved = _extract_absorption_part(
+            spectral_factor,
+            absorption_part=absorption_part,
+        )
+        if known.shape == retrieved.shape:
+            known_centered = known - np.mean(known)
+            retrieved_centered = retrieved - np.mean(retrieved)
+            if np.dot(known_centered, retrieved_centered) < 0:
+                flip = True
+    elif spatial_factor.size:
+        anchor = spatial_factor[np.argmax(np.abs(spatial_factor))]
+        if np.real(anchor) < 0:
+            flip = True
+
+    if flip:
+        spatial_factor *= -1
+        spectral_factor *= -1
+
+    return spatial_factor, spectral_factor
+
+
+def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real"):
+    """
+    Build a complex spectrum from absorptive and dispersive real vectors.
+
+    absorption_part defines where the absorptive part lives in the log-object
+    spectral coefficient:
+      - 'real': a_E = absorption + 1j * dispersion
+      - 'imag': a_E = dispersion + 1j * absorption
+
+    For an exit-wave log-object, absorption often appears in the real part of
+    log(O), while phase/refraction appears in the imaginary part. Therefore
+    'real' is the default.
+    """
+    absorption = np.asarray(absorption, dtype=float)
+    dispersion = np.asarray(dispersion, dtype=float)
+    if absorption_part == "real":
+        return absorption + 1j * dispersion
+    if absorption_part == "imag":
+        return dispersion + 1j * absorption
+    raise ValueError("absorption_part must be 'real' or 'imag'.")
+
+
+def _extract_absorption_part(a, absorption_part="real"):
+    if absorption_part == "real":
+        return np.real(a)
+    if absorption_part == "imag":
+        return np.imag(a)
+    raise ValueError("absorption_part must be 'real' or 'imag'.")
+
+
+def _extract_dispersion_part(a, absorption_part="real"):
+    if absorption_part == "real":
+        return np.imag(a)
+    if absorption_part == "imag":
+        return np.real(a)
+    raise ValueError("absorption_part must be 'real' or 'imag'.")
+
+
+def constrain_complex_spectrum(
+    a_initial,
+    spectral_constraint="free",
+    energy_values=None,
+    known_beta_spectrum=None,
+    known_delta_spectrum=None,
+    absorption_part="real",
+    kk_sign=1.0,
+    kk_subtract_baseline=True,
+    kk_normalize_input=False,
+    known_beta_normalization="none",
+    fit_known_beta_scale=True,
+    fit_known_beta_offset=True,
+    preserve_retrieved_dispersion_for_known_beta=True,
+):
+    """
+    Constrain the complex energy dependence a_E.
+
+    Supported constraints
+    ---------------------
+    free / none:
+        Leave a_E unconstrained.
+
+    kk:
+        Take the absorption-like part of the retrieved a_E and compute the
+        dispersion-like part from a discrete Kramers-Kronig transform.
+
+    known_beta:
+        Replace the absorption-like part of a_E by a supplied beta spectrum.
+        The dispersion-like part is kept from the retrieved a_E by default.
+
+    known_beta_kk:
+        Replace the absorption-like part by a supplied beta spectrum and
+        compute the dispersion-like part from Kramers-Kronig. If
+        ``known_delta_spectrum`` is supplied, use that externally prepared
+        delta spectrum instead. This is the preferred route when beta was
+        extended with broad-range Henke/CXRO data before the transform.
+
+    Notes
+    -----
+    ``known_beta_spectrum`` is beta(E), the imaginary part of the refractive
+    index, not raw absorbance or arbitrary-unit XAS. Conversion and broad-range
+    spectral extension live in ``library.kramers_kronig``. KK integration uses
+    the exact piecewise-linear specialization of Watts' piecewise
+    Laurent-polynomial method.
+    """
+    a_initial = np.asarray(a_initial, dtype=np.complex128)
+    nE = a_initial.size
+    mode = str(spectral_constraint).lower()
+    if mode in {"none", "free", "unconstrained"}:
+        return a_initial.copy(), {
+            "spectral_constraint": "free",
+            "spectrum_initial": a_initial.copy(),
+            "spectrum_constrained": a_initial.copy(),
+        }
+
+    retrieved_abs = _extract_absorption_part(a_initial, absorption_part)
+    retrieved_disp = _extract_dispersion_part(a_initial, absorption_part)
+
+    if mode in {"kk", "kramers-kronig", "kramers_kronig"}:
+        E = _energy_axis_for_kk(energy_values, nE)
+        absorption = retrieved_abs.copy()
+        dispersion = kk_sign * kk.beta_to_delta(
+            E,
+            absorption,
+            subtract_baseline=kk_subtract_baseline,
+            normalize_input=kk_normalize_input,
+            output_mean=np.mean(retrieved_disp),
+        )
+        a = _complex_spectrum_from_parts(absorption, dispersion, absorption_part)
+
+    elif mode in {"known_beta", "known-beta"}:
+        if known_beta_spectrum is None:
+            raise ValueError("known_beta_spectrum is required.")
+        known_beta = np.asarray(known_beta_spectrum, dtype=float)
+        if known_beta.shape != (nE,):
+            raise ValueError("known_beta_spectrum must have shape (nE,).")
+        if np.any(~np.isfinite(known_beta)):
+            raise ValueError("known_beta_spectrum contains non-finite values.")
+        known_beta = _normalize_vector(known_beta, mode=known_beta_normalization)
+        if fit_known_beta_scale:
+            scale, offset = _fit_scale_offset(
+                known_beta,
+                retrieved_abs,
+                fit_offset=fit_known_beta_offset,
+            )
+            absorption = scale * known_beta + offset
+        else:
+            absorption = known_beta
+
+        if preserve_retrieved_dispersion_for_known_beta:
+            dispersion = retrieved_disp.copy()
+        else:
+            dispersion = np.zeros_like(absorption)
+        a = _complex_spectrum_from_parts(absorption, dispersion, absorption_part)
+
+    elif mode in {"known_beta_kk", "known-beta-kk"}:
+        E = _energy_axis_for_kk(energy_values, nE)
+        if known_beta_spectrum is None:
+            raise ValueError("known_beta_spectrum is required.")
+        known_beta = np.asarray(known_beta_spectrum, dtype=float)
+        if known_beta.shape != (nE,):
+            raise ValueError("known_beta_spectrum must have shape (nE,).")
+        if np.any(~np.isfinite(known_beta)):
+            raise ValueError("known_beta_spectrum contains non-finite values.")
+        known_beta = _normalize_vector(known_beta, mode=known_beta_normalization)
+        if fit_known_beta_scale:
+            scale, offset = _fit_scale_offset(
+                known_beta,
+                retrieved_abs,
+                fit_offset=fit_known_beta_offset,
+            )
+            absorption = scale * known_beta + offset
+        else:
+            scale = 1.0
+            absorption = known_beta
+
+        if known_delta_spectrum is None:
+            dispersion = kk_sign * kk.beta_to_delta(
+                E,
+                absorption,
+                subtract_baseline=kk_subtract_baseline,
+                output_mean=np.mean(retrieved_disp),
+            )
+        else:
+            known_delta = np.asarray(known_delta_spectrum, dtype=float)
+            if known_delta.shape != (nE,):
+                raise ValueError("known_delta_spectrum must have shape (nE,).")
+            if np.any(~np.isfinite(known_delta)):
+                raise ValueError("known_delta_spectrum contains non-finite values.")
+            dispersion = kk_sign * scale * known_delta
+            dispersion = dispersion - np.mean(dispersion) + np.mean(retrieved_disp)
+        a = _complex_spectrum_from_parts(absorption, dispersion, absorption_part)
+
+    else:
+        raise ValueError(
+            "spectral_constraint must be one of 'free', 'kk', "
+            "'known_beta', or 'known_beta_kk'."
+        )
+
+    return a.astype(np.complex128), {
+        "spectral_constraint": mode,
+        "spectrum_initial": a_initial.copy(),
+        "spectrum_constrained": a.copy(),
+        "absorption_part": absorption.copy(),
+        "dispersion_part": dispersion.copy(),
+        "absorption_part_location": absorption_part,
+    }
+
+
+def project_log_object_rank1_spectral(
+    L_stack,
+    static_mode="mean",
+    weights=None,
+    relaxation=1.0,
+    spectral_constraint="free",
+    energy_values=None,
+    known_beta_spectrum=None,
+    known_delta_spectrum=None,
+    absorption_part="real",
+    kk_sign=1.0,
+    kk_subtract_baseline=True,
+    kk_normalize_input=False,
+    known_beta_normalization="none",
+    fit_known_beta_scale=True,
+    fit_known_beta_offset=True,
+    return_components=False,
+):
+    """
+    Project a log-object stack onto the explicit model
+
+        L_E(r) = C(r) + M(r) a_E.
+
+    This is a rank-1 spectral factorization with an explicit complex spectral
+    vector a_E. The vector can be unconstrained, KK-constrained, constrained by a
+    known beta spectrum, or constrained by known beta + KK.
+    """
+    L_stack = _as_energy_stack(L_stack, name="L_stack")
+    if not (0 <= relaxation <= 1):
+        raise ValueError("relaxation must be between 0 and 1.")
+
+    nE, nx, ny = L_stack.shape
+    Lmat = L_stack.reshape(nE, -1).T  # pixels x energies
+
+    if weights is None:
+        w = np.ones(nE, dtype=float)
+    else:
+        w = np.asarray(weights, dtype=float)
+        if w.shape != (nE,):
+            raise ValueError("weights must have shape (nE,).")
+        if np.any(w <= 0):
+            raise ValueError("weights must be strictly positive.")
+    w = w / np.mean(w)
+    sqrt_w = np.sqrt(w)
+
+    if static_mode == "mean":
+        C = np.sum(Lmat * w[None, :], axis=1) / np.sum(w)
+    elif static_mode == "first":
+        C = Lmat[:, 0].copy()
+    elif static_mode == "none":
+        C = np.zeros(Lmat.shape[0], dtype=Lmat.dtype)
+    else:
+        raise ValueError("static_mode must be 'mean', 'first', or 'none'.")
+
+    Delta = Lmat - C[:, None]
+
+    # Initial weighted rank-1 factorization.
+    Delta_w = Delta * sqrt_w[None, :]
+    U, s, Vh = np.linalg.svd(Delta_w, full_matrices=False)
+    if s.size == 0:
+        M = np.zeros(Lmat.shape[0], dtype=np.complex128)
+        a_initial = np.zeros(nE, dtype=np.complex128)
+    else:
+        M_w = U[:, 0] * s[0]
+        a_w = Vh[0, :]
+        a_initial = a_w / sqrt_w
+        M = M_w.copy()
+
+    M, a_initial = _canonicalize_rank1_factors(
+        M,
+        a_initial,
+        known_beta_spectrum=known_beta_spectrum,
+        absorption_part=absorption_part,
+    )
+
+    a_constrained, spectral_info = constrain_complex_spectrum(
+        a_initial,
+        spectral_constraint=spectral_constraint,
+        energy_values=energy_values,
+        known_beta_spectrum=known_beta_spectrum,
+        known_delta_spectrum=known_delta_spectrum,
+        absorption_part=absorption_part,
+        kk_sign=kk_sign,
+        kk_subtract_baseline=kk_subtract_baseline,
+        kk_normalize_input=kk_normalize_input,
+        known_beta_normalization=known_beta_normalization,
+        fit_known_beta_scale=fit_known_beta_scale,
+        fit_known_beta_offset=fit_known_beta_offset,
+    )
+
+    # Refit M(r) for the constrained spectral vector a_E by weighted complex LS:
+    # minimize_E sum w_E |Delta_pE - M_p a_E|^2.
+    denom = np.sum(w * np.abs(a_constrained) ** 2)
+    if denom <= 0 or not np.isfinite(denom):
+        M = np.zeros(Lmat.shape[0], dtype=np.complex128)
+    else:
+        M = np.sum(
+            Delta * (w * np.conj(a_constrained))[None, :],
+            axis=1,
+        ) / denom
+
+    Delta_rank = M[:, None] * a_constrained[None, :]
+    Lproj_mat = C[:, None] + Delta_rank
+    Lproj = Lproj_mat.T.reshape(nE, nx, ny)
+
+    if relaxation < 1:
+        Lproj = (1 - relaxation) * L_stack + relaxation * Lproj
+
+    if return_components:
+        components = {
+            "projection_model": "rank1_spectral",
+            "static_log_object": C.reshape(nx, ny),
+            "spectral_spatial_map": M.reshape(nx, ny),
+            "spectral_coefficients_initial": a_initial,
+            "spectral_coefficients": a_constrained,
+            "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
+            "singular_values": s,
+        }
+        components.update(spectral_info)
+        return Lproj, components
+
+    return Lproj
+
+
+def project_fourier_fields_rank1_spectral(
+    phase_stack,
+    static_mode="mean",
+    weights=None,
+    relaxation=1.0,
+    log_floor=1e-12,
+    spectral_constraint="free",
+    energy_values=None,
+    known_beta_spectrum=None,
+    known_delta_spectrum=None,
+    absorption_part="real",
+    kk_sign=1.0,
+    kk_subtract_baseline=True,
+    kk_normalize_input=False,
+    known_beta_normalization="none",
+    fit_known_beta_scale=True,
+    fit_known_beta_offset=True,
+    return_components=False,
+):
+    """Apply the explicit C + M*a_E projection to Fourier-domain fields."""
+    L = fourier_field_to_object_log(phase_stack, log_floor=log_floor)
+    projected = project_log_object_rank1_spectral(
+        L,
+        static_mode=static_mode,
+        weights=weights,
+        relaxation=relaxation,
+        spectral_constraint=spectral_constraint,
+        energy_values=energy_values,
+        known_beta_spectrum=known_beta_spectrum,
+        known_delta_spectrum=known_delta_spectrum,
+        absorption_part=absorption_part,
+        kk_sign=kk_sign,
+        kk_subtract_baseline=kk_subtract_baseline,
+        kk_normalize_input=kk_normalize_input,
+        known_beta_normalization=known_beta_normalization,
+        fit_known_beta_scale=fit_known_beta_scale,
+        fit_known_beta_offset=fit_known_beta_offset,
+        return_components=return_components,
+    )
+
+    if return_components:
+        Lproj, components = projected
+        return object_log_to_fourier_field(Lproj), components
+
+    return object_log_to_fourier_field(projected)
+
+
+def project_fourier_fields_multi_energy(
+    phase_stack,
+    projection_model="svd",
+    rank=1,
+    static_mode="mean",
+    weights=None,
+    relaxation=1.0,
+    log_floor=1e-12,
+    spectral_constraint="free",
+    energy_values=None,
+    known_beta_spectrum=None,
+    known_delta_spectrum=None,
+    absorption_part="real",
+    kk_sign=1.0,
+    kk_subtract_baseline=True,
+    kk_normalize_input=False,
+    known_beta_normalization="none",
+    fit_known_beta_scale=True,
+    fit_known_beta_offset=True,
+    return_components=False,
+):
+    """
+    Dispatcher for the selectable multi-energy projection models.
+
+    projection_model options
+    ------------------------
+    'none':
+        No multi-energy constraint.
+    'svd' or 'low_rank':
+        Generic SVD projection, L_E = C + rank-K residual.
+    'rank1_spectral':
+        Explicit physical model, L_E = C + M*a_E, with optional spectral
+        constraints on the complex energy dependence a_E.
+    """
+    model = str(projection_model).lower()
+    if model in {"none", "no", "off", "unconstrained"}:
+        if return_components:
+            return phase_stack, {"projection_model": "none"}
+        return phase_stack
+
+    if model in {"svd", "low_rank", "low-rank"}:
+        return project_fourier_fields_low_rank(
+            phase_stack,
+            rank=rank,
+            static_mode=static_mode,
+            weights=weights,
+            relaxation=relaxation,
+            log_floor=log_floor,
+            return_components=return_components,
+        )
+
+    if model in {"rank1_spectral", "spectral", "explicit", "cma", "c+m*a"}:
+        return project_fourier_fields_rank1_spectral(
+            phase_stack,
+            static_mode=static_mode,
+            weights=weights,
+            relaxation=relaxation,
+            log_floor=log_floor,
+            spectral_constraint=spectral_constraint,
+            energy_values=energy_values,
+            known_beta_spectrum=known_beta_spectrum,
+            known_delta_spectrum=known_delta_spectrum,
+            absorption_part=absorption_part,
+            kk_sign=kk_sign,
+            kk_subtract_baseline=kk_subtract_baseline,
+            kk_normalize_input=kk_normalize_input,
+            known_beta_normalization=known_beta_normalization,
+            fit_known_beta_scale=fit_known_beta_scale,
+            fit_known_beta_offset=fit_known_beta_offset,
+            return_components=return_components,
+        )
+
+    raise ValueError(
+        "projection_model must be 'none', 'svd'/'low_rank', or 'rank1_spectral'."
+    )
+
+
+# -------------------------------------------------------------------------
+#  Multi-energy reconstruction driver
+# -------------------------------------------------------------------------
+
 def default_multi_energy_phase_retrieval_recipe():
     """
     Return default settings for joint multi-energy phase retrieval.
 
-    The reconstruction alternates short single-energy updates with a projection
-    onto a shared energy-independent component plus a rank-K energy-dependent
-    component.
+    The reconstruction alternates short single-energy updates with an optional
+    projection that couples the object estimates across energy.
     """
     return {
+        # Single-energy update settings.
         "mode": "HAPRE",
         "outer_iterations": 300,
         "inner_iterations": 1,
         "warmup_iterations": 20,
-        "rank": 1,
-        "projection_every": 1,
-        "projection_relaxation": 1.0,
-        "projection_start": 0,
-        "projection_static_mode": "mean",
         "shuffle_energies": True,
         "random_seed": None,
         "beta_zero": 0.5,
@@ -1573,10 +2136,153 @@ def default_multi_energy_phase_retrieval_recipe():
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
+        "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
-        "log_floor": 1e-12,
+
+        # Multi-energy projection settings.
+        "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
+        "rank": 1,
+        "projection_every": 1,
+        "projection_relaxation": 1.0,
+        "projection_start": 0,
+        "projection_static_mode": "mean",
         "energy_weights": None,
+        "log_floor": 1e-12,
+
+        # Explicit C + M*a_E spectral constraint settings.
+        "spectral_constraint": "free",  # 'free', 'kk', 'known_beta', 'known_beta_kk'
+        "energy_values": None,
+        "known_beta_spectrum": None,
+        "known_delta_spectrum": None,
+        "absorption_part": "real",  # absorption-like part of log-object spectrum: 'real' or 'imag'
+        "kk_sign": 1.0,
+        "kk_subtract_baseline": True,
+        "kk_normalize_input": False,
+        "known_beta_normalization": "none",  # 'none', 'maxabs', 'l2', 'std'
+        "fit_known_beta_scale": True,
+        "fit_known_beta_offset": True,
     }
+
+
+def _verify_multi_energy_recipe(recipe, nE):
+    allowed_models = {
+        "none",
+        "no",
+        "off",
+        "unconstrained",
+        "svd",
+        "low_rank",
+        "low-rank",
+        "rank1_spectral",
+        "spectral",
+        "explicit",
+        "cma",
+        "c+m*a",
+    }
+    allowed_spectral_constraints = {
+        "none",
+        "free",
+        "unconstrained",
+        "kk",
+        "kramers-kronig",
+        "kramers_kronig",
+        "known_beta",
+        "known-beta",
+        "known_beta_kk",
+        "known-beta-kk",
+    }
+
+    model = str(recipe["projection_model"]).lower()
+    if model not in allowed_models:
+        raise ValueError(
+            "projection_model must be 'none', 'svd'/'low_rank', "
+            "or 'rank1_spectral'."
+        )
+
+    integer_keys = [
+        "outer_iterations",
+        "inner_iterations",
+        "warmup_iterations",
+        "projection_every",
+        "projection_start",
+        "average_img",
+    ]
+    for key in integer_keys:
+        value = recipe[key]
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(f"{key} must be an integer.")
+
+    if recipe["outer_iterations"] <= 0:
+        raise ValueError("outer_iterations must be > 0.")
+    if recipe["inner_iterations"] <= 0:
+        raise ValueError("inner_iterations must be > 0.")
+    if recipe["warmup_iterations"] < 0:
+        raise ValueError("warmup_iterations must be >= 0.")
+    if recipe["projection_every"] <= 0:
+        raise ValueError("projection_every must be > 0.")
+    if recipe["projection_start"] < 0:
+        raise ValueError("projection_start must be >= 0.")
+    if recipe["average_img"] <= 0:
+        raise ValueError("average_img must be > 0.")
+    if not isinstance(recipe["Fourier_last"], bool):
+        raise ValueError("Fourier_last must be bool.")
+    if not isinstance(recipe["final_fourier_constraint"], bool):
+        raise ValueError("final_fourier_constraint must be bool.")
+    if recipe["plot_every"] <= 0:
+        raise ValueError("plot_every must be > 0.")
+    if recipe["TV_freq"] <= 0:
+        raise ValueError("TV_freq must be > 0.")
+    if not (0 <= recipe["projection_relaxation"] <= 1):
+        raise ValueError("projection_relaxation must be between 0 and 1.")
+
+    if isinstance(recipe["rank"], bool) or not isinstance(
+        recipe["rank"], (int, np.integer)
+    ):
+        raise ValueError("rank must be a non-negative integer.")
+    if recipe["rank"] < 0:
+        raise ValueError("rank must be a non-negative integer.")
+
+    weights = recipe["energy_weights"]
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != (nE,) or np.any(~np.isfinite(weights)):
+            raise ValueError("energy_weights must be finite with shape (nE,).")
+        if np.any(weights <= 0):
+            raise ValueError("energy_weights must be strictly positive.")
+
+    if model in {"rank1_spectral", "spectral", "explicit", "cma", "c+m*a"}:
+        spectral_mode = str(recipe["spectral_constraint"]).lower()
+        if spectral_mode not in allowed_spectral_constraints:
+            raise ValueError(
+                "spectral_constraint must be one of 'free', 'kk', "
+                "'known_beta', or 'known_beta_kk'."
+            )
+        if spectral_mode in {
+            "kk",
+            "kramers-kronig",
+            "kramers_kronig",
+            "known_beta_kk",
+            "known-beta-kk",
+        }:
+            _energy_axis_for_kk(recipe["energy_values"], nE)
+        if spectral_mode in {
+            "known_beta",
+            "known-beta",
+            "known_beta_kk",
+            "known-beta-kk",
+        }:
+            known = np.asarray(recipe["known_beta_spectrum"], dtype=float)
+            if known.shape != (nE,) or np.any(~np.isfinite(known)):
+                raise ValueError(
+                    "known_beta_spectrum must be finite with shape (nE,)."
+                )
+            known_delta = recipe["known_delta_spectrum"]
+            if known_delta is not None:
+                known_delta = np.asarray(known_delta, dtype=float)
+                if known_delta.shape != (nE,) or np.any(~np.isfinite(known_delta)):
+                    raise ValueError(
+                        "known_delta_spectrum must be finite with shape (nE,)."
+                    )
 
 
 def multi_energy_phase_retrieval_algorithm(
@@ -1590,54 +2296,84 @@ def multi_energy_phase_retrieval_algorithm(
     Jointly reconstruct several same-sample holograms measured at different
     photon energies.
 
-    This is designed for a Co-edge DyCo measurement with linear light and no
-    magnetic contrast. The enforced model is
+    Selectable projection models
+    ----------------------------
+    projection_model='none'
+        Independent single-energy updates with no cross-energy constraint.
 
-        log O_E(r) = C(r) + Delta_E(r),
+    projection_model='svd'
+        Generic static + low-rank model:
+            L_E(r) = C(r) + Delta_E(r), rank(Delta) <= K.
 
-    where C(r) is common to all energies and Delta_E(r) is low-rank over energy.
-    For a single Co composition/thickness mode, use rank=1. Use rank=2 if the
-    data require two independent resonant modes, for example imperfectly coupled
-    phase and absorption contrast.
+    projection_model='rank1_spectral'
+        Explicit spectral model:
+            L_E(r) = C(r) + M(r) a_E.
+        Here a_E is a complex energy dependence that can be constrained by
+        Kramers-Kronig or by a known absorption spectrum.
+
+    Spectral constraints for projection_model='rank1_spectral'
+    ----------------------------------------------------------
+    spectral_constraint='free'
+        Fit arbitrary complex a_E.
+
+    spectral_constraint='kk'
+        Use the retrieved absorption-like part of a_E and compute the
+        dispersion-like part via a discrete Kramers-Kronig transform.
+
+    spectral_constraint='known_beta'
+        Replace the absorption-like part of a_E by supplied beta(E), the
+        imaginary part of the refractive index.
+
+    spectral_constraint='known_beta_kk'
+        Use supplied beta(E) and either supplied delta(E), or compute delta via
+        the standalone Kramers-Kronig library.
 
     Parameters
     ----------
     holograms : array, shape (nE, nx, ny)
         Intensity holograms / diffraction intensities at different energies.
-    mask_pixel : array, shape (nx, ny)
+    mask_pixel : array, shape (nx, ny) or (nE, nx, ny)
         Fourier-domain invalid-pixel mask. Nonzero values are unconstrained.
     supportmask : array, shape (nx, ny)
-        Real-space support mask used by ``PhaseRtrv_core``.
+        Real-space support mask used by PhaseRtrv_core.
     multi_energy_recipe : dict or None
-        Overrides entries from ``default_multi_energy_phase_retrieval_recipe``.
+        Overrides entries from default_multi_energy_phase_retrieval_recipe().
     start_fields : array or None, shape (nE, nx, ny)
-        Optional initial Fourier-domain fields. If None, all energies start
-        from the support-mask initialization used by the original library.
+        Optional initial Fourier-domain fields.
 
     Returns
     -------
     retrieved : array, shape (nE, nx, ny)
         Final Fourier-domain reconstructions, one per energy.
     components : dict
-        Final static and energy-dependent log-object components.
+        Static/energy-dependent components from the final cross-energy
+        projection. If ``final_fourier_constraint`` is True, these components
+        describe the fields immediately before the final measured-amplitude
+        constraint; the dictionary records that constraint under
+        ``final_fourier_constraint_applied``.
     bsmasks : array, shape (nE, nx, ny)
         Energy-specific beamstop/invalid masks.
     error : dict
         Error history and projection diagnostics.
     """
     recipe = default_multi_energy_phase_retrieval_recipe()
-    if multi_energy_recipe:
+    if multi_energy_recipe is not None:
+        if not isinstance(multi_energy_recipe, dict):
+            raise TypeError("multi_energy_recipe must be a dictionary.")
+        unknown_keys = set(multi_energy_recipe) - set(recipe)
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown multi-energy recipe key(s): {sorted(unknown_keys)}"
+            )
         recipe.update(multi_energy_recipe)
 
     holograms = _as_energy_stack(holograms)
     supportmask = np.asarray(supportmask)
-    mask_pixel = np.asarray(mask_pixel)
 
     nE, nx, ny = holograms.shape
+    _verify_multi_energy_recipe(recipe, nE)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
-    if mask_pixel.shape != (nx, ny):
-        raise ValueError("mask_pixel must have shape (nx, ny).")
 
     amplitudes, intensities, bsmasks = _prepare_energy_amplitudes(
         holograms,
@@ -1645,19 +2381,20 @@ def multi_energy_phase_retrieval_algorithm(
         hologram_intensity_cutoff_vmin=recipe["hologram_intensity_cutoff_vmin"],
     )
 
+    mask_stack = _as_energy_mask(mask_pixel, nE=nE, image_shape=(nx, ny))
+
     if start_fields is None:
         start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
         fields = np.repeat(start[None, :, :], nE, axis=0).astype(np.complex128)
 
         # Rough per-energy amplitude normalization, analogous to the original
         # single-energy initialization.
-        valid = (mask_pixel == 0)
         for j in range(nE):
-            valid_j = valid & (intensities[j] > 0)
+            valid_j = (mask_stack[j] == 0) & (intensities[j] > 0)
             if np.any(valid_j):
                 x = amplitudes[j][valid_j].ravel()
                 y = np.abs(fields[j][valid_j]).ravel()
-                if x.size >= 2:
+                if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
                     res = stats.linregress(x, y)
                     if abs(res.slope) > 1e-12:
                         fields[j] = fields[j] / res.slope
@@ -1678,8 +2415,6 @@ def multi_energy_phase_retrieval_algorithm(
 
     start_time = time.time()
 
-    # Optional independent warmup: short reconstructions per energy before the
-    # low-rank model is enforced.
     warmup = int(recipe["warmup_iterations"])
     if warmup > 0:
         for j in range(nE):
@@ -1719,12 +2454,7 @@ def multi_energy_phase_retrieval_algorithm(
     projection_every = int(recipe["projection_every"])
     projection_start = int(recipe["projection_start"])
 
-    if outer_iterations <= 0:
-        raise ValueError("outer_iterations must be > 0.")
-    if inner_iterations <= 0:
-        raise ValueError("inner_iterations must be > 0.")
-    if projection_every <= 0:
-        raise ValueError("projection_every must be > 0.")
+    components = {"projection_model": recipe["projection_model"]}
 
     for outer in range(outer_iterations):
         if recipe["shuffle_energies"]:
@@ -1770,33 +2500,69 @@ def multi_energy_phase_retrieval_algorithm(
         )
 
         if do_projection:
-            fields, components = project_fourier_fields_low_rank(
+            fields, components = project_fourier_fields_multi_energy(
                 fields,
+                projection_model=recipe["projection_model"],
                 rank=recipe["rank"],
                 static_mode=recipe["projection_static_mode"],
                 weights=recipe["energy_weights"],
                 relaxation=recipe["projection_relaxation"],
                 log_floor=recipe["log_floor"],
+                spectral_constraint=recipe["spectral_constraint"],
+                energy_values=recipe["energy_values"],
+                known_beta_spectrum=recipe["known_beta_spectrum"],
+                known_delta_spectrum=recipe["known_delta_spectrum"],
+                absorption_part=recipe["absorption_part"],
+                kk_sign=recipe["kk_sign"],
+                kk_subtract_baseline=recipe["kk_subtract_baseline"],
+                kk_normalize_input=recipe["kk_normalize_input"],
+                known_beta_normalization=recipe["known_beta_normalization"],
+                fit_known_beta_scale=recipe["fit_known_beta_scale"],
+                fit_known_beta_offset=recipe["fit_known_beta_offset"],
                 return_components=True,
             )
             errors["projection_steps"].append(
                 {
                     "outer": outer,
+                    "projection_model": components.get("projection_model"),
                     "rank": recipe["rank"],
+                    "spectral_constraint": components.get("spectral_constraint", recipe["spectral_constraint"]),
                     "relaxation": recipe["projection_relaxation"],
-                    "singular_values": components["singular_values"],
+                    "singular_values": components.get("singular_values"),
+                    "spectral_coefficients": components.get("spectral_coefficients"),
                 }
             )
 
-    fields, components = project_fourier_fields_low_rank(
+    # Final projection, unless the user explicitly selected no projection.
+    fields, components = project_fourier_fields_multi_energy(
         fields,
+        projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
         relaxation=1.0,
         log_floor=recipe["log_floor"],
+        spectral_constraint=recipe["spectral_constraint"],
+        energy_values=recipe["energy_values"],
+        known_beta_spectrum=recipe["known_beta_spectrum"],
+        known_delta_spectrum=recipe["known_delta_spectrum"],
+        absorption_part=recipe["absorption_part"],
+        kk_sign=recipe["kk_sign"],
+        kk_subtract_baseline=recipe["kk_subtract_baseline"],
+        kk_normalize_input=recipe["kk_normalize_input"],
+        known_beta_normalization=recipe["known_beta_normalization"],
+        fit_known_beta_scale=recipe["fit_known_beta_scale"],
+        fit_known_beta_offset=recipe["fit_known_beta_offset"],
         return_components=True,
     )
+
+    if recipe["final_fourier_constraint"]:
+        for j in range(nE):
+            constrained = amplitudes[j] * np.exp(1j * np.angle(fields[j]))
+            fields[j] = np.where(bsmasks[j] != 0, fields[j], constrained)
+        components["final_fourier_constraint_applied"] = True
+    else:
+        components["final_fourier_constraint_applied"] = False
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
 

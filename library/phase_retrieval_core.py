@@ -18,7 +18,6 @@ log = logging.getLogger(__name__)
 
 import os
 import time
-import CCI_core_cupy as cci
 import numpy as np
 from numpy.typing import ArrayLike
 
@@ -137,7 +136,7 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     if isinstance(start_spec, np.ndarray):
         return start_spec.copy()
 
-    if start_spec in {"pos", "neg"}:
+    if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
         if latest[start_spec] is None:
             raise ValueError(
                 f"{name} requested latest '{start_spec}', "
@@ -274,9 +273,9 @@ def _scale_phase_between_helicities(
     Rescale a reconstruction when it is reused as the starting guess for the
     opposite helicity.
 
-    The scale factor is estimated from the measured hologram intensities using
-    cci.dyn_factor(..., method="correlation"), while excluding invalid pixels
-    from both helicities using bsmask_p/bsmask_n.
+    The scale factor is estimated from a linear fit of the measured hologram
+    intensities, while excluding invalid pixels from both helicities using
+    bsmask_p/bsmask_n.
 
     Parameters
     ----------
@@ -292,8 +291,10 @@ def _scale_phase_between_helicities(
         If True, also apply the fitted offset approximately at intensity level.
         For phase/amplitude fields, the offset treatment is approximate and is
         usually better left False.
-    crop, plot, verbose
-        Passed to cci.dyn_factor.
+    crop : int
+        Number of pixels excluded from every image edge before fitting.
+    plot, verbose : bool
+        Optionally display or print the fitted intensity relation.
 
     Returns
     -------
@@ -314,30 +315,58 @@ def _scale_phase_between_helicities(
 
     valid = (bsmasks[source_helicity] == 0) & (bsmasks[target_helicity] == 0)
 
-    source_masked = np.where(valid, source_intensity, 0)
-    target_masked = np.where(valid, target_intensity, 0)
+    if not isinstance(crop, int) or crop < 0:
+        raise ValueError("crop must be a non-negative integer.")
+    if crop:
+        if 2 * crop >= min(source_intensity.shape):
+            raise ValueError("crop removes the complete intensity image.")
+        interior = np.zeros_like(valid, dtype=bool)
+        interior[crop:-crop, crop:-crop] = True
+        valid &= interior
 
-    factor, offset = cci.dyn_factor(
-        image=target_masked,
-        image_ref=source_masked,
-        method="correlation",
-        crop=crop,
-        plot=plot,
-        verbose=verbose,
-    )
+    xdata = source_intensity[valid].astype(float, copy=False)
+    ydata = target_intensity[valid].astype(float, copy=False)
+    finite = np.isfinite(xdata) & np.isfinite(ydata)
+    xdata = xdata[finite]
+    ydata = ydata[finite]
 
-    if factor < 0:
+    if xdata.size < 2:
+        raise ValueError(
+            "At least two jointly valid pixels are required to scale helicities."
+        )
+
+    source_variance = np.var(xdata)
+    if source_variance > np.finfo(float).eps:
+        factor = np.cov(xdata, ydata, ddof=0)[0, 1] / source_variance
+        offset = np.mean(ydata) - factor * np.mean(xdata)
+    else:
+        source_sum = np.sum(xdata)
+        if abs(source_sum) <= np.finfo(float).eps:
+            raise ValueError("Cannot scale from zero source intensity.")
+        factor = np.sum(ydata) / source_sum
+        offset = 0.0
+
+    if not np.isfinite(factor) or factor < 0:
         raise ValueError(
             f"Negative helicity scaling factor obtained: {factor}. "
             "Check masks/intensities before using this result."
         )
 
-    # dyn_factor fits:
-    #     target_intensity ≈ factor * source_intensity + offset
-    #
     # The reconstruction field amplitude scales as sqrt(intensity).
     factor = max(factor, 1e-12)
     scaled_phase = phase * np.sqrt(factor)
+
+    if verbose:
+        print(f"Linear fit: {factor:.4f}*x + {offset:.4f}")
+
+    if plot:
+        fig, ax = plt.subplots()
+        ax.scatter(xdata, ydata, s=5)
+        order = np.argsort(xdata)
+        ax.plot(xdata[order], factor * xdata[order] + offset, "r-")
+        ax.set_xlabel("Source intensity")
+        ax.set_ylabel("Target intensity")
+        ax.set_title(f"Linear fit: {factor:.4f}*x + {offset:.4f}")
 
     if use_offset:
         # Approximate amplitude-level offset correction.
@@ -373,14 +402,15 @@ def phase_retrieval_algorithm(
         np.ndarray  -> use the supplied array directly
 
     When a reconstruction from a different helicity is reused, it is rescaled
-    using the masked correlation-based normalization from
-    cci.dyn_factor(..., method="correlation").
+    using a masked correlation-based linear normalization.
 
 
     Returns
     -------
     retrieved_p, retrieved_n : np.ndarray or None
-        Final reconstruction for positive/negative helicity, if requested.
+        Latest full-coherence reconstruction for each helicity, if requested.
+    retrieved_p_pc, retrieved_n_pc : np.ndarray or None
+        Latest partial-coherence reconstruction for each helicity, if requested.
     bsmask_p, bsmask_n : np.ndarray
         Beamstop/floating-pixel masks used for full-coherence steps.
     gamma_p, gamma_n : np.ndarray
@@ -392,7 +422,15 @@ def phase_retrieval_algorithm(
 
     # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
-    if phase_retrieval_recipe:
+    if phase_retrieval_recipe is not None:
+        if not isinstance(phase_retrieval_recipe, dict):
+            raise TypeError("phase_retrieval_recipe must be a dictionary.")
+        unknown_keys = set(phase_retrieval_recipe) - set(recipe)
+        if unknown_keys:
+            raise ValueError(
+                "Unknown phase-retrieval recipe key(s): "
+                f"{sorted(unknown_keys)}"
+            )
         recipe.update(phase_retrieval_recipe)
     _verify_valid_phase_retrieval_recipe(recipe)
 
@@ -412,12 +450,12 @@ def phase_retrieval_algorithm(
     # ignoring zeros because zeros usually represent invalid/masked pixels.
     vmin = recipe["hologram_intensity_cutoff_vmin"]
     if vmin >= 0:
-        vals = pos_input.copy()
+        vals = pos_input[(pos_input != 0) & np.isfinite(pos_input)]
         if vals.size:
             mi = np.nanpercentile(vals, vmin)
             pos_input = pos_input - mi
 
-        vals = neg_input.copy()
+        vals = neg_input[(neg_input != 0) & np.isfinite(neg_input)]
         if vals.size:
             mi = np.nanpercentile(vals, vmin)
             neg_input = neg_input - mi
@@ -427,8 +465,8 @@ def phase_retrieval_algorithm(
     pos_input = np.where(np.isnan(pos_input), 0, pos_input)
     neg_input = np.where(np.isnan(neg_input), 0, neg_input)
 
-    # Full-coherence beamstop masks inherit the external mask and mark pixels
-    # with nonpositive corrected intensity as unconstrained.
+    # Full-coherence beamstop masks inherit the external mask and mark negative
+    # corrected intensities as unconstrained. Zero intensity remains constrained.
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
     bsmask_p[pos_input < 0] = 1
@@ -464,11 +502,16 @@ def phase_retrieval_algorithm(
     # Initial mutual-coherence estimate for RL-enabled steps.
     first_startgamma = recipe["Startgamma"][0]
 
-    if first_startgamma is None or isinstance(first_startgamma, str):
+    if first_startgamma is None:
         Startgamma = np.ones(pos_input.shape, dtype=float) * 1e-6 * 2
         Startgamma[pos_input.shape[0] // 2, pos_input.shape[1] // 2] = 0.7
-    else:
+    elif isinstance(first_startgamma, np.ndarray):
         Startgamma = np.asarray(first_startgamma).copy()
+    else:
+        raise ValueError(
+            "The first Startgamma entry cannot be 'pos' or 'neg' "
+            "because no coherence estimate exists yet."
+        )
 
 
     if Startgamma.shape != pos_input.shape:
@@ -489,7 +532,7 @@ def phase_retrieval_algorithm(
         x = np.sqrt(first_input[valid_pix]).ravel()
         y = np.abs(Startimage[valid_pix]).ravel()
 
-        if x.size >= 2:
+        if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
             res = stats.linregress(x, y)
             if abs(res.slope) > 1e-12:
                 Startimage = Startimage / res.slope
@@ -557,7 +600,7 @@ def phase_retrieval_algorithm(
             name="Startimage",
         )
 
-        if start_spec in {"pos", "neg"}:
+        if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
             Phase = _scale_phase_between_helicities(
                 Phase,
                 source_helicity=start_spec,
@@ -981,6 +1024,12 @@ def PhaseRtrv_core(
         raise ValueError("average_img must be > 0.")
     if plot_every <= 0:
         raise ValueError("plot_every must be > 0.")
+    if RL_freq is not None and RL_freq <= 0:
+        raise ValueError("RL_freq must be > 0.")
+    if RL_it < 0:
+        raise ValueError("RL_it must be >= 0.")
+    if TV_freq <= 0:
+        raise ValueError("TV_freq must be > 0.")
 
     l, n = diffract.shape
 
@@ -1030,7 +1079,10 @@ def PhaseRtrv_core(
     if use_RL:
         gamma = np.fft.fftshift(np.asarray(gamma))
         gamma_cp = xp.asarray(gamma)
-        gamma_cp /= xp.sum(gamma_cp)
+        gamma_sum = xp.sum(gamma_cp)
+        if not bool(xp.isfinite(gamma_sum)) or bool(xp.abs(gamma_sum) == 0):
+            raise ValueError("gamma must have a finite, non-zero sum.")
+        gamma_cp /= gamma_sum
 
         convolved = ifft2(fft2(xp.abs(guess_cp) ** 2) * fft2(gamma_cp))
 
@@ -1053,13 +1105,14 @@ def PhaseRtrv_core(
     Error_diffr_list = []
     Error_supp_list = []
 
-    Best_guess = xp.zeros((average_img, l, n), dtype=xp.complex64)
-    Best_error = xp.full((average_img,), xp.inf, dtype=xp.float64)
+    n_best = min(average_img, Nit)
+    Best_guess = xp.zeros((n_best, l, n), dtype=xp.complex64)
+    Best_error = xp.full((n_best,), xp.inf, dtype=xp.float64)
 
     if use_RL:
-        Best_gamma = xp.zeros((average_img, l, n), dtype=xp.complex64)
+        Best_gamma = xp.zeros((n_best, l, n), dtype=xp.complex64)
 
-    start_best_at = max(0, Nit - average_img * 2)
+    start_best_at = max(0, Nit - n_best * 2)
 
     for s in range(Nit):
         beta = float(Beta[s])
@@ -1274,5 +1327,6 @@ def Error_diffract_cp(guess, diffract):
     Num=xp.abs(diffract-guess)**2
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
-    Error=10*xp.log10(Error)
+    with xp.errstate(divide="ignore", invalid="ignore"):
+        Error=10*xp.log10(Error)
     return to_numpy(Error, xp)
