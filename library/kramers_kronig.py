@@ -153,6 +153,36 @@ def load_henke_optical_constants(
     return energy_ev, beta
 
 
+def load_henke_refractive_index(
+    path,
+    energy_column=0,
+    delta_column=1,
+    beta_column=2,
+    delimiter=None,
+    skiprows=0,
+):
+    """
+    Load energy, delta, and beta from a local Henke/CXRO text export.
+
+    The default column order is ``energy_eV, delta, beta``. Both optical
+    constants must follow this module's convention
+    ``n = 1 - delta + 1j*beta``.
+    """
+    data = np.loadtxt(path, delimiter=delimiter, skiprows=skiprows)
+    if data.ndim == 1:
+        data = data[None, :]
+    required_column = max(energy_column, delta_column, beta_column)
+    if data.ndim != 2 or data.shape[1] <= required_column:
+        raise ValueError("The text file does not contain the requested columns.")
+
+    energy_ev = _validate_energy_axis(data[:, energy_column])
+    delta = _validate_spectrum(data[:, delta_column], energy_ev, "delta")
+    beta = _validate_spectrum(data[:, beta_column], energy_ev, "beta")
+    if np.any(beta < 0):
+        raise ValueError("Henke beta values must be non-negative.")
+    return energy_ev, delta, beta
+
+
 def extend_beta_with_reference(
     measured_energy_ev,
     measured_beta,
@@ -221,6 +251,79 @@ def extend_beta_with_reference(
         + (1.0 - measured_weight) * extended[inside]
     )
     return output_energy_ev, extended
+
+
+def refractive_index_from_beta_with_reference(
+    measured_energy_ev,
+    measured_beta,
+    reference_energy_ev,
+    reference_delta,
+    reference_beta,
+    transition_width_ev=0.0,
+    return_extended=False,
+):
+    """
+    Merge measured beta into a reference and update delta by differential KK.
+
+    This implements the near-edge strategy described by Cross et al. and Watts:
+
+    1. Keep the broad-range reference ``delta`` and ``beta`` as the baseline.
+    2. Form the localized correction ``measured_beta - reference_beta``.
+    3. Kramers-Kronig transform only that correction.
+    4. Add the resulting delta correction to the reference delta.
+
+    Transforming only the local correction avoids treating a finite Henke table
+    as though beta were exactly zero outside its tabulated range. The correction
+    is linearly blended to zero at the measurement boundaries when
+    ``transition_width_ev > 0``.
+
+    Returns
+    -------
+    beta, delta : arrays, shape (nE,)
+        Corrected optical constants at the measured energies.
+    extended_energy, extended_beta, beta_correction : arrays, optional
+        Also returned when ``return_extended=True``.
+    """
+    measured_energy_ev = _validate_energy_axis(measured_energy_ev)
+    measured_beta = _validate_spectrum(
+        measured_beta, measured_energy_ev, "measured_beta"
+    )
+    reference_energy_ev = _validate_energy_axis(reference_energy_ev)
+    reference_delta = _validate_spectrum(
+        reference_delta, reference_energy_ev, "reference_delta"
+    )
+    reference_beta = _validate_spectrum(
+        reference_beta, reference_energy_ev, "reference_beta"
+    )
+    if np.any(measured_beta < 0) or np.any(reference_beta < 0):
+        raise ValueError("beta values must be non-negative.")
+
+    extended_energy, extended_beta = extend_beta_with_reference(
+        measured_energy_ev,
+        measured_beta,
+        reference_energy_ev,
+        reference_beta,
+        transition_width_ev=transition_width_ev,
+    )
+    reference_beta_extended = np.interp(
+        extended_energy, reference_energy_ev, reference_beta
+    )
+    beta_correction = extended_beta - reference_beta_extended
+
+    delta_correction = beta_to_delta(
+        extended_energy,
+        beta_correction,
+        evaluation_energy_ev=measured_energy_ev,
+    )
+    delta = (
+        np.interp(measured_energy_ev, reference_energy_ev, reference_delta)
+        + delta_correction
+    )
+    beta = np.interp(measured_energy_ev, extended_energy, extended_beta)
+
+    if return_extended:
+        return beta, delta, extended_energy, extended_beta, beta_correction
+    return beta, delta
 
 
 def kramers_kronig_real_from_imaginary(

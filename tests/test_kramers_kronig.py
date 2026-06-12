@@ -58,6 +58,25 @@ class KramersKronigTests(unittest.TestCase):
         np.testing.assert_allclose(energy, [100.0, 200.0])
         np.testing.assert_allclose(beta, [2.0e-4, 1.0e-4])
 
+    def test_load_henke_refractive_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "henke.txt"
+            np.savetxt(
+                path,
+                np.array(
+                    [
+                        [100.0, 1.0e-3, 2.0e-4],
+                        [200.0, 8.0e-4, 1.0e-4],
+                    ]
+                ),
+            )
+
+            energy, delta, beta = kk.load_henke_refractive_index(path)
+
+        np.testing.assert_allclose(energy, [100.0, 200.0])
+        np.testing.assert_allclose(delta, [1.0e-3, 8.0e-4])
+        np.testing.assert_allclose(beta, [2.0e-4, 1.0e-4])
+
     def test_extend_beta_uses_measurement_inside_reference_range(self):
         reference_energy = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         reference_beta = np.ones(5)
@@ -131,6 +150,50 @@ class KramersKronigTests(unittest.TestCase):
         delta = kk.beta_to_delta(energy, beta)
 
         np.testing.assert_allclose(delta, -real_response)
+
+    def test_reference_method_returns_reference_when_beta_is_unchanged(self):
+        reference_energy = np.array([100.0, 500.0, 700.0, 710.0, 720.0, 1000.0])
+        reference_beta = np.array([1e-5, 2e-5, 3e-4, 5e-4, 2e-4, 1e-5])
+        reference_delta = np.array([2e-3, 1e-3, 8e-4, 7e-4, 6e-4, 4e-4])
+        measured_energy = reference_energy[2:5]
+        measured_beta = reference_beta[2:5]
+
+        beta, delta = kk.refractive_index_from_beta_with_reference(
+            measured_energy,
+            measured_beta,
+            reference_energy,
+            reference_delta,
+            reference_beta,
+        )
+
+        np.testing.assert_allclose(beta, measured_beta)
+        np.testing.assert_allclose(delta, reference_delta[2:5])
+
+    def test_reference_method_adds_only_differential_kk_correction(self):
+        reference_energy = np.array([100.0, 500.0, 700.0, 710.0, 720.0, 1000.0])
+        reference_beta = np.array([1e-5, 2e-5, 3e-4, 5e-4, 2e-4, 1e-5])
+        reference_delta = np.array([2e-3, 1e-3, 8e-4, 7e-4, 6e-4, 4e-4])
+        measured_energy = reference_energy[2:5]
+        measured_beta = reference_beta[2:5] + np.array([0.0, 2e-4, 0.0])
+
+        beta, delta, extended_energy, _, correction = (
+            kk.refractive_index_from_beta_with_reference(
+                measured_energy,
+                measured_beta,
+                reference_energy,
+                reference_delta,
+                reference_beta,
+                return_extended=True,
+            )
+        )
+        expected_delta = reference_delta[2:5] + kk.beta_to_delta(
+            extended_energy,
+            correction,
+            evaluation_energy_ev=measured_energy,
+        )
+
+        np.testing.assert_allclose(beta, measured_beta)
+        np.testing.assert_allclose(delta, expected_delta)
 
     def test_extended_grid_can_be_evaluated_only_at_experimental_energies(self):
         integration_energy = np.array([10.0, 100.0, 700.0, 710.0, 720.0, 1.0e4])
