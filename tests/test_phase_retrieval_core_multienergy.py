@@ -112,10 +112,10 @@ class PhaseRetrievalCoreMultienergyTests(unittest.TestCase):
             1j * rng.uniform(-np.pi, np.pi, (n_energy, *shape))
         )
         recipe = {
-            "mode": "ER",
+            "inner_mode": "ER",
             "outer_iterations": 1,
-            "inner_iterations": 3,
-            "warmup_iterations": 0,
+            "inner_Nit": 3,
+            "warmup_Nit": 0,
             "shuffle_energies": False,
             "projection_model": "none",
             "plot_every": 2,
@@ -176,10 +176,10 @@ class PhaseRetrievalCoreMultienergyTests(unittest.TestCase):
                 np.zeros((6, 6), dtype=int),
                 np.ones((6, 6)),
                 multi_energy_recipe={
-                    "mode": "ER",
+                    "inner_mode": "ER",
                     "outer_iterations": 1,
-                    "inner_iterations": 2,
-                    "warmup_iterations": 0,
+                    "inner_Nit": 2,
+                    "warmup_Nit": 0,
                     "shuffle_energies": False,
                     "projection_model": "svd",
                     "rank": 1,

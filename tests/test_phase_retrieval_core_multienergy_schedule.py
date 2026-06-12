@@ -3,11 +3,10 @@ from unittest import mock
 
 import numpy as np
 
-from library import phase_retrieval_core_multienergy as original
-from library import phase_retrieval_core_multienergy2 as multi
+from library import phase_retrieval_core_multienergy as multi
 
 
-class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
+class PhaseRetrievalCoreMultienergyScheduleTests(unittest.TestCase):
     def test_schedule_validation_accepts_lists_and_scalar_shorthand(self):
         self.assertEqual(
             multi._normalize_update_schedule(
@@ -69,8 +68,8 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             return Phase, np.array([]), np.array([]), None
 
         recipe = {
-            "mode": ["HAPRE", "ER"],
-            "Nit": [7, 5],
+            "inner_mode": ["HAPRE", "ER"],
+            "inner_Nit": [7, 5],
             "beta_zero": [0.4, 0.9],
             "beta_mode": ["arctan", "const"],
             "alpha_zero": [0.1, 0.0],
@@ -130,8 +129,8 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             return output, np.array([Nit]), np.array([Nit]), None
 
         recipe = {
-            "mode": ["HAPRE", "ER"],
-            "Nit": [7, 5],
+            "inner_mode": ["HAPRE", "ER"],
+            "inner_Nit": [7, 5],
             "outer_iterations": 2,
             "warmup_mode": ["ER", "HAPRE"],
             "warmup_Nit": [2, 3],
@@ -183,7 +182,7 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             ]
             self.assertEqual(actual, expected_per_energy)
 
-    def test_single_stage_schedule_matches_original_driver(self):
+    def test_scalar_and_one_stage_list_schedules_match(self):
         rng = np.random.default_rng(4)
         holograms = rng.uniform(0.5, 2.0, (3, 6, 6))
         support = np.ones((6, 6))
@@ -192,7 +191,6 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             1j * rng.uniform(-np.pi, np.pi, holograms.shape)
         )
         shared = {
-            "mode": "ER",
             "outer_iterations": 2,
             "shuffle_energies": False,
             "projection_model": "none",
@@ -200,14 +198,15 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             "average_img": 1,
         }
 
-        expected, _, _, _ = original.multi_energy_phase_retrieval_algorithm(
+        expected, _, _, _ = multi.multi_energy_phase_retrieval_algorithm(
             holograms,
             masks,
             support,
             multi_energy_recipe={
                 **shared,
-                "inner_iterations": 3,
-                "warmup_iterations": 0,
+                "inner_mode": "ER",
+                "inner_Nit": 3,
+                "warmup_Nit": 0,
             },
             start_fields=start_fields,
         )
@@ -217,7 +216,8 @@ class PhaseRetrievalCoreMultienergy2Tests(unittest.TestCase):
             support,
             multi_energy_recipe={
                 **shared,
-                "Nit": 3,
+                "inner_mode": ["ER"],
+                "inner_Nit": [3],
                 "warmup_Nit": 0,
             },
             start_fields=start_fields,

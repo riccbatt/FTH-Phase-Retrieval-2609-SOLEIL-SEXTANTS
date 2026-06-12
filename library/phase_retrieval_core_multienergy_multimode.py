@@ -248,6 +248,68 @@ def _apply_measured_modal_amplitude(fields, amplitudes, bsmasks):
     return constrained
 
 
+def _run_energy_update_schedule(
+    field,
+    amplitude,
+    supportmask,
+    bsmask,
+    schedule,
+    recipe,
+    nmodes,
+    image_shape,
+):
+    """Run all scheduled multimode updates sequentially for one energy."""
+    stage_results = []
+    for stage_index, stage in enumerate(schedule):
+        mode = stage["mode"]
+        Nit = stage["Nit"]
+        result, err_d, err_s, _ = multimode.PhaseRtrv_core(
+            diffract=amplitude,
+            mask=supportmask,
+            mode=mode,
+            Nit=Nit,
+            beta_zero=stage["beta_zero"],
+            beta_mode=stage["beta_mode"],
+            alpha_zero=stage["alpha_zero"],
+            alpha_mode=stage["alpha_mode"],
+            Phase=field,
+            seed=False,
+            plot_every=recipe["plot_every"],
+            bsmask=bsmask,
+            real_object=False,
+            average_img=min(max(1, recipe["average_img"]), Nit),
+            Fourier_last=recipe["Fourier_last"],
+            gamma=None,
+            RL_freq=Nit + 1,
+            RL_it=0,
+            TV_freq=stage["TV_freq"],
+            Nmodes=nmodes,
+        )
+        field = multimode._as_modes(
+            result,
+            nmodes,
+            image_shape,
+            "retrieved fields",
+            dtype=np.complex128,
+        )
+        stage_results.append(
+            {
+                "schedule_stage": stage_index,
+                "mode": mode,
+                "Nit": Nit,
+                "beta_zero": stage["beta_zero"],
+                "beta_mode": stage["beta_mode"],
+                "alpha_zero": stage["alpha_zero"],
+                "alpha_mode": stage["alpha_mode"],
+                "TV_freq": stage["TV_freq"],
+                "Nmodes": nmodes,
+                "error": np.asarray(err_d),
+                "support_error": np.asarray(err_s),
+            }
+        )
+    return field, stage_results
+
+
 def multi_energy_phase_retrieval_algorithm(
     holograms,
     mask_pixel,
@@ -267,6 +329,12 @@ def multi_energy_phase_retrieval_algorithm(
         Larger values return ``(nE, Nmodes, nx, ny)``.
     ``mode_initialization_seed``
         Seed used to break modal degeneracy in the default initialization.
+
+    ``inner_mode`` / ``inner_Nit``
+        Parallel scalar-or-list settings defining the update stages performed
+        at every energy during each outer iteration. Stage-specific beta,
+        alpha, and TV controls use the same convention as the single-mode
+        multi-energy driver.
     """
     recipe = default_multi_energy_phase_retrieval_recipe()
     if multi_energy_recipe is not None:
@@ -334,51 +402,36 @@ def multi_energy_phase_retrieval_algorithm(
     }
     start_time = time.time()
 
-    warmup = int(recipe["warmup_iterations"])
-    if warmup > 0:
+    warmup_schedule = multi_energy._build_update_schedule(
+        recipe,
+        name="warmup",
+        allow_disabled=True,
+    )
+    if warmup_schedule:
         for energy_index in range(n_energy):
-            fields[energy_index], err_d, err_s, _ = multimode.PhaseRtrv_core(
-                diffract=amplitudes[energy_index],
-                mask=supportmask,
-                mode=recipe["mode"],
-                Nit=warmup,
-                beta_zero=recipe["beta_zero"],
-                beta_mode=recipe["beta_mode"],
-                alpha_zero=recipe["alpha_zero"],
-                alpha_mode=recipe["alpha_mode"],
-                Phase=fields[energy_index],
-                seed=False,
-                plot_every=recipe["plot_every"],
-                bsmask=bsmasks[energy_index],
-                real_object=False,
-                average_img=min(max(1, recipe["average_img"]), warmup),
-                Fourier_last=recipe["Fourier_last"],
-                gamma=None,
-                RL_freq=warmup + 1,
-                RL_it=0,
-                TV_freq=recipe["TV_freq"],
-                Nmodes=nmodes,
-            )
-            fields[energy_index] = multimode._as_modes(
+            fields[energy_index], stage_results = _run_energy_update_schedule(
                 fields[energy_index],
+                amplitudes[energy_index],
+                supportmask,
+                bsmasks[energy_index],
+                warmup_schedule,
+                recipe,
                 nmodes,
                 (nx, ny),
-                "retrieved fields",
-                dtype=np.complex128,
             )
-            errors["energy_steps"].append(
-                {
+            for stage_result in stage_results:
+                errors["energy_steps"].append({
                     "outer": -1,
                     "energy": energy_index,
-                    "Nit": warmup,
-                    "Nmodes": nmodes,
-                    "error": np.asarray(err_d),
                     "stage": "warmup",
-                }
-            )
+                    **stage_result,
+                })
 
     outer_iterations = int(recipe["outer_iterations"])
-    inner_iterations = int(recipe["inner_iterations"])
+    inner_schedule = multi_energy._build_update_schedule(
+        recipe,
+        name="inner",
+    )
     projection_every = int(recipe["projection_every"])
     projection_start = int(recipe["projection_start"])
     components = {
@@ -393,45 +446,23 @@ def multi_energy_phase_retrieval_algorithm(
             energy_order = np.arange(n_energy)
 
         for energy_index in energy_order:
-            result, err_d, err_s, _ = multimode.PhaseRtrv_core(
-                diffract=amplitudes[energy_index],
-                mask=supportmask,
-                mode=recipe["mode"],
-                Nit=inner_iterations,
-                beta_zero=recipe["beta_zero"],
-                beta_mode=recipe["beta_mode"],
-                alpha_zero=recipe["alpha_zero"],
-                alpha_mode=recipe["alpha_mode"],
-                Phase=fields[energy_index],
-                seed=False,
-                plot_every=recipe["plot_every"],
-                bsmask=bsmasks[energy_index],
-                real_object=False,
-                average_img=min(max(1, recipe["average_img"]), inner_iterations),
-                Fourier_last=recipe["Fourier_last"],
-                gamma=None,
-                RL_freq=inner_iterations + 1,
-                RL_it=0,
-                TV_freq=recipe["TV_freq"],
-                Nmodes=nmodes,
-            )
-            fields[energy_index] = multimode._as_modes(
-                result,
+            fields[energy_index], stage_results = _run_energy_update_schedule(
+                fields[energy_index],
+                amplitudes[energy_index],
+                supportmask,
+                bsmasks[energy_index],
+                inner_schedule,
+                recipe,
                 nmodes,
                 (nx, ny),
-                "retrieved fields",
-                dtype=np.complex128,
             )
-            errors["energy_steps"].append(
-                {
+            for stage_result in stage_results:
+                errors["energy_steps"].append({
                     "outer": outer,
                     "energy": int(energy_index),
-                    "Nit": inner_iterations,
-                    "Nmodes": nmodes,
-                    "error": np.asarray(err_d),
                     "stage": "joint",
-                }
-            )
+                    **stage_result,
+                })
 
         do_projection = (
             outer >= projection_start

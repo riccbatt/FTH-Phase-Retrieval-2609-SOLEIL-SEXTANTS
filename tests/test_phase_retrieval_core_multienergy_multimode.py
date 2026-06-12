@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -7,6 +8,84 @@ from library import phase_retrieval_core_multienergy_multimode as combined
 
 
 class PhaseRetrievalCoreMultienergyMultimodeTests(unittest.TestCase):
+    def test_multimode_stages_forward_controls_and_handoff_fields(self):
+        holograms = np.ones((2, 4, 4))
+        start_fields = np.zeros((2, 2, 4, 4), dtype=complex)
+        calls = []
+
+        def fake_core(
+            *,
+            mode,
+            Nit,
+            beta_zero,
+            beta_mode,
+            alpha_zero,
+            alpha_mode,
+            TV_freq,
+            Nmodes,
+            Phase,
+            **kwargs,
+        ):
+            calls.append(
+                (
+                    mode,
+                    Nit,
+                    beta_zero,
+                    beta_mode,
+                    alpha_zero,
+                    alpha_mode,
+                    TV_freq,
+                    Nmodes,
+                    float(np.real(Phase[0, 0, 0])),
+                )
+            )
+            return Phase + 1, np.array([Nit]), np.array([Nit]), None
+
+        recipe = {
+            "inner_mode": ["HAPRE", "ER"],
+            "inner_Nit": [7, 5],
+            "beta_zero": [0.4, 0.9],
+            "beta_mode": ["arctan", "const"],
+            "alpha_zero": [0.1, 0.0],
+            "alpha_mode": ["smoothstep", "const"],
+            "TV_freq": [4, 1e9],
+            "outer_iterations": 1,
+            "warmup_Nit": 0,
+            "shuffle_energies": False,
+            "projection_model": "none",
+            "final_fourier_constraint": False,
+            "Nmodes": 2,
+        }
+
+        with mock.patch.object(
+            combined.multimode,
+            "PhaseRtrv_core",
+            side_effect=fake_core,
+        ):
+            result, _, _, errors = (
+                combined.multi_energy_phase_retrieval_algorithm(
+                    holograms,
+                    np.zeros((4, 4), dtype=int),
+                    np.ones((4, 4)),
+                    multi_energy_recipe=recipe,
+                    start_fields=start_fields,
+                )
+            )
+
+        expected_per_energy = [
+            ("HAPRE", 7, 0.4, "arctan", 0.1, "smoothstep", 4, 2, 0.0),
+            ("ER", 5, 0.9, "const", 0.0, "const", 1e9, 2, 1.0),
+        ]
+        self.assertEqual(calls, 2 * expected_per_energy)
+        np.testing.assert_allclose(result, 2)
+        self.assertEqual(
+            [
+                (step["mode"], step["Nit"])
+                for step in errors["energy_steps"]
+            ],
+            2 * [("HAPRE", 7), ("ER", 5)],
+        )
+
     def test_single_mode_matches_multi_energy_driver(self):
         rng = np.random.default_rng(31)
         holograms = rng.uniform(0.5, 2.0, (3, 6, 6))
@@ -14,10 +93,10 @@ class PhaseRetrievalCoreMultienergyMultimodeTests(unittest.TestCase):
             1j * rng.uniform(-np.pi, np.pi, holograms.shape)
         )
         recipe = {
-            "mode": "ER",
+            "inner_mode": "ER",
             "outer_iterations": 1,
-            "inner_iterations": 3,
-            "warmup_iterations": 0,
+            "inner_Nit": 3,
+            "warmup_Nit": 0,
             "shuffle_energies": False,
             "projection_model": "none",
             "average_img": 2,
@@ -61,10 +140,10 @@ class PhaseRetrievalCoreMultienergyMultimodeTests(unittest.TestCase):
                 np.zeros((6, 6), dtype=int),
                 np.ones((6, 6)),
                 multi_energy_recipe={
-                    "mode": "ER",
+                    "inner_mode": "ER",
                     "outer_iterations": 1,
-                    "inner_iterations": 2,
-                    "warmup_iterations": 0,
+                    "inner_Nit": 2,
+                    "warmup_Nit": 0,
                     "shuffle_energies": False,
                     "projection_model": "none",
                     "Nmodes": nmodes,

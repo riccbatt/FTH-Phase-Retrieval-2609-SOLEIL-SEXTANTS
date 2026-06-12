@@ -2124,34 +2124,18 @@ def default_multi_energy_phase_retrieval_recipe():
     projection that couples the object estimates across energy.
     """
     return {
-        # Single-energy update schedule repeated once per outer iteration.
-        # A scalar mode/Nit pair is accepted as a one-stage shorthand.
-        "mode": ["HAPRE"],
-        "Nit": [1],
+        # Single-energy update settings.
+        "mode": "HAPRE",
         "outer_iterations": 300,
-
-        # Optional independent warmup schedule, run once at every energy.
-        # Set warmup_Nit=0 to disable it.
-        "warmup_mode": ["HAPRE"],
-        "warmup_Nit": [20],
-
+        "inner_iterations": 1,
+        "warmup_iterations": 20,
         "shuffle_energies": True,
         "random_seed": None,
-        # Scalars are broadcast to every stage; lists customize each stage.
         "beta_zero": 0.5,
         "beta_mode": "arctan",
         "alpha_zero": 0.0,
         "alpha_mode": "const",
         "TV_freq": 1e9,
-
-        # Optional warmup overrides. None inherits the corresponding joint
-        # setting. If the schedule lengths differ, the first joint-stage value
-        # is broadcast across warmup.
-        "warmup_beta_zero": None,
-        "warmup_beta_mode": None,
-        "warmup_alpha_zero": None,
-        "warmup_alpha_mode": None,
-        "warmup_TV_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -2181,229 +2165,6 @@ def default_multi_energy_phase_retrieval_recipe():
         "fit_known_beta_scale": True,
         "fit_known_beta_offset": True,
     }
-
-
-def _normalize_update_schedule(modes, iterations, name, allow_disabled=False):
-    """Validate and return a list of ``(mode, Nit)`` update stages."""
-    allowed_algorithms = {
-        "ER",
-        "SF",
-        "HAPRE",
-        "RAAR",
-        "HIOs",
-        "HIO",
-        "OSS",
-        "CHIO",
-        "HPR",
-    }
-
-    if isinstance(modes, str):
-        modes = [modes]
-    elif isinstance(modes, (list, tuple)):
-        modes = list(modes)
-    else:
-        raise ValueError(f"{name}_mode must be a string or a list of strings.")
-
-    if isinstance(iterations, (int, np.integer)) and not isinstance(
-        iterations, bool
-    ):
-        if allow_disabled and iterations == 0:
-            return []
-        iterations = [int(iterations)]
-    elif isinstance(iterations, (list, tuple)):
-        iterations = list(iterations)
-    else:
-        raise ValueError(f"{name}_Nit must be an integer or a list of integers.")
-
-    if not modes:
-        raise ValueError(f"{name}_mode cannot be empty.")
-    if len(modes) != len(iterations):
-        raise ValueError(
-            f"{name}_mode and {name}_Nit must have the same length."
-        )
-
-    schedule = []
-    for stage_index, (mode, Nit) in enumerate(zip(modes, iterations)):
-        if mode not in allowed_algorithms:
-            raise ValueError(
-                f"Invalid {name}_mode[{stage_index}]={mode!r}. "
-                f"Allowed modes are {sorted(allowed_algorithms)}."
-            )
-        if (
-            isinstance(Nit, bool)
-            or not isinstance(Nit, (int, np.integer))
-            or Nit <= 0
-        ):
-            raise ValueError(
-                f"{name}_Nit[{stage_index}] must be a positive integer."
-            )
-        schedule.append((mode, int(Nit)))
-    return schedule
-
-
-def _broadcast_stage_parameter(value, stage_count, key):
-    """Return one value per stage, broadcasting scalar settings."""
-    if isinstance(value, (list, tuple)):
-        values = list(value)
-        if len(values) != stage_count:
-            raise ValueError(
-                f"{key} must be a scalar or have the same length as mode/Nit "
-                f"({stage_count}); got {len(values)}."
-            )
-        return values
-    return [value] * stage_count
-
-
-def _build_update_schedule(recipe, name, allow_disabled=False):
-    """Build fully specified stage dictionaries from a recipe."""
-    prefix = "" if name == "inner" else "warmup_"
-    mode_key = "mode" if name == "inner" else "warmup_mode"
-    Nit_key = "Nit" if name == "inner" else "warmup_Nit"
-    base_schedule = _normalize_update_schedule(
-        recipe[mode_key],
-        recipe[Nit_key],
-        name=name,
-        allow_disabled=allow_disabled,
-    )
-    if not base_schedule:
-        return []
-
-    control_keys = [
-        "beta_zero",
-        "beta_mode",
-        "alpha_zero",
-        "alpha_mode",
-        "TV_freq",
-    ]
-    controls = {}
-    for key in control_keys:
-        recipe_key = f"{prefix}{key}"
-        value = recipe[recipe_key]
-        if name == "warmup" and value is None:
-            value = recipe[key]
-            if (
-                isinstance(value, (list, tuple))
-                and len(value) != len(base_schedule)
-            ):
-                if not value:
-                    raise ValueError(f"{key} cannot be empty.")
-                value = value[0]
-        controls[key] = _broadcast_stage_parameter(
-            value,
-            len(base_schedule),
-            recipe_key,
-        )
-
-    schedule = []
-    for stage_index, (mode, Nit) in enumerate(base_schedule):
-        stage = {
-            "mode": mode,
-            "Nit": Nit,
-            **{
-                key: controls[key][stage_index]
-                for key in control_keys
-            },
-        }
-
-        for key in ("beta_zero", "alpha_zero"):
-            value = stage[key]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float, np.number))
-                or not np.isfinite(value)
-            ):
-                raise ValueError(
-                    f"{prefix}{key}[{stage_index}] must be a finite number."
-                )
-
-        for key in ("beta_mode", "alpha_mode"):
-            value = stage[key]
-            if isinstance(value, str):
-                if value not in BETA_SCHEDULES:
-                    raise ValueError(
-                        f"Invalid {prefix}{key}[{stage_index}]={value!r}. "
-                        f"Allowed modes are {sorted(BETA_SCHEDULES)}."
-                    )
-            elif isinstance(value, np.ndarray):
-                if value.ndim != 1 or value.shape[0] != Nit:
-                    raise ValueError(
-                        f"{prefix}{key}[{stage_index}] array must have "
-                        f"length Nit={Nit}."
-                    )
-                if np.any(~np.isfinite(value)):
-                    raise ValueError(
-                        f"{prefix}{key}[{stage_index}] contains non-finite values."
-                    )
-            else:
-                raise ValueError(
-                    f"{prefix}{key}[{stage_index}] must be a schedule name "
-                    "or a one-dimensional NumPy array."
-                )
-
-        TV_freq = stage["TV_freq"]
-        if (
-            isinstance(TV_freq, bool)
-            or not isinstance(TV_freq, (int, float, np.number))
-            or not np.isfinite(TV_freq)
-            or TV_freq <= 0
-        ):
-            raise ValueError(
-                f"{prefix}TV_freq[{stage_index}] must be a positive number."
-            )
-
-        schedule.append(stage)
-    return schedule
-
-
-def _run_energy_update_schedule(
-    field,
-    amplitude,
-    supportmask,
-    bsmask,
-    schedule,
-    recipe,
-):
-    """Run all phase-retrieval stages sequentially for one energy."""
-    stage_results = []
-    for stage_index, stage in enumerate(schedule):
-        mode = stage["mode"]
-        Nit = stage["Nit"]
-        field, err_d, err_s, _ = PhaseRtrv_core(
-            diffract=amplitude,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=stage["beta_zero"],
-            beta_mode=stage["beta_mode"],
-            alpha_zero=stage["alpha_zero"],
-            alpha_mode=stage["alpha_mode"],
-            Phase=field,
-            seed=False,
-            plot_every=recipe["plot_every"],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=min(max(1, recipe["average_img"]), Nit),
-            Fourier_last=recipe["Fourier_last"],
-            gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
-            TV_freq=stage["TV_freq"],
-        )
-        stage_results.append(
-            {
-                "schedule_stage": stage_index,
-                "mode": mode,
-                "Nit": Nit,
-                "beta_zero": stage["beta_zero"],
-                "beta_mode": stage["beta_mode"],
-                "alpha_zero": stage["alpha_zero"],
-                "alpha_mode": stage["alpha_mode"],
-                "TV_freq": stage["TV_freq"],
-                "error": np.asarray(err_d),
-                "support_error": np.asarray(err_s),
-            }
-        )
-    return field, stage_results
 
 
 def _verify_multi_energy_recipe(recipe, nE):
@@ -2441,18 +2202,10 @@ def _verify_multi_energy_recipe(recipe, nE):
             "or 'rank1_spectral'."
         )
 
-    _build_update_schedule(
-        recipe,
-        name="inner",
-    )
-    _build_update_schedule(
-        recipe,
-        name="warmup",
-        allow_disabled=True,
-    )
-
     integer_keys = [
         "outer_iterations",
+        "inner_iterations",
+        "warmup_iterations",
         "projection_every",
         "projection_start",
         "average_img",
@@ -2464,6 +2217,10 @@ def _verify_multi_energy_recipe(recipe, nE):
 
     if recipe["outer_iterations"] <= 0:
         raise ValueError("outer_iterations must be > 0.")
+    if recipe["inner_iterations"] <= 0:
+        raise ValueError("inner_iterations must be > 0.")
+    if recipe["warmup_iterations"] < 0:
+        raise ValueError("warmup_iterations must be >= 0.")
     if recipe["projection_every"] <= 0:
         raise ValueError("projection_every must be > 0.")
     if recipe["projection_start"] < 0:
@@ -2476,6 +2233,8 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("final_fourier_constraint must be bool.")
     if recipe["plot_every"] <= 0:
         raise ValueError("plot_every must be > 0.")
+    if recipe["TV_freq"] <= 0:
+        raise ValueError("TV_freq must be > 0.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
 
@@ -2539,25 +2298,6 @@ def multi_energy_phase_retrieval_algorithm(
     """
     Jointly reconstruct several same-sample holograms measured at different
     photon energies.
-
-    Each outer iteration runs the complete ``mode``/``Nit`` schedule at every
-    energy before applying the selected cross-energy projection. For example::
-
-        mode = ["HAPRE", "ER"]
-        Nit = [700, 50]
-        beta_zero = [0.5, 0.9]
-        beta_mode = ["arctan", "const"]
-        alpha_zero = [0.0, 0.0]
-        alpha_mode = ["const", "const"]
-        TV_freq = [1e9, 1e9]
-
-    performs 700 HAPRE updates followed by 50 ER updates at each energy during
-    every outer iteration, using the corresponding beta, alpha, and TV values
-    for each stage. Any of those controls can instead be a scalar, which is
-    broadcast to all stages. ``warmup_mode`` and ``warmup_Nit`` define an
-    independent schedule run once before the joint iterations; optional
-    ``warmup_beta_*``, ``warmup_alpha_*``, and ``warmup_TV_freq`` settings
-    override its inherited controls.
 
     Selectable projection models
     ----------------------------
@@ -2678,34 +2418,42 @@ def multi_energy_phase_retrieval_algorithm(
 
     start_time = time.time()
 
-    warmup_schedule = _build_update_schedule(
-        recipe,
-        name="warmup",
-        allow_disabled=True,
-    )
-    if warmup_schedule:
+    warmup = int(recipe["warmup_iterations"])
+    if warmup > 0:
         for j in range(nE):
-            fields[j], stage_results = _run_energy_update_schedule(
-                fields[j],
-                amplitudes[j],
-                supportmask,
-                bsmasks[j],
-                warmup_schedule,
-                recipe,
+            fields[j], err_d, err_s, _ = PhaseRtrv_core(
+                diffract=amplitudes[j],
+                mask=supportmask,
+                mode=recipe["mode"],
+                Nit=warmup,
+                beta_zero=recipe["beta_zero"],
+                beta_mode=recipe["beta_mode"],
+                alpha_zero=recipe["alpha_zero"],
+                alpha_mode=recipe["alpha_mode"],
+                Phase=fields[j],
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmasks[j],
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), warmup),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=warmup + 1,
+                RL_it=0,
+                TV_freq=recipe["TV_freq"],
             )
-            for stage_result in stage_results:
-                errors["energy_steps"].append({
+            errors["energy_steps"].append(
+                {
                     "outer": -1,
                     "energy": j,
+                    "Nit": warmup,
+                    "error": np.asarray(err_d),
                     "stage": "warmup",
-                    **stage_result,
-                })
+                }
+            )
 
     outer_iterations = int(recipe["outer_iterations"])
-    inner_schedule = _build_update_schedule(
-        recipe,
-        name="inner",
-    )
+    inner_iterations = int(recipe["inner_iterations"])
     projection_every = int(recipe["projection_every"])
     projection_start = int(recipe["projection_start"])
 
@@ -2718,21 +2466,36 @@ def multi_energy_phase_retrieval_algorithm(
             energy_order = np.arange(nE)
 
         for j in energy_order:
-            fields[j], stage_results = _run_energy_update_schedule(
-                fields[j],
-                amplitudes[j],
-                supportmask,
-                bsmasks[j],
-                inner_schedule,
-                recipe,
+            fields[j], err_d, err_s, _ = PhaseRtrv_core(
+                diffract=amplitudes[j],
+                mask=supportmask,
+                mode=recipe["mode"],
+                Nit=inner_iterations,
+                beta_zero=recipe["beta_zero"],
+                beta_mode=recipe["beta_mode"],
+                alpha_zero=recipe["alpha_zero"],
+                alpha_mode=recipe["alpha_mode"],
+                Phase=fields[j],
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmasks[j],
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), inner_iterations),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=inner_iterations + 1,
+                RL_it=0,
+                TV_freq=recipe["TV_freq"],
             )
-            for stage_result in stage_results:
-                errors["energy_steps"].append({
+            errors["energy_steps"].append(
+                {
                     "outer": outer,
                     "energy": int(j),
+                    "Nit": inner_iterations,
+                    "error": np.asarray(err_d),
                     "stage": "joint",
-                    **stage_result,
-                })
+                }
+            )
 
         do_projection = (
             outer >= projection_start
