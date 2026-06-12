@@ -38,6 +38,93 @@ class PhaseRetrievalCoreMultimodeTests(unittest.TestCase):
         np.testing.assert_allclose(result, expected, atol=3e-7, rtol=1e-7)
         np.testing.assert_allclose(errors, expected_errors, atol=1e-10)
 
+    def test_single_mode_matches_core_partial_coherence(self):
+        rng = np.random.default_rng(21)
+        shape = (6, 6)
+        diffract = rng.uniform(0.5, 1.5, shape)
+        phase = diffract * np.exp(
+            1j * rng.uniform(-np.pi, np.pi, shape)
+        )
+        gamma = np.ones(shape, dtype=float)
+        gamma /= np.sum(gamma)
+        kwargs = {
+            "diffract": diffract,
+            "mask": np.ones(shape),
+            "mode": "ER",
+            "Nit": 5,
+            "Phase": phase,
+            "average_img": 2,
+            "plot_every": 2,
+            "Fourier_last": True,
+            "gamma": gamma,
+            "RL_freq": 2,
+            "RL_it": 1,
+        }
+
+        expected, expected_errors, _, expected_gamma = (
+            single.PhaseRtrv_core(**kwargs)
+        )
+        result, errors, _, result_gamma = multi.PhaseRtrv_core(
+            **kwargs, Nmodes=1
+        )
+
+        np.testing.assert_allclose(result, expected, atol=4e-7, rtol=1e-7)
+        np.testing.assert_allclose(errors, expected_errors, atol=1e-10)
+        np.testing.assert_allclose(
+            result_gamma, expected_gamma, atol=3e-10, rtol=1e-7
+        )
+
+    def test_single_mode_public_wrapper_matches_standard_wrapper(self):
+        rng = np.random.default_rng(22)
+        shape = (6, 6)
+        pos = rng.uniform(0.5, 2.0, shape)
+        neg = rng.uniform(0.5, 2.0, shape)
+        mask = np.zeros(shape, dtype=int)
+        support = np.zeros(shape)
+        support[1:5, 1:5] = 1
+        start = np.fft.fftshift(
+            np.fft.ifft2(np.fft.ifftshift(support))
+        )
+        recipe = {
+            "algorithm_list": ["ER", "ER"],
+            "number_iterations": [3, 3],
+            "helicity": ["pos", "neg"],
+            "beta_zero": [0.5, 0.5],
+            "beta_mode": ["const", "const"],
+            "alpha_zero": [0.0, 0.0],
+            "alpha_mode": ["const", "const"],
+            "RL_its": [0, 0],
+            "RL_freqs": [4, 4],
+            "TV_freqs": [10, 10],
+            "plot_every": [2, 2],
+            "average_img": [2, 2],
+            "Fourier_last": [True, True],
+            "hologram_intensity_cutoff_vmin": -1,
+            "Startimage": [start, "pos"],
+            "Startgamma": [None, None],
+        }
+
+        expected = single.phase_retrieval_algorithm(
+            pos, neg, mask, support, recipe
+        )
+        result = multi.phase_retrieval_algorithm(
+            pos, neg, mask, support, {**recipe, "Nmodes": 1}
+        )
+
+        for index in [0, 1, 4, 5, 6, 7]:
+            np.testing.assert_allclose(
+                result[index], expected[index], atol=3e-7, rtol=1e-7
+            )
+        for result_step, expected_step in zip(
+            result[8]["steps"], expected[8]["steps"]
+        ):
+            np.testing.assert_allclose(
+                result_step["error"],
+                expected_step["error"],
+                atol=1e-7,
+                rtol=1e-7,
+            )
+
     def test_multimode_final_constraint_uses_summed_intensity(self):
         rng = np.random.default_rng(4)
         shape = (8, 8)
