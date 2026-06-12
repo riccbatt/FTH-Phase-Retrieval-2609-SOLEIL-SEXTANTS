@@ -1330,8 +1330,11 @@ def Error_diffract_cp(guess, diffract):
     Num=xp.abs(diffract-guess)**2
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
-    with xp.errstate(divide="ignore", invalid="ignore"):
+    try:
+        with xp.errstate(divide="ignore", invalid="ignore"):
         Error=10*xp.log10(Error)
+    except FloatingPointError:
+        Error = xp.inf
     return to_numpy(Error, xp)
 
 
