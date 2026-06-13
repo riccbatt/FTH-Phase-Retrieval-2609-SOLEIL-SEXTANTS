@@ -217,6 +217,42 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
                 kt_delta_m_range=(0.01, np.inf),
             )
 
+    def test_shared_charge_bounds_response_and_reduced_magnetization(self):
+        charge = np.full((3, 4), 0.02 + 0.01j)
+        response = np.full((3, 4), -0.03 + 0.06j)
+        mz_a = np.full((3, 4), 0.8)
+        mz_b = np.full((3, 4), -0.4)
+        log_objects = np.stack([
+            charge + response * mz_a,
+            charge - response * mz_a,
+            charge + response * mz_b,
+        ])
+
+        projected, components = dichroic.project_log_objects_dichroic(
+            log_objects,
+            state_labels=["a", "a", "b"],
+            polarization_signs=[1, -1, 1],
+            kt_delta_m_range=(0.05, 0.07),
+            kt_beta_m_range=(0.02, 0.04),
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected, log_objects, atol=1e-10)
+        self.assertTrue(components["physical_response_bounds_applied"])
+        self.assertLessEqual(np.max(np.abs(components["magnetization"])), 1.0)
+        self.assertTrue(
+            np.all(
+                (components["magnetic_phase_shift"] >= 0.05)
+                & (components["magnetic_phase_shift"] <= 0.07)
+            )
+        )
+        self.assertTrue(
+            np.all(
+                (components["magnetic_log_attenuation"] >= 0.02)
+                & (components["magnetic_log_attenuation"] <= 0.04)
+            )
+        )
+
     def test_saturated_reference_accepts_negative_saturation_flag(self):
         rng = np.random.default_rng(45)
         charge = (

@@ -232,6 +232,42 @@ def _modal_amplitude_numpy(arr):
     return np.sqrt(_modal_intensity_numpy(arr))
 
 
+def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
+    """Return one coherent or partially coherent intensity per mode."""
+    convolved = xp.zeros_like(current_guess, dtype=xp.complex128)
+    for mode_index in range(nmodes):
+        intensity = xp.abs(current_guess[mode_index]) ** 2
+        if current_gamma is None:
+            convolved[mode_index] = intensity
+        else:
+            convolved[mode_index] = ifft2(
+                fft2(intensity) * fft2(current_gamma[mode_index])
+            )
+    return convolved
+
+
+def _apply_modal_fourier_constraint(
+    current_guess,
+    current_convolved,
+    measured_amplitude,
+    observed,
+    invalid,
+):
+    """Jointly rescale all modes to match the measured total intensity."""
+    total_intensity = xp.sum(current_convolved, axis=0)
+    modal_amplitude = xp.sqrt(total_intensity)
+    modal_amplitude = xp.where(
+        xp.abs(modal_amplitude) > 1e-30,
+        modal_amplitude,
+        1e-30,
+    )
+    factor = measured_amplitude / modal_amplitude
+    return current_guess * (
+        observed[None, :, :] * factor[None, :, :]
+        + invalid[None, :, :]
+    )
+
+
 def _verify_valid_phase_retrieval_recipe(recipe):
     """
     Validate the flat phase-retrieval recipe.
@@ -1210,36 +1246,25 @@ def PhaseRtrv_core(
     else:
         gamma_cp = None
 
-    def _compute_convolved(current_guess, current_gamma):
-        """Return modal convolved intensities with shape (Nmodes, nx, ny)."""
-        out = xp.zeros_like(current_guess, dtype=xp.complex128)
-        if current_gamma is None:
-            for mm in range(Nmodes):
-                out[mm] = xp.abs(current_guess[mm]) ** 2
-        else:
-            for mm in range(Nmodes):
-                out[mm] = ifft2(
-                    fft2(xp.abs(current_guess[mm]) ** 2) * fft2(current_gamma[mm])
-                )
-        return out
-
-    def _apply_fourier_constraint(current_guess, current_convolved):
-        """Apply the measured 2D amplitude constraint to all modes."""
-        total_intensity = xp.sum(current_convolved, axis=0)
-        mod = xp.sqrt(total_intensity)
-        mod = xp.where(xp.abs(mod) > 1e-30, mod, 1e-30)
-        factor = diffract_cp / mod
-        return current_guess * (obs[None, :, :] * factor[None, :, :] + BSmask_cp[None, :, :])
-
-    convolved = _compute_convolved(guess_cp, gamma_cp)
+    convolved = _modal_convolved_intensities(guess_cp, gamma_cp, Nmodes)
     prev = xp.zeros_like(guess_cp, dtype=xp.complex128)
-    initial_constrained = _apply_fourier_constraint(guess_cp, convolved)
+    initial_constrained = _apply_modal_fourier_constraint(
+        guess_cp,
+        convolved,
+        diffract_cp,
+        obs,
+        BSmask_cp,
+    )
     for m in range(Nmodes):
         prev[m] = fft2(initial_constrained[m])
 
     if not use_RL:
         guess_cp = initial_constrained
-        convolved = _compute_convolved(guess_cp, gamma_cp)
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
 
     Error_diffr_list = []
     Error_supp_list = []
@@ -1257,11 +1282,23 @@ def PhaseRtrv_core(
         beta = float(Beta[s])
         alpha = float(Alpha[s])
 
-        convolved = _compute_convolved(guess_cp, gamma_cp)
-        guess_cp = _apply_fourier_constraint(guess_cp, convolved)
+        # Apply one measured-intensity constraint jointly to all modes.
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+        guess_cp = _apply_modal_fourier_constraint(
+            guess_cp,
+            convolved,
+            diffract_cp,
+            obs,
+            BSmask_cp,
+        )
 
         new_guess = xp.zeros_like(guess_cp)
 
+        # Update every mode independently in support space.
         for m in range(Nmodes):
             inv = fft2(guess_cp[m])
 
@@ -1272,6 +1309,7 @@ def PhaseRtrv_core(
             prev[m] = inv.copy()
             new_guess[m] = ifft2(inv)
 
+        # Update partial-coherence kernels only at the requested RL interval.
         if use_RL and s > RL_freq and (s % RL_freq == 0):
             for m in range(Nmodes):
                 convolved_new_m = ifft2(
@@ -1287,7 +1325,11 @@ def PhaseRtrv_core(
                 )
 
         guess_cp = new_guess
-        convolved = _compute_convolved(guess_cp, gamma_cp)
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
 
         total_intensity = xp.sum(convolved, axis=0)
         if use_RL:
@@ -1297,6 +1339,7 @@ def PhaseRtrv_core(
             err_guess = obs * xp.sqrt(total_intensity)
             err_target = obs * diffract_cp
 
+        # Record errors and retain the best late-iteration candidates.
         if s <= 2 or (s % plot_every == 0) or (s >= start_best_at):
             err = Error_diffract_cp(err_guess, err_target)
             Error_diffr_list.append(err)
@@ -1316,8 +1359,18 @@ def PhaseRtrv_core(
         gamma_cp = xp.mean(Best_gamma, axis=0)
 
     if Fourier_last:
-        convolved = _compute_convolved(guess_cp, gamma_cp)
-        guess_cp = _apply_fourier_constraint(guess_cp, convolved)
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+        guess_cp = _apply_modal_fourier_constraint(
+            guess_cp,
+            convolved,
+            diffract_cp,
+            obs,
+            BSmask_cp,
+        )
 
     guess = to_numpy(guess_cp, xp)
     guess = np.fft.ifftshift(guess, axes=(-2, -1))
@@ -1339,6 +1392,7 @@ def PhaseRtrv_core(
 # ############################################################
 
 def _grad_backward_1D_cp(u, ax):
+    """Return the backward finite difference along one array axis."""
     out = xp.empty_like(u, dtype=u.dtype)
 
     s1 = [slice(None)] * u.ndim
@@ -1359,6 +1413,7 @@ def _grad_backward_1D_cp(u, ax):
 
 
 def _grad_forward_1D_cp(u, ax):
+    """Return the forward finite difference along one array axis."""
     out = xp.empty_like(u, dtype=u.dtype)
 
     s1 = [slice(None)] * u.ndim

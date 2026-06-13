@@ -41,6 +41,7 @@ plot_phase_retrieval_errors = multimode.plot_phase_retrieval_errors
 
 
 def _validate_nmodes(nmodes):
+    """Validate and return a strictly positive integer mode count."""
     if isinstance(nmodes, bool) or not isinstance(nmodes, (int, np.integer)):
         raise ValueError("Nmodes must be a positive integer.")
     nmodes = int(nmodes)
@@ -64,12 +65,14 @@ def _as_energy_mode_stack(fields, name="fields"):
 
 
 def _maybe_squeeze_energy_modes(fields, nmodes):
+    """Remove the singleton mode axis when reconstructing exactly one mode."""
     if nmodes == 1 and np.asarray(fields).ndim == 4:
         return fields[:, 0]
     return fields
 
 
 def _modal_amplitude(fields):
+    """Return the square root of summed modal intensity at every energy."""
     fields, _ = _as_energy_mode_stack(fields)
     return np.sqrt(np.sum(np.abs(fields) ** 2, axis=1))
 
@@ -166,6 +169,7 @@ def default_multi_energy_phase_retrieval_recipe():
 
 
 def _verify_multi_energy_multimode_recipe(recipe, n_energy):
+    """Validate multi-energy settings plus multimode-specific parameters."""
     multi_energy._verify_multi_energy_recipe(recipe, n_energy)
     _validate_nmodes(recipe["Nmodes"])
     seed = recipe["mode_initialization_seed"]
@@ -183,6 +187,7 @@ def _initialize_modal_fields(
     nmodes,
     random_seed,
 ):
+    """Create normalized, nondegenerate modal fields at every energy."""
     n_energy, nx, ny = amplitudes.shape
     support_modes = multimode._as_modes(
         supportmask,

@@ -1138,6 +1138,7 @@ def PhaseRtrv_core(
         beta = float(Beta[s])
         alpha = float(Alpha[s])
 
+        # Apply the measured Fourier constraint, including partial coherence.
         if use_RL:
             factor = diffract_cp / xp.sqrt(convolved)
             guess_cp[obs] *= factor[obs]
@@ -1148,6 +1149,7 @@ def PhaseRtrv_core(
                 diffract_cp * xp.exp(1j * xp.angle(guess_cp)),
             )
 
+        # Transform to support space and apply TV plus the selected projection.
         inv = fft2(guess_cp)
 
         if ((s%TV_freq)==0) and alpha > 0:
@@ -1158,6 +1160,7 @@ def PhaseRtrv_core(
 
         new_guess = ifft2(inv)
 
+        # Optionally update the coherence kernel from the projected field.
         if use_RL:
             if s > RL_freq and (s % RL_freq == 0):
                 convolved_new = ifft2(fft2(xp.abs(new_guess) ** 2) * fft2(gamma_cp))
@@ -1181,6 +1184,7 @@ def PhaseRtrv_core(
             err_guess = xp.abs(guess_cp) * obs
             err_target = diffract_cp * obs
 
+        # Record errors and retain the best late-iteration candidates.
         if s <= 2 or (s % plot_every == 0) or (s >= start_best_at):
             err = Error_diffract_cp(err_guess, err_target)
             Error_diffr_list.append(err)
@@ -1227,6 +1231,7 @@ def PhaseRtrv_core(
 # ############################################################
 
 def _grad_backward_1D_cp(u, ax):
+    """Return the backward finite difference along one array axis."""
     out = xp.empty_like(u, dtype=u.dtype)
 
     s1 = [slice(None)] * u.ndim
@@ -1247,6 +1252,7 @@ def _grad_backward_1D_cp(u, ax):
 
 
 def _grad_forward_1D_cp(u, ax):
+    """Return the forward finite difference along one array axis."""
     out = xp.empty_like(u, dtype=u.dtype)
 
     s1 = [slice(None)] * u.ndim
@@ -1563,6 +1569,7 @@ def project_log_object_low_rank(
 # -------------------------------------------------------------------------
 
 def _energy_axis_for_kk(energy_values, nE):
+    """Validate the positive, increasing energy axis used by KK constraints."""
     if energy_values is None:
         raise ValueError("energy_values must be provided for KK-based constraints.")
     energy_values = np.asarray(energy_values, dtype=float)
@@ -1578,6 +1585,7 @@ def _energy_axis_for_kk(energy_values, nE):
 
 
 def _normalize_vector(v, mode="l2"):
+    """Return a real vector normalized with the requested scale convention."""
     v = np.asarray(v, dtype=float)
     if mode == "none":
         return v.copy()
@@ -1685,6 +1693,7 @@ def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real")
 
 
 def _extract_absorption_part(a, absorption_part="real"):
+    """Extract the designated absorptive component of a complex spectrum."""
     if absorption_part == "real":
         return np.real(a)
     if absorption_part == "imag":
@@ -1693,6 +1702,7 @@ def _extract_absorption_part(a, absorption_part="real"):
 
 
 def _extract_dispersion_part(a, absorption_part="real"):
+    """Extract the designated dispersive component of a complex spectrum."""
     if absorption_part == "real":
         return np.imag(a)
     if absorption_part == "imag":
@@ -2371,6 +2381,7 @@ def _run_energy_update_schedule(
 
 
 def _verify_multi_energy_recipe(recipe, nE):
+    """Validate schedules, projection settings, weights, and spectral inputs."""
     allowed_models = {
         "none",
         "no",

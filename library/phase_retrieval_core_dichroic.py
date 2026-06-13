@@ -86,7 +86,7 @@ def default_dichroic_phase_retrieval_recipe():
         "observation_weights": None,
         "rank_deficient": "error",
         "saturated_states": None,
-        "clip_magnetization": False,
+        "clip_magnetization": True,
         "kt_delta_m_range": None,
         "kt_beta_m_range": None,
         "log_floor": 1e-12,
@@ -145,6 +145,7 @@ def dichroic_design_matrix(state_labels, polarization_signs):
 
 
 def _observation_weights(weights, n_observations):
+    """Return validated positive weights, defaulting to equal weighting."""
     if weights is None:
         return np.ones(n_observations, dtype=float)
     weights = np.asarray(weights, dtype=float)
@@ -164,6 +165,8 @@ def project_log_objects_dichroic(
     weights=None,
     relaxation=1.0,
     rank_deficient="error",
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
     return_components=False,
 ):
     """
@@ -205,7 +208,35 @@ def project_log_objects_dichroic(
     weighted_data = data * sqrt_weights[:, None]
     coefficients = np.linalg.pinv(weighted_design) @ weighted_data
     fitted = design @ coefficients
-    projected = fitted.reshape(n_observations, nx, ny)
+    charge = coefficients[0].reshape(nx, ny)
+    magnetic = coefficients[1:].reshape(len(state_names), nx, ny)
+    uses_response_bounds = (
+        kt_delta_m_range is not None or kt_beta_m_range is not None
+    )
+    physical_info = {}
+    if uses_response_bounds:
+        response, magnetization, magnetic, physical_info = (
+            _project_bounded_magnetic_terms(
+                magnetic,
+                kt_delta_m_range=kt_delta_m_range,
+                kt_beta_m_range=kt_beta_m_range,
+            )
+        )
+        labels = np.asarray(state_labels)
+        signs = np.asarray(polarization_signs, dtype=float)
+        magnetic_by_state = {
+            state: magnetic[index]
+            for index, state in enumerate(state_names)
+        }
+        projected = np.stack(
+            [
+                charge + signs[index] * magnetic_by_state[state]
+                for index, state in enumerate(labels.tolist())
+            ]
+        )
+    else:
+        projected = fitted.reshape(n_observations, nx, ny)
+
     if relaxation < 1:
         projected = (
             (1 - relaxation) * log_objects
@@ -215,11 +246,10 @@ def project_log_objects_dichroic(
     if not return_components:
         return projected
 
-    magnetic = coefficients[1:].reshape(len(state_names), nx, ny)
-    residual = data - fitted
+    residual = log_objects - projected
     components = {
         "projection_model": "shared_charge",
-        "charge_log_object": coefficients[0].reshape(nx, ny),
+        "charge_log_object": charge,
         "magnetic_log_objects": magnetic,
         "magnetic_log_objects_by_state": {
             state: magnetic[index]
@@ -234,6 +264,25 @@ def project_log_objects_dichroic(
         "identifiable": design_rank == n_components,
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
     }
+    if uses_response_bounds:
+        components.update({
+            "magnetic_response": response,
+            "magnetic_log_attenuation": -np.real(response),
+            "magnetic_phase_shift": np.imag(response),
+            "magnetization": magnetization,
+            "magnetization_by_state": {
+                state: magnetization[index]
+                for index, state in enumerate(state_names)
+            },
+        })
+        components.update(physical_info)
+    else:
+        components.update({
+            "physical_response_bounds_applied": False,
+            "kt_delta_m_range": None,
+            "kt_beta_m_range": None,
+            "response_bounds": {},
+        })
     return projected, components
 
 
@@ -341,6 +390,79 @@ def _constrain_magnetic_response(
     }
 
 
+def _project_bounded_magnetic_terms(
+    magnetic,
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
+    iterations=20,
+):
+    """
+    Fit ``M_s = q*mz_s`` with real ``mz_s`` constrained to ``[-1, 1]``.
+
+    The response is projected onto the optional component bounds after every
+    least-squares update. Without a saturated state the factorization can
+    remain non-unique, but every returned solution obeys the supplied response
+    ranges and the reduced-magnetization bound.
+    """
+    magnetic = np.asarray(magnetic, dtype=np.complex128)
+    if magnetic.ndim != 3:
+        raise ValueError("magnetic must have shape (n_states, nx, ny).")
+
+    # The phase of sum(M_s**2)/2 is the least-squares real-line direction.
+    direction_moment = np.sum(magnetic**2, axis=0)
+    direction = np.exp(0.5j * np.angle(direction_moment))
+    projections = np.real(np.conj(direction)[None] * magnetic)
+    response = direction * np.max(np.abs(projections), axis=0)
+    response, physical_info = _constrain_magnetic_response(
+        response,
+        kt_delta_m_range=kt_delta_m_range,
+        kt_beta_m_range=kt_beta_m_range,
+    )
+
+    magnetization = np.zeros(magnetic.shape, dtype=float)
+    for _ in range(iterations):
+        response_power = np.abs(response) ** 2
+        valid_response = response_power > 1e-30
+        magnetization.fill(0.0)
+        magnetization[:, valid_response] = np.clip(
+            np.real(
+                np.conj(response[valid_response])[None]
+                * magnetic[:, valid_response]
+            )
+            / response_power[valid_response][None],
+            -1.0,
+            1.0,
+        )
+
+        denominator = np.sum(magnetization**2, axis=0)
+        valid_fit = denominator > 1e-30
+        fitted_response = response.copy()
+        fitted_response[valid_fit] = (
+            np.sum(magnetization * magnetic, axis=0)[valid_fit]
+            / denominator[valid_fit]
+        )
+        response, physical_info = _constrain_magnetic_response(
+            fitted_response,
+            kt_delta_m_range=kt_delta_m_range,
+            kt_beta_m_range=kt_beta_m_range,
+        )
+
+    response_power = np.abs(response) ** 2
+    valid_response = response_power > 1e-30
+    magnetization.fill(0.0)
+    magnetization[:, valid_response] = np.clip(
+        np.real(
+            np.conj(response[valid_response])[None]
+            * magnetic[:, valid_response]
+        )
+        / response_power[valid_response][None],
+        -1.0,
+        1.0,
+    )
+    projected_magnetic = response[None] * magnetization
+    return response, magnetization, projected_magnetic, physical_info
+
+
 def project_log_objects_saturated_reference(
     log_objects,
     state_labels,
@@ -349,7 +471,7 @@ def project_log_objects_saturated_reference(
     weights=None,
     relaxation=1.0,
     rank_deficient="error",
-    clip_magnetization=False,
+    clip_magnetization=True,
     kt_delta_m_range=None,
     kt_beta_m_range=None,
     return_components=False,
@@ -477,6 +599,8 @@ def project_fourier_fields_dichroic(
     weights=None,
     relaxation=1.0,
     rank_deficient="error",
+    kt_delta_m_range=None,
+    kt_beta_m_range=None,
     log_floor=1e-12,
     return_components=False,
 ):
@@ -493,6 +617,8 @@ def project_fourier_fields_dichroic(
         weights=weights,
         relaxation=relaxation,
         rank_deficient=rank_deficient,
+        kt_delta_m_range=kt_delta_m_range,
+        kt_beta_m_range=kt_beta_m_range,
         return_components=return_components,
     )
     if return_components:
@@ -509,7 +635,7 @@ def project_fourier_fields_saturated_reference(
     weights=None,
     relaxation=1.0,
     rank_deficient="error",
-    clip_magnetization=False,
+    clip_magnetization=True,
     kt_delta_m_range=None,
     kt_beta_m_range=None,
     log_floor=1e-12,
@@ -541,6 +667,7 @@ def project_fourier_fields_saturated_reference(
 
 
 def _project_fields(fields, labels, signs, recipe, relaxation):
+    """Dispatch fields to the selected dichroic projection model."""
     model = recipe["projection_model"]
     if model == "shared_charge":
         return project_fourier_fields_dichroic(
@@ -550,6 +677,8 @@ def _project_fields(fields, labels, signs, recipe, relaxation):
             weights=recipe["observation_weights"],
             relaxation=relaxation,
             rank_deficient=recipe["rank_deficient"],
+            kt_delta_m_range=recipe["kt_delta_m_range"],
+            kt_beta_m_range=recipe["kt_beta_m_range"],
             log_floor=recipe["log_floor"],
             return_components=True,
         )
@@ -572,6 +701,7 @@ def _project_fields(fields, labels, signs, recipe, relaxation):
 
 
 def _verify_recipe(recipe, n_observations):
+    """Validate update schedules, physical bounds, and projection settings."""
     core._build_update_schedule(recipe, name="inner")
     core._build_update_schedule(
         recipe,
@@ -622,6 +752,15 @@ def _verify_recipe(recipe, n_observations):
             "saturated_states is required for "
             "projection_model='saturated_reference'."
         )
+    has_response_bounds = (
+        recipe["kt_delta_m_range"] is not None
+        or recipe["kt_beta_m_range"] is not None
+    )
+    if has_response_bounds and recipe["projection_model"] == "none":
+        raise ValueError(
+            "kt_delta_m_range and kt_beta_m_range require "
+            "projection_model='shared_charge' or 'saturated_reference'."
+        )
     if not isinstance(recipe["clip_magnetization"], bool):
         raise ValueError("clip_magnetization must be bool.")
     _constrain_magnetic_response(
@@ -644,6 +783,7 @@ def _run_update_schedule(
     schedule,
     recipe,
 ):
+    """Run every configured phase-retrieval stage for one observation."""
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         Nit = stage["Nit"]
@@ -680,6 +820,7 @@ def _run_update_schedule(
 
 
 def _apply_measured_amplitudes(fields, amplitudes, bsmasks):
+    """Reapply measured Fourier amplitudes outside invalid-pixel regions."""
     constrained = np.asarray(fields).copy()
     observed = bsmasks == 0
     constrained[observed] = (

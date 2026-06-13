@@ -7,6 +7,7 @@ This page describes the theory, implementation, and main usage of:
 - `phase_retrieval_core_multienergy.py`
 - `phase_retrieval_core_multienergy_multimode.py`
 - `phase_retrieval_core_dichroic.py`
+- `phase_retrieval_core_general.py`
 
 The examples focus on the reconstruction calls. Data preparation, centering,
 support construction, and detector corrections are intentionally outside their
@@ -985,9 +986,9 @@ These tables apply to
 | `observation_weights` | `None` | Optional positive least-squares weight for each hologram. |
 | `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary pseudoinverse gauge. |
 | `saturated_states` | `None` | Sequence interpreted as saturated `+1` states, or dictionary mapping state labels to `+1`/`-1`. |
-| `clip_magnetization` | `False` | Clip fitted nonsaturated `m_z` maps to the interval `[-1, 1]`. |
-| `kt_delta_m_range` | `None` | Optional lower/upper bounds for the retrieved product `k*t*delta_m`. |
-| `kt_beta_m_range` | `None` | Optional lower/upper bounds for the retrieved product `k*t*beta_m`. |
+| `clip_magnetization` | `True` | Enforce the reduced-magnetization interval `[-1, 1]` in saturated-reference fits. Set `False` only for diagnostic unconstrained fits. |
+| `kt_delta_m_range` | `None` | Optional lower/upper bounds for `k*t*delta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
+| `kt_beta_m_range` | `None` | Optional lower/upper bounds for `k*t*beta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
 | `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
 
 ### Flowchart
@@ -1003,6 +1004,10 @@ flowchart TD
     E -- Yes --> F[Convert to complex<br/>log-exit waves]
     F --> G{Dichroic projection}
     G -- shared charge --> I[Fit common charge and<br/>state magnetic terms]
+    I --> W{Response ranges<br/>provided?}
+    W -- Yes --> X[Fit bounded q and<br/>real mz in -1 to +1]
+    W -- No --> O
+    X --> O
     G -- saturated --> J[Fit charge and<br/>magnetic terms]
     J --> K[Infer q from<br/>saturated states]
     K --> L{Optional kt-delta<br/>or kt-beta bounds?}
@@ -1010,7 +1015,6 @@ flowchart TD
     L -- Yes --> N[Clip corresponding<br/>q components]
     M --> P[Fit real mz maps<br/>for all states]
     N --> P
-    I --> O
     P --> O
     O -- Yes --> D
     O -- No --> Q{Projection model<br/>is none?}
@@ -1154,6 +1158,42 @@ Every pair of reconstructed images can be represented this way, so the
 `shared_charge` projection has no residual to reject. Stability improves when
 the system is overdetermined, when several observations share the same latent
 components, or when the stronger saturated-reference model is valid.
+
+Without response ranges, `shared_charge` retrieves only a separate complex
+magnetic term for each state:
+
+$$
+M_s(\mathbf r)=q(\mathbf r)m_{z,s}(\mathbf r).
+$$
+
+The physical condition $-1\le m_{z,s}\le1$ restricts this ambiguity but does
+not normally select a unique scale. For example, the transformation
+
+$$
+q\longrightarrow a q,
+\qquad
+m_{z,s}\longrightarrow \frac{m_{z,s}}{a}
+$$
+
+leaves every $M_s$ unchanged whenever the rescaled magnetizations remain
+inside `[-1, 1]`. Thus the unconstrained shared-charge result still does not
+identify a unique $q$.
+
+When `kt_delta_m_range` or `kt_beta_m_range` is supplied, the library uses the
+additional physical condition $-1\le m_z\le1$. It alternates between fitting
+real, clipped magnetization maps and fitting a common complex response $q$
+inside the supplied component ranges. This produces a feasible bounded
+factorization
+
+$$
+M_s(\mathbf r)\approx q(\mathbf r)m_{z,s}(\mathbf r),
+\qquad -1\le m_{z,s}(\mathbf r)\le1.
+$$
+
+A saturated state is therefore not required to use response ranges. Without a
+saturated anchor, however, multiple feasible factorizations can remain, so the
+returned $q$ should be interpreted as a range-constrained solution rather than
+a uniquely data-determined material response.
 
 This is closely related to a low-rank projection because the observation
 matrix is restricted to the column space of a small number of latent maps.
@@ -1493,14 +1533,19 @@ refractive-index prior:
 ```
 
 If approximate ranges for the observable products are available, they may be
-imposed directly inside the joint projection:
+imposed in either joint projection:
 
 ```python
 recipe = {
+    "projection_model": "shared_charge",
     "kt_delta_m_range": (kt_delta_min, kt_delta_max),
     "kt_beta_m_range": (kt_beta_min, kt_beta_max),
 }
 ```
+
+In `shared_charge`, the ranges are combined with the universal reduced-
+magnetization condition $-1\le m_z\le1$. In `saturated_reference`, the known
+$m_z=+1$ or $-1$ state additionally fixes the response scale directly.
 
 These dimensionless bounds map directly to the inferred complex response. If
 the lower and upper values of `kt_delta_m_range` are denoted by
@@ -1624,7 +1669,454 @@ library rejects this rank-deficient geometry instead of returning an arbitrary
 decomposition. At least one opposite-polarization partner, or another
 independent physical normalization, is required.
 
-## 7. Choosing a Library
+## 7. General State/Energy/Polarization/Beam Library
+
+File: `library/phase_retrieval_core_general.py`
+
+### Observation metadata
+
+Every hologram is assigned four pieces of metadata:
+
+| Metadata | Physical role |
+|---|---|
+| `state_labels` | Selects the sample state $j$. |
+| `energy_labels` | Selects an energy or any illumination category expected to change the material response. |
+| `polarization_coefficients` | Multiplies the material response; normally $+1$ or $-1$. |
+| `beam_labels` | Selects a beam condition that changes the common field but not the material response. |
+
+For example, moving the beam gives a new `beam_label` while retaining the same
+state, energy, and polarization metadata. Changing photon energy gives a new
+`energy_label`. Reversing helicity normally changes only the polarization
+coefficient from $+1$ to $-1$.
+
+### Physical factorized model
+
+The default `projection_model="physical_factorized"` uses the exit wave:
+
+$$
+\phi_a(\mathbf r)
+=
+\phi_{c,m(a)}(\mathbf r)
+\exp\!\left[
+-i\kappa_{e(a)}t\,n_{c,e(a)}
+-p_a i\kappa_{e(a)}t\,n_{m,e(a)}
+m_{z,s(a)}(\mathbf r)
+\right].
+$$
+
+Here:
+
+- $m(a)$ is the illumination/beam condition;
+- $e(a)$ is the energy/response mode;
+- $s(a)$ is the magnetic state;
+- $p_a$ is the known polarization coefficient;
+- $\phi_{c,m}$ is the common field for illumination mode $m$;
+- $n_{c,e}$ is the charge refractive-index contribution at energy $e$;
+- $n_{m,e}$ is the magnetic refractive-index contribution at energy $e$;
+- $m_{z,s}(\mathbf r)$ is real and satisfies
+  $-1\le m_{z,s}(\mathbf r)\le1$.
+
+Beam condition does not index the charge or magnetic refractive indices.
+Measurements made after moving the beam therefore share both energy responses.
+
+If one experimental change affects both the common illumination field and the
+material response, change both labels. For example, if changing energy also
+changes the incident wavefront significantly, use a new `energy_label` and a
+new `beam_label` for that observation.
+
+Define:
+
+$$
+L_a=\log\phi_a,
+\qquad
+C_m=\log\phi_{c,m},
+\qquad
+q_{c,e}=-i\kappa_e t\,n_{c,e},
+\qquad
+q_{m,e}=-i\kappa_e t\,n_{m,e}.
+$$
+
+The fitted model is:
+
+$$
+L_a(\mathbf r)
+=
+C_{m(a)}(\mathbf r)
++
+q_{c,e(a)}
++
+p_aq_{m,e(a)}m_{z,s(a)}(\mathbf r).
+$$
+
+This factorization is nonlinear because $q_{m,e}$ and $m_{z,s}$ are both
+unknown. The code uses alternating projections:
+
+1. Fit one complex common field $C_m(\mathbf r)$ per beam condition.
+2. Fit real $m_{z,s}(\mathbf r)$ maps and clip them to `[-1, 1]`.
+3. Hold saturated states at their supplied $+1$ or $-1$ values.
+4. Fit scalar complex charge and magnetic responses at every energy.
+5. Apply optional spectral constraints and response-value bounds.
+6. Rebuild every observation from the constrained factors.
+
+The number of alternating factorization updates is controlled by
+`physical_iterations`.
+
+### Meaning of the three illumination changes
+
+#### Energy or response mode
+
+Changing `energy_labels` selects another charge and magnetic response:
+
+$$
+q_{c,e_1}\ne q_{c,e_2},
+\qquad
+q_{m,e_1}\ne q_{m,e_2}
+$$
+
+in general. The label can also represent another illumination property that is
+expected to change the material response in a way that is not a simple sign
+inversion.
+
+#### Polarization
+
+Polarization enters through the supplied coefficient:
+
+$$
+L_+=C_b+R_{je},
+\qquad
+L_-=C_b-R_{je}
+$$
+
+for a purely magnetic shorthand. In the full model, the charge term is
+unchanged and only the magnetic term changes sign:
+
+$$
+L_+=C_m+q_{c,e}+q_{m,e}m_z,
+\qquad
+L_-=C_m+q_{c,e}-q_{m,e}m_z.
+$$
+
+#### Beam condition
+
+Changing beam position or wavefront selects another common field:
+
+$$
+L_{a_1}=C_{m_1}+q_{c,e}+p q_{m,e}m_z,
+\qquad
+L_{a_2}=C_{m_2}+q_{c,e}+p q_{m,e}m_z.
+$$
+
+The same charge response, magnetic response, and magnetization map are shared.
+
+### Projection models
+
+| Model | Meaning |
+|---|---|
+| `"physical_factorized"` | Default physical model with $C_m$, $q_{c,e}$, $q_{m,e}$, and bounded real $m_z$. |
+| `"state_energy_beam"` | Flexible linear model $L=C_m+pR_{s,e}$ with one unrestricted complex response map per state-energy pair. |
+| `"none"` | Independent phase retrieval without a joint projection. |
+
+The linear model is useful for exploratory work and model checking. The
+physical model is more restrictive and can improve stability when its
+factorization matches the experiment.
+
+### Linear-model identifiability
+
+Let there be $B$ beam conditions and $Q$ observed `(state, energy)` response
+pairs. At each pixel there are $B+Q$ unknown complex values. The design matrix
+contains:
+
+- one coefficient `1` in the column for the observation's beam condition;
+- the value $p_a$ in the column for its state-energy response;
+- zeros elsewhere.
+
+For `state_energy_beam`, the decomposition is unique only when:
+
+$$
+\mathrm{rank}(\mathbf A)=B+Q.
+$$
+
+The default `rank_deficient="error"` rejects an acquisition geometry that
+cannot uniquely separate beam and material terms. The returned diagnostics are:
+
+```python
+components["design_matrix"]
+components["design_rank"]
+components["design_condition_number"]
+components["identifiable"]
+```
+
+A useful minimal anchor is one state-energy response measured at opposite
+polarizations under the same beam:
+
+$$
+C_b=\frac{L_++L_-}{2},
+\qquad
+R_{je}=\frac{L_+-L_-}{2}.
+$$
+
+Once that response is known, observing it under another beam condition
+determines the new $C_b$. Once a beam field is known, one observation of a new
+state-energy pair determines its response. In practice, repeated and
+overdetermined measurements are preferable because they improve conditioning
+and let the projection reject inconsistent reconstruction artefacts.
+
+Examples:
+
+| Measurements | Identifiable? |
+|---|---:|
+| One state and energy, one beam, both polarizations | Yes |
+| The above plus the same response under a moved beam | Yes |
+| An anchored beam plus additional states or energies measured once | Yes |
+| One unrelated state-energy response under each unrelated beam | No |
+| All observations at one polarization with an unanchored connected design | Generally no |
+
+`rank_deficient="minimum_norm"` permits a pseudoinverse result for exploratory
+work, but the separated beam and response components then depend on an
+arbitrary minimum-norm gauge.
+
+### Physical-model identifiability
+
+The physical factorization has two separate scale/gauge questions:
+
+- An arbitrary constant complex offset can be transferred between all $C_m$
+  and $q_{c,e}$. The implementation fixes this by setting the mean retrieved
+  charge response to zero before optional constraints. Absolute charge values
+  therefore require an external reference.
+- The transformation $q_{m,e}\to a q_{m,e}$ and
+  $m_{z,s}\to m_{z,s}/a$ leaves the magnetic product unchanged while the
+  rescaled magnetization remains in `[-1, 1]`. Saturated states with known
+  $m_z=+1$ or $-1$ anchor this magnetic scale.
+
+Returned diagnostics include:
+
+```python
+components["magnetic_scale_anchored"]
+components["charge_absolute_gauge_anchored"]
+components["charge_gauge"]
+```
+
+The default is still data driven: `saturated_states=None` and all spectral and
+value constraints set to `"free"` or `None`.
+
+### Spectral constraints
+
+Charge and magnetic responses have independent settings:
+
+```python
+"charge_spectral_constraint": "free"
+"magnetic_spectral_constraint": "free"
+```
+
+Each accepts the same modes as the multi-energy rank-one projector:
+
+| Mode | Action |
+|---|---|
+| `"free"` | Retrieve an arbitrary complex response at each energy. |
+| `"kk"` | Retrieve the absorption-like component and calculate the dispersion-like component with Kramers-Kronig. |
+| `"known_beta"` | Impose a supplied beta spectrum while retaining retrieved dispersion. |
+| `"known_beta_kk"` | Impose supplied beta and supplied or KK-calculated delta. |
+
+The corresponding inputs are:
+
+```python
+"energy_values"
+"known_charge_beta_spectrum"
+"known_charge_delta_spectrum"
+"known_magnetic_beta_spectrum"
+"known_magnetic_delta_spectrum"
+"charge_absorption_part"
+"magnetic_absorption_part"
+```
+
+As in the multi-energy library, supplied beta spectra must be imaginary
+refractive-index spectra, not raw absorption measurements. Conversion and
+spectral extension remain in `library/kramers_kronig.py`.
+
+### Response-value bounds
+
+Optional rectangular bounds can be imposed directly on the retrieved
+dimensionless log responses:
+
+```python
+"charge_response_real_range": (minimum, maximum)
+"charge_response_imag_range": (minimum, maximum)
+"magnetic_response_real_range": (minimum, maximum)
+"magnetic_response_imag_range": (minimum, maximum)
+```
+
+These constrain $q_{c,e}=-i\kappa_e t n_{c,e}$ and
+$q_{m,e}=-i\kappa_e t n_{m,e}$. Bounds on $n_c$ or $n_m$ can be converted to
+response bounds when $\kappa_e$ and thickness are independently known. The
+code deliberately constrains the observable products rather than pretending
+to recover refractive index and thickness separately.
+
+### What is retrieved
+
+The directly retrieved material quantity is:
+
+$$
+q_{c,e}=-i\kappa_e t\,n_{c,e},
+\qquad
+q_{m,e}=-i\kappa_e t\,n_{m,e}.
+$$
+
+Thickness and refractive index are not separated by diffraction data alone.
+The main returned components are:
+
+```python
+components["common_exit_waves"]
+components["common_log_objects_by_beam"]
+components["charge_response"]
+components["magnetic_response"]
+components["magnetization_by_state"]
+```
+
+If thickness and wave numbers are independently known:
+
+```python
+n_m = general.response_to_refractive_index(
+    components["magnetic_response"][:, None, None],
+    wave_numbers=wave_numbers,
+    thickness=thickness,
+    response_energy_indices=np.arange(len(wave_numbers)),
+)
+```
+
+The same helper can be used for `charge_response`. The order of wave numbers
+must match `components["energy_names"]`.
+
+### Flowchart
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 15, "rankSpacing": 22, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
+flowchart TD
+    A[Load holograms and four<br/>metadata arrays] --> B[Initialize one field<br/>per observation]
+    B --> C[Optional independent<br/>warmup]
+    C --> D[Run inner schedule<br/>for every observation]
+    D --> E{Joint projection due?}
+    E -- No --> K{More outer<br/>iterations?}
+    E -- Yes --> F[Convert fields to<br/>complex log-objects]
+    F --> G{Projection model}
+    G -- linear --> H[Fit C_m and free<br/>state-energy responses]
+    G -- physical --> I[Fit beam fields C_m]
+    I --> J[Fit real bounded mz maps<br/>and saturated states]
+    J --> L[Fit charge and magnetic<br/>responses versus energy]
+    L --> S[Apply spectral constraints<br/>and response bounds]
+    H --> T[Rebuild all log-objects]
+    S --> T
+    T --> M[Convert projected objects<br/>back to Fourier fields]
+    M --> K
+    K -- Yes --> D
+    K -- No --> N[Apply final full-strength<br/>joint projection]
+    N --> O{Final Fourier<br/>constraint?}
+    O -- Yes --> P[Apply measured<br/>Fourier amplitudes]
+    O -- No --> Q[Keep projected fields]
+    P --> R[Return fields, components,<br/>masks, and errors]
+    Q --> R
+```
+
+### Recipe reference
+
+| Recipe key | Default | Meaning |
+|---|---|---|
+| `inner_mode` | `["HAPRE"]` | Ordered phase-retrieval algorithms run for every observation in each outer iteration. |
+| `inner_Nit` | `[1]` | Iteration count for every inner stage. |
+| `outer_iterations` | `300` | Number of independent-update and joint-projection cycles. |
+| `warmup_mode` | `["HAPRE"]` | Independent algorithm schedule run before joint iterations. |
+| `warmup_Nit` | `[20]` | Warmup iterations. Set to `0` to disable warmup. |
+| `shuffle_observations` | `True` | Randomize observation order in each outer iteration. |
+| `random_seed` | `None` | Seed for observation shuffling. |
+| `beta_zero` | `0.5` | Feedback strength; scalar or one value per inner stage. |
+| `beta_mode` | `"arctan"` | Feedback schedule. |
+| `alpha_zero` | `0.0` | TV strength. Zero disables TV descent. |
+| `alpha_mode` | `"const"` | TV-strength schedule. |
+| `TV_freq` | `1e9` | Interval between TV updates. |
+| `warmup_beta_zero` | `None` | Warmup feedback strength. `None` inherits `beta_zero`. |
+| `warmup_beta_mode` | `None` | Warmup feedback schedule. |
+| `warmup_alpha_zero` | `None` | Warmup TV strength. |
+| `warmup_alpha_mode` | `None` | Warmup TV schedule. |
+| `warmup_TV_freq` | `None` | Warmup TV interval. |
+| `plot_every` | `1e9` | Error-sampling interval passed to each core call. |
+| `average_img` | `1` | Number of low-error late iterations averaged in each stage. |
+| `Fourier_last` | `True` | Keep stage outputs in the Fourier-field convention. |
+| `final_fourier_constraint` | `True` | Reapply measured amplitudes after the final projection. |
+| `hologram_intensity_cutoff_vmin` | `-1` | Optional low-percentile background subtraction. |
+| `projection_model` | `"physical_factorized"` | Use `"physical_factorized"`, flexible `"state_energy_beam"`, or `"none"`. |
+| `projection_every` | `1` | Apply the joint projection every this many outer iterations. |
+| `projection_start` | `0` | First outer-iteration index eligible for projection. |
+| `projection_relaxation` | `1.0` | Mixing strength between current and projected fields. |
+| `observation_weights` | `None` | Optional positive weight for each hologram. |
+| `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary gauge. |
+| `physical_iterations` | `20` | Alternating factorization updates per joint projection. |
+| `saturated_states` | `None` | Optional sequence of `+1` saturated states or mapping to `+1`/`-1`. |
+| `charge_spectral_constraint` | `"free"` | Charge spectrum mode: free, KK, known beta, or known beta plus KK. |
+| `magnetic_spectral_constraint` | `"free"` | Magnetic spectrum mode with the same choices. |
+| `energy_values` | `None` | Numerical energy axis required by KK constraints. |
+| `known_charge_beta_spectrum` | `None` | Optional known charge beta spectrum. |
+| `known_charge_delta_spectrum` | `None` | Optional known charge delta spectrum. |
+| `known_magnetic_beta_spectrum` | `None` | Optional known magnetic beta spectrum. |
+| `known_magnetic_delta_spectrum` | `None` | Optional known magnetic delta spectrum. |
+| `charge_absorption_part` | `"real"` | Complex-response component interpreted as charge absorption. |
+| `magnetic_absorption_part` | `"real"` | Complex-response component interpreted as magnetic absorption. |
+| `charge_response_real_range` | `None` | Optional real-component interval for the charge response. |
+| `charge_response_imag_range` | `None` | Optional imaginary-component interval for the charge response. |
+| `magnetic_response_real_range` | `None` | Optional real-component interval for the magnetic response. |
+| `magnetic_response_imag_range` | `None` | Optional imaginary-component interval for the magnetic response. |
+| `kk_sign` | `1.0` | Sign convention used for KK dispersion. |
+| `kk_subtract_baseline` | `True` | Subtract the spectral endpoint baseline before KK. |
+| `kk_normalize_input` | `False` | Normalize the retrieved absorption-like spectrum before KK. |
+| `known_spectrum_normalization` | `"none"` | Normalization for supplied spectra. |
+| `fit_known_spectrum_scale` | `True` | Fit scale between supplied and retrieved spectra. |
+| `fit_known_spectrum_offset` | `True` | Fit an additive supplied-spectrum offset. |
+| `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
+
+### Usage
+
+```python
+import numpy as np
+from library import phase_retrieval_core_general as general
+
+holograms = np.stack([
+    hologram_A_E1_plus_beam1,
+    hologram_A_E1_minus_beam1,
+    hologram_A_E1_plus_beam2,
+    hologram_B_E1_plus_beam1,
+    hologram_A_E2_plus_beam1,
+])
+
+fields, components, bsmasks, errors = (
+    general.general_phase_retrieval_algorithm(
+        holograms,
+        mask_pixel,
+        supportmask,
+        state_labels=["A", "A", "A", "B", "A"],
+        energy_labels=["E1", "E1", "E1", "E1", "E2"],
+        polarization_coefficients=[+1, -1, +1, +1, +1],
+        beam_labels=["beam1", "beam1", "beam2", "beam1", "beam1"],
+        saturated_states={"A": +1},
+        general_recipe={
+            "projection_model": "physical_factorized",
+            "inner_mode": ["HAPRE", "ER"],
+            "inner_Nit": [700, 50],
+            "outer_iterations": 100,
+            "warmup_Nit": 0,
+            "projection_relaxation": 0.5,
+            "magnetic_spectral_constraint": "free",
+            "magnetic_response_real_range": (-0.05, -0.01),
+        },
+    )
+)
+```
+
+In this example:
+
+- the first two observations separate `beam1` from response `(A, E1)`;
+- the third determines `beam2` while sharing the same `(A, E1)` response;
+- the fourth adds response `(B, E1)`;
+- the fifth adds the energy-dependent response `(A, E2)`.
+
+## 8. Choosing a Library
 
 | Data/model | Library |
 |---|---|
@@ -1633,12 +2125,13 @@ independent physical normalization, is required.
 | Energy stack with shared spectral structure | `phase_retrieval_core_multienergy` |
 | Energy stack with incoherent modes | `phase_retrieval_core_multienergy_multimode` |
 | Multiple magnetic states or helicities with shared charge | `phase_retrieval_core_dichroic` |
+| States and energies measured across polarizations and beam conditions | `phase_retrieval_core_general` |
 
 Start with the simplest model supported by the data. Increasing rank, mode
 count, or the number of unconstrained state components increases flexibility
 but also increases gauge freedom and the risk of unstable decompositions.
 
-## 8. Practical Checks
+## 9. Practical Checks
 
 Before interpreting a reconstruction:
 
@@ -1649,7 +2142,9 @@ Before interpreting a reconstruction:
 5. For multimode fits, inspect modal intensity fractions and mode mixing.
 6. For multi-energy fits, inspect singular values or fitted spectra.
 7. For dichroic fits, check `identifiable`, design rank, and fit residuals.
-8. Treat phase unwrapping and complex-log branch choices carefully.
+8. For general fits, check design rank, conditioning, and whether beam,
+   energy, and polarization metadata describe the experiment correctly.
+9. Treat phase unwrapping and complex-log branch choices carefully.
 
 The physical projections improve stability only when their assumptions match
 the experiment. A numerically excellent constrained fit can still be biased by
