@@ -2333,13 +2333,16 @@ def _run_energy_update_schedule(
     bsmask,
     schedule,
     recipe,
+    phase_retrieval_kernel=None,
 ):
     """Run all phase-retrieval stages sequentially for one energy."""
+    if phase_retrieval_kernel is None:
+        phase_retrieval_kernel = PhaseRtrv_core
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
-        field, err_d, err_s, _ = PhaseRtrv_core(
+        field, err_d, err_s, _ = phase_retrieval_kernel(
             diffract=amplitude,
             mask=supportmask,
             mode=mode,
@@ -2507,6 +2510,7 @@ def multi_energy_phase_retrieval_algorithm(
     supportmask,
     multi_energy_recipe=None,
     start_fields=None,
+    phase_retrieval_kernel=None,
 ):
     """
     Jointly reconstruct several same-sample holograms measured at different
@@ -2665,6 +2669,7 @@ def multi_energy_phase_retrieval_algorithm(
                 bsmasks[j],
                 warmup_schedule,
                 recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({
@@ -2698,6 +2703,7 @@ def multi_energy_phase_retrieval_algorithm(
                 bsmasks[j],
                 inner_schedule,
                 recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({
@@ -3595,12 +3601,15 @@ def _run_update_schedule(
     bsmask,
     schedule,
     recipe,
+    phase_retrieval_kernel=None,
 ):
     """Run the configured phase-retrieval stages for one observation."""
+    if phase_retrieval_kernel is None:
+        phase_retrieval_kernel = PhaseRtrv_core
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         iterations = stage["Nit"]
-        field, error, support_error, _ = PhaseRtrv_core(
+        field, error, support_error, _ = phase_retrieval_kernel(
             diffract=amplitude,
             mask=supportmask,
             mode=stage["mode"],
@@ -3683,6 +3692,7 @@ def general_phase_retrieval_algorithm(
     saturated_states=None,
     general_recipe=None,
     start_fields=None,
+    phase_retrieval_kernel=None,
 ):
     """
     Jointly retrieve arbitrary states, energies, polarizations, and beams.
@@ -3794,6 +3804,7 @@ def general_phase_retrieval_algorithm(
                 bsmasks[observation],
                 warmup_schedule,
                 recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for result in results:
                 errors["observation_steps"].append({
@@ -3826,6 +3837,7 @@ def general_phase_retrieval_algorithm(
                 bsmasks[observation],
                 inner_schedule,
                 recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for result in results:
                 errors["observation_steps"].append({
@@ -4266,6 +4278,7 @@ def universal_phase_retrieval_algorithm(
     saturated_states=None,
     universal_recipe=None,
     start_fields=None,
+    phase_retrieval_kernel=None,
 ):
     """
     Reconstruct a metadata-described list of diffraction measurements.
@@ -4326,6 +4339,7 @@ def universal_phase_retrieval_algorithm(
                 supportmask,
                 multi_energy_recipe=_energy_driver_recipe(recipe),
                 start_fields=start_fields,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
         )
     elif model in _PHYSICAL_MODELS:
@@ -4345,6 +4359,7 @@ def universal_phase_retrieval_algorithm(
                 saturated_states=physical_recipe["saturated_states"],
                 general_recipe=_physical_driver_recipe(physical_recipe),
                 start_fields=start_fields,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
         )
     else:
