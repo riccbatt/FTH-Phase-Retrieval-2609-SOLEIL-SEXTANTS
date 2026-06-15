@@ -1,0 +1,15 @@
+# macOS metadata
+.DS_Store
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Jupyter-generated files
+.ipynb_checkpoints/
+
+# Experimental datasets stay outside Git history.
+Data/
+*.h5
+*.hdf5

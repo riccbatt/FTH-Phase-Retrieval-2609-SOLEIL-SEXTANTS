@@ -71,37 +71,18 @@ polarizations, several magnetic states, and several illumination conditions.
 ## 2. Physical Model
 
 For illumination condition \(m\), polarization \(p\), photon energy \(E\), and
-magnetic state \(s\), the exit wave is modeled as
-
-$$
-\phi_{m,p,E,s}(\mathbf r)
-=
-C_m(\mathbf r)
-\exp[-i k_E t n_{c,E}]
-\exp[-p i k_E t n_{m,E} m_{z,s}(\mathbf r)].
-$$
+magnetic state \(s\), the exit wave is modeled as \(\phi_{m,p,E,s}(\mathbf r) = C_m(\mathbf r)\exp[-i k_E t n_{c,E}]\exp[-p i k_E t n_{m,E}m_{z,s}(\mathbf r)]\).
 
 The first factor, \(C_m(\mathbf r)\), contains the complex illumination field
 and any energy-independent reference structure assigned to illumination
 condition \(m\).
 
-The charge refractive-index contribution is
+The charge refractive-index contribution is \(n_{c,E} = \delta_{c,E} + i\beta_{c,E}\).
 
-$$
-n_{c,E} = \delta_{c,E} + i\beta_{c,E}.
-$$
+The magnetic refractive-index contribution is \(n_{m,E} = \delta_{m,E} + i\beta_{m,E}\).
 
-The magnetic refractive-index contribution is
-
-$$
-n_{m,E} = \delta_{m,E} + i\beta_{m,E}.
-$$
-
-The reduced out-of-plane magnetization is a real two-dimensional map:
-
-$$
--1 \le m_{z,s}(\mathbf r) \le 1.
-$$
+The reduced out-of-plane magnetization is a real two-dimensional map with
+\(-1 \le m_{z,s}(\mathbf r) \le 1\).
 
 The polarization coefficient is normally \(p=+1\) or \(p=-1\). Reversing it
 reverses the sign of the magnetic term but not the charge term.
@@ -109,37 +90,12 @@ reverses the sign of the magnetic term but not the charge term.
 ### 2.1 Log-object form
 
 The algorithm applies the joint model after transforming every reconstructed
-Fourier field to object space and taking a complex logarithm. Define
+Fourier field to object space and taking a complex logarithm. For observation
+\(a\), define \(L_a(\mathbf r) = \log[\phi_a(\mathbf r)]\). The dimensionless
+responses are \(q_c(E) = -i k_E t n_{c,E}\) and \(q_m(E) = -i k_E t n_{m,E}\).
+The log illumination field is \(c_m(\mathbf r) = \log[C_m(\mathbf r)]\).
 
-$$
-L_a(\mathbf r) = \log[\phi_a(\mathbf r)]
-$$
-
-for observation \(a\). Also define the dimensionless responses
-
-$$
-q_c(E) = -i k_E t n_{c,E},
-$$
-
-$$
-q_m(E) = -i k_E t n_{m,E}.
-$$
-
-The log illumination field is
-
-$$
-c_m(\mathbf r)=\log[C_m(\mathbf r)].
-$$
-
-The fitted model is
-
-$$
-L_a(\mathbf r)
-=
-c_{m(a)}(\mathbf r)
-+ q_c[E(a)]
-+ p_a q_m[E(a)]m_{z,s(a)}(\mathbf r).
-$$
+The fitted model is \(L_a(\mathbf r) = c_{m(a)}(\mathbf r) + q_c[E(a)] + p_a q_m[E(a)]m_{z,s(a)}(\mathbf r)\).
 
 This additive form is the central reason for using log-object space: beam,
 charge, and magnetic contributions become separable by alternating
@@ -147,30 +103,12 @@ least-squares updates.
 
 ## 3. What Is Measurable
 
-If
-
-$$
-n = \delta + i\beta,
-$$
-
-then
-
-$$
-q = -ikt(\delta+i\beta)
-  = kt\beta - i kt\delta.
-$$
+If \(n = \delta + i\beta\), then \(q = -ikt(\delta+i\beta) = kt\beta - i kt\delta\).
 
 Therefore,
 
-The real and imaginary components are
-
-$$
-{\rm Re}(q)=kt\beta,
-$$
-
-$$
-{\rm Im}(q)=-kt\delta.
-$$
+The real and imaginary components are \({\rm Re}(q)=kt\beta\) and
+\({\rm Im}(q)=-kt\delta\).
 
 An exit-wave reconstruction directly constrains \(kt\delta\) and \(kt\beta\).
 It does not independently determine \(t\), \(\delta\), and \(\beta\).
@@ -255,16 +193,7 @@ Use a different `energy_label` when the material response itself can change.
 ## 5. Saturated States
 
 A saturated state has a known spatially uniform reduced magnetization:
-
-$$
-m_z(\mathbf r)=+1
-$$
-
-or
-
-$$
-m_z(\mathbf r)=-1.
-$$
+\(m_z(\mathbf r)=+1\) or \(m_z(\mathbf r)=-1\).
 
 Supply saturated states as a dictionary:
 
@@ -282,11 +211,7 @@ saturated_states = ["sat_up"]
 ```
 
 Saturated states are optional. Without one, the algorithm remains
-data-driven, but the factorization
-
-$$
-q_m(E)m_z(\mathbf r)
-$$
+data-driven, but the factorization \(q_m(E)m_z(\mathbf r)\)
 
 has a scale ambiguity: multiplying \(q_m\) by a constant and dividing \(m_z\)
 by the same constant can leave the modeled observations unchanged until the
@@ -317,13 +242,7 @@ them change.
 ### 6.2 `state_energy_beam`
 
 This is a more flexible linear model:
-
-$$
-L_a(\mathbf r)
-=
-C_{m(a)}(\mathbf r)
-+ p_a R_{s(a),E(a)}(\mathbf r).
-$$
+\(L_a(\mathbf r) = C_{m(a)}(\mathbf r) + p_a R_{s(a),E(a)}(\mathbf r)\).
 
 It assigns a free complex response map to every state-energy pair. It does not
 force the response to factor into a scalar energy spectrum and a real
@@ -341,10 +260,7 @@ observations.
 ### 6.3 `svd`
 
 This applies the multi-energy low-rank projection
-
-$$
-L_E(\mathbf r)=C(\mathbf r)+\Delta_E(\mathbf r)
-$$
+\(L_E(\mathbf r)=C(\mathbf r)+\Delta_E(\mathbf r)\)
 
 with the energy-dependent residual restricted to the selected matrix rank.
 
@@ -362,10 +278,7 @@ multi-energy implementation. Its numerical behavior is tested against
 ### 6.4 `rank1_spectral`
 
 This applies the explicit multi-energy model
-
-$$
-L_E(\mathbf r)=C(\mathbf r)+a_E M(\mathbf r).
-$$
+\(L_E(\mathbf r)=C(\mathbf r)+a_E M(\mathbf r)\).
 
 The complex spectrum \(a_E\) can be free, KK constrained, or guided by a known
 absorption spectrum.
@@ -452,47 +365,364 @@ allow the known shape to be fitted to the retrieved response. Set them to
 
 ## 8. Reconstruction Algorithm
 
-The algorithm alternates ordinary phase-retrieval updates and a joint
+The public entry point is `universal_phase_retrieval_algorithm()`. It validates
+the observation metadata, chooses the appropriate internal driver, and adds
+the complete metadata and universal settings to the returned diagnostics.
+
+### 8.1 Universal dispatcher
+
+```mermaid
+flowchart TD
+    A["universal_phase_retrieval_algorithm()"] --> B["default_universal_phase_retrieval_recipe()"]
+    B --> C["_as_energy_stack()"]
+    C --> D["_normalize_metadata()"]
+    D --> E["_canonical_projection_model()"]
+    E --> F{"projection_model"}
+    F -- "svd or rank1_spectral" --> G["_pure_energy_scan()"]
+    G --> H{"Valid pure energy scan?"}
+    H -- No --> X["Raise ValueError"]
+    H -- Yes --> I["_energy_driver_recipe()"]
+    I --> J["multi_energy_phase_retrieval_algorithm()"]
+    F -- "physical_factorized, state_energy_beam, or none" --> K["_prepare_physical_recipe()"]
+    K --> L["_physical_driver_recipe()"]
+    L --> M["general_phase_retrieval_algorithm()"]
+    J --> N["Attach observation_metadata and universal_settings"]
+    M --> N
+    N --> O["Return fields, components, bsmasks, errors"]
+```
+
+`svd` and `rank1_spectral` use the pure-energy driver because their first
+array axis must represent energy only. The physical and linear models use the
+general driver because that driver preserves arbitrary state, energy,
+polarization, and illumination metadata.
+
+### 8.2 General outer loop
+
+`general_phase_retrieval_algorithm()` runs the mixed-metadata reconstruction.
+Its outer loop alternates independent detector/support updates with a shared
 object-model projection.
 
 ```mermaid
 flowchart TD
-    A[Read holograms and metadata] --> B[Build amplitudes and masks]
-    B --> C[Initialize one Fourier field per observation]
-    C --> D[Optional independent warmup schedule]
-    D --> E[Run inner schedule for every observation]
-    E --> F{Projection due?}
-    F -- No --> H{More outer iterations?}
-    F -- Yes --> G[Transform fields to log-object space]
-    G --> I[Apply selected universal projection]
-    I --> J[Transform projected objects back to Fourier space]
-    J --> H
-    H -- Yes --> E
-    H -- No --> K[Final full-strength decomposition]
-    K --> L[Optional final measured-amplitude constraint]
-    L --> M[Return fields, components, masks, and diagnostics]
+    A["general_phase_retrieval_algorithm()"] --> B["_normalize_metadata() and _verify_recipe()"]
+    B --> C["_prepare_energy_amplitudes() and _as_energy_mask()"]
+    C --> D{"start_fields supplied?"}
+    D -- No --> E["_initialize_fields()"]
+    D -- Yes --> F["_as_energy_stack(start_fields)"]
+    E --> G["_build_update_schedule(name=warmup)"]
+    F --> G
+    G --> H{"Warmup enabled?"}
+    H -- Yes --> I["For each observation: _run_update_schedule()"]
+    H -- No --> J["_build_update_schedule(name=inner)"]
+    I --> J
+    J --> K["Start outer iteration"]
+    K --> L["Choose observation order"]
+    L --> M["For each observation: _run_update_schedule()"]
+    M --> N{"Joint projection due?"}
+    N -- Yes --> O["project_fourier_fields_general()"]
+    N -- No --> P{"More outer iterations?"}
+    O --> P
+    P -- Yes --> K
+    P -- No --> Q{"projection_model is none?"}
+    Q -- No --> R["Final project_fourier_fields_general() with relaxation=1"]
+    Q -- Yes --> S{"final_fourier_constraint?"}
+    R --> S
+    S -- Yes --> T["_apply_measured_amplitudes()"]
+    S -- No --> U["Record runtime and diagnostics"]
+    T --> U
+    U --> V["Return fields, components, bsmasks, errors"]
 ```
 
-### 8.1 Physical projection loop
+The projection test uses `projection_start` and `projection_every`. Therefore,
+all observations finish their complete inner schedule before the shared model
+is applied.
+
+### 8.3 Schedule loop for one observation
+
+Both warmup and joint updates use `_run_update_schedule()`. The pure-energy
+driver uses the equivalent `_run_energy_update_schedule()`. Each schedule is
+built by `_build_update_schedule()` from the recipe's mode, iteration, beta,
+alpha, and TV settings.
+
+```mermaid
+flowchart TD
+    A["_run_update_schedule() or _run_energy_update_schedule()"] --> B["Take next stage dictionary"]
+    B --> C["Read mode, Nit, beta, alpha, and TV_freq"]
+    C --> D{"Custom phase_retrieval_kernel supplied?"}
+    D -- No --> E["Use PhaseRtrv_core()"]
+    D -- Yes --> F["Use supplied kernel"]
+    E --> G["Run the stage with current field as Phase"]
+    F --> G
+    G --> H["Collect diffraction and support errors"]
+    H --> I["Store stage settings and diagnostics"]
+    I --> J{"More schedule stages?"}
+    J -- Yes --> B
+    J -- No --> K["Return updated field and stage_results"]
+```
+
+For example, `inner_mode=["HAPRE", "ER"]` and `inner_Nit=[700, 50]`
+produce two sequential calls to `PhaseRtrv_core()` for every observation in
+every outer iteration. The ER stage starts from the Fourier field returned by
+the HAPRE stage.
+
+### 8.4 `PhaseRtrv_core()` iteration loop
+
+`PhaseRtrv_core()` is the innermost numerical phase-retrieval loop. The
+projection selected by `mode` is looked up in `PROJECTIONS`; entries include
+`_proj_ER()`, `_proj_hapre()`, `_proj_RAAR()`, `_proj_HIO()`, and the other
+supported update rules.
+
+```mermaid
+flowchart TD
+    A["PhaseRtrv_core()"] --> B["Select proj_fn from PROJECTIONS"]
+    B --> C["make_beta_schedule() and make_alpha_schedule()"]
+    C --> D["Shift arrays and move them to NumPy or CuPy"]
+    D --> E{"Richardson-Lucy coherence enabled?"}
+    E -- Yes --> F["Initialize gamma and convolved intensity"]
+    E -- No --> G["Apply initial measured-amplitude constraint"]
+    F --> H["Start iteration s"]
+    G --> H
+    H --> I["Apply Fourier constraint"]
+    I --> J["fft2() to support space"]
+    J --> K{"TV update due and alpha > 0?"}
+    K -- Yes --> L["TV()"]
+    K -- No --> M["Call selected proj_fn()"]
+    L --> M
+    M --> N["ifft2() back to detector space"]
+    N --> O{"RL update due?"}
+    O -- Yes --> P["RL() and recompute convolved intensity"]
+    O -- No --> Q["Build error target"]
+    P --> Q
+    Q --> R["Error_diffract_cp() when diagnostics are due"]
+    R --> S["Keep best late-iteration candidates"]
+    S --> T{"More iterations?"}
+    T -- Yes --> H
+    T -- No --> U["Average Best_guess and optional Best_gamma"]
+    U --> V{"Fourier_last?"}
+    V -- Yes --> W["Apply final detector constraint"]
+    V -- No --> X["Convert with to_numpy()"]
+    W --> X
+    X --> Y["Return field, errors, support errors, gamma"]
+```
+
+In the universal general and pure-energy drivers, Richardson-Lucy updates are
+disabled by passing `gamma=None`, `RL_it=0`, and `RL_freq=Nit+1`. The kernel
+still contains the partial-coherence path for standalone use.
+
+### 8.5 General projection dispatcher
+
+`project_fourier_fields_general()` is the boundary between Fourier fields and
+the metadata-aware log-object models.
+
+```mermaid
+flowchart TD
+    A["project_fourier_fields_general()"] --> B["fourier_field_to_object_log()"]
+    B --> C{"projection_model"}
+    C -- physical_factorized --> D["project_log_objects_physical()"]
+    C -- state_energy_beam --> E["project_log_objects_general()"]
+    D --> F["object_log_to_fourier_field()"]
+    E --> F
+    F --> G["Return projected fields and optional components"]
+```
+
+`fourier_field_to_object_log()` performs the inverse Fourier transform,
+applies the magnitude floor, and forms the complex log object.
+`object_log_to_fourier_field()` exponentiates the projected log object and
+returns it to Fourier space.
+
+### 8.6 Physical factorization loop
 
 For `physical_factorized`, one projection performs an alternating fit:
 
 ```mermaid
 flowchart TD
-    A[Input log objects and metadata] --> B[Initialize beam fields and responses]
-    B --> C[Fit one common field per illumination condition]
-    C --> D[Fit real mz maps and clip to -1 through +1]
-    D --> E[Keep saturated mz maps fixed at +1 or -1]
-    E --> F[Fit charge and magnetic response at each energy]
-    F --> G[Fix charge/common-field offset gauge]
-    G --> H[Apply spectral constraints]
-    H --> I[Apply kt-delta and kt-beta bounds]
-    I --> J{More physical-fit iterations?}
-    J -- Yes --> C
-    J -- No --> K[Rebuild projected log objects and diagnostics]
+    A["project_log_objects_physical()"] --> B["_normalize_metadata()"]
+    B --> C["_observation_weights() and _normalize_saturated_states()"]
+    C --> D["Initialize common, charge, magnetic, and magnetization"]
+    D --> E["Estimate initial magnetic direction per energy"]
+    E --> F["Start physical-fit iteration"]
+    F --> G["Fit common field for each illumination"]
+    G --> H["Fit each unsaturated magnetization map"]
+    H --> I["np.clip() magnetization to [-1, 1]"]
+    I --> J["Restore fixed saturated-state maps"]
+    J --> K["Fit charge and magnetic scalars per energy with np.linalg.pinv()"]
+    K --> L["Move mean charge offset into common field"]
+    L --> M["constrain_complex_spectrum() for charge"]
+    M --> N["constrain_complex_spectrum() for magnetic"]
+    N --> O["_constrain_response_values() for optional bounds"]
+    O --> P{"More physical-fit iterations?"}
+    P -- Yes --> F
+    P -- No --> Q["Rebuild fitted log objects"]
+    Q --> R["Apply projection_relaxation"]
+    R --> S["Build components and identifiability diagnostics"]
+    S --> T["Return projected log objects and components"]
 ```
 
-### 8.2 Why alternating fitting helps
+### 8.7 Linear `state_energy_beam` projection
+
+`project_log_objects_general()` implements the flexible linear model. It
+constructs one design matrix shared by all pixels and solves all pixel values
+in one weighted pseudoinverse operation.
+
+```mermaid
+flowchart TD
+    A["project_log_objects_general()"] --> B["_as_energy_stack()"]
+    B --> C["_normalize_metadata() and _observation_weights()"]
+    C --> D["Allocate design matrix"]
+    D --> E["Add one common-field column per illumination"]
+    E --> F["Add one polarized response column per state-energy pair"]
+    F --> G["Apply square-root observation weights"]
+    G --> H["np.linalg.matrix_rank()"]
+    H --> I{"Rank deficient and rank_deficient=error?"}
+    I -- Yes --> J["Raise ValueError"]
+    I -- No --> K["np.linalg.pinv(weighted_design)"]
+    K --> L["Fit all flattened pixels"]
+    L --> M["Rebuild fitted log-object stack"]
+    M --> N["Apply projection_relaxation"]
+    N --> O{"return_components?"}
+    O -- Yes --> P["Build common fields, response maps, rank, condition number, and residual"]
+    O -- No --> Q["Return projected log objects"]
+    P --> Q
+```
+
+Unlike `project_log_objects_physical()`, this function has no internal
+alternating loop. The complete linear model is solved in one pseudoinverse.
+
+### 8.8 Pure-energy outer loop
+
+For `svd` and `rank1_spectral`, `multi_energy_phase_retrieval_algorithm()`
+uses the same outer-loop pattern but indexes fields by energy rather than by
+arbitrary observation metadata.
+
+```mermaid
+flowchart TD
+    A["multi_energy_phase_retrieval_algorithm()"] --> B["_prepare_energy_amplitudes()"]
+    B --> C["Initialize one field per energy"]
+    C --> D["_build_update_schedule(name=warmup)"]
+    D --> E["Optional _run_energy_update_schedule() per energy"]
+    E --> F["_build_update_schedule(name=inner)"]
+    F --> G["Start outer iteration"]
+    G --> H["Run _run_energy_update_schedule() for every energy"]
+    H --> I{"Energy projection due?"}
+    I -- Yes --> J["project_fourier_fields_multi_energy()"]
+    I -- No --> K{"More outer iterations?"}
+    J --> K
+    K -- Yes --> G
+    K -- No --> L["Final project_fourier_fields_multi_energy()"]
+    L --> M{"final_fourier_constraint?"}
+    M -- Yes --> N["Reapply measured amplitudes"]
+    M -- No --> O["Return results"]
+    N --> O
+```
+
+### 8.9 Pure-energy projection dispatcher
+
+`project_fourier_fields_multi_energy()` chooses and applies the requested
+cross-energy model.
+
+```mermaid
+flowchart TD
+    A["project_fourier_fields_multi_energy()"] --> B{"projection_model"}
+    B -- none --> C["Return fields unchanged"]
+    B -- svd or low_rank --> D["Set projection_kind=svd"]
+    B -- rank1_spectral aliases --> E["Set projection_kind=rank1_spectral"]
+    D --> F["fourier_field_to_object_log()"]
+    E --> F
+    F --> G{"projection_kind"}
+    G -- svd --> H["project_log_object_low_rank()"]
+    G -- rank1_spectral --> I["project_log_object_rank1_spectral()"]
+    H --> J["object_log_to_fourier_field()"]
+    I --> J
+    J --> K["Return fields and optional components"]
+```
+
+### 8.10 SVD low-rank projection
+
+`project_log_object_low_rank()` separates a static log object from an
+energy-dependent residual and truncates that residual to the requested rank.
+
+```mermaid
+flowchart TD
+    A["project_log_object_low_rank()"] --> B["_as_energy_stack()"]
+    B --> C["Reshape to pixels by energies"]
+    C --> D["Validate and normalize energy weights"]
+    D --> E{"static_mode"}
+    E -- mean --> F["Weighted mean static component"]
+    E -- first --> G["First-energy static component"]
+    E -- none --> H["Zero static component"]
+    F --> I["Subtract static component"]
+    G --> I
+    H --> I
+    I --> J{"rank is zero?"}
+    J -- Yes --> K["Set residual to zero"]
+    J -- No --> L["Weight residual by sqrt(weights)"]
+    L --> M["np.linalg.svd()"]
+    M --> N["Keep first rank singular modes"]
+    N --> O["Undo energy weighting"]
+    K --> P["Recombine static and residual"]
+    O --> P
+    P --> Q["Apply projection_relaxation"]
+    Q --> R["Return projected stack and optional singular-value components"]
+```
+
+### 8.11 Rank-one spectral projection
+
+`project_log_object_rank1_spectral()` retrieves one spatial map and one
+complex energy spectrum, constrains the spectrum, and then refits the spatial
+map against the constrained spectrum.
+
+```mermaid
+flowchart TD
+    A["project_log_object_rank1_spectral()"] --> B["Reshape to pixels by energies"]
+    B --> C["Compute static component and residual"]
+    C --> D["Apply sqrt energy weights"]
+    D --> E["np.linalg.svd() for initial rank-one factors"]
+    E --> F["_canonicalize_rank1_factors()"]
+    F --> G["constrain_complex_spectrum()"]
+    G --> H{"Constrained spectrum has usable norm?"}
+    H -- No --> I["Set spatial factor M to zero"]
+    H -- Yes --> J["Refit M by weighted complex least squares"]
+    I --> K["Form outer product M times spectrum"]
+    J --> K
+    K --> L["Add static component"]
+    L --> M["Apply projection_relaxation"]
+    M --> N["Return projected stack, factors, spectrum, and singular values"]
+```
+
+### 8.12 Spectral-constraint branches
+
+`constrain_complex_spectrum()` is shared by the rank-one energy model and by
+the charge and magnetic spectra in `project_log_objects_physical()`.
+
+```mermaid
+flowchart TD
+    A["constrain_complex_spectrum()"] --> B["_extract_absorption_part() and _extract_dispersion_part()"]
+    B --> C{"spectral_constraint"}
+    C -- free --> D["Copy retrieved complex spectrum"]
+    C -- kk --> E["_energy_axis_for_kk()"]
+    E --> F["kk.beta_to_delta() from retrieved absorption"]
+    C -- known_beta --> G["Validate known_beta_spectrum"]
+    G --> H["_normalize_vector()"]
+    H --> I{"fit_known_beta_scale?"}
+    I -- Yes --> J["_fit_scale_offset()"]
+    I -- No --> K["Use known beta directly"]
+    J --> L["Keep retrieved dispersion by default"]
+    K --> L
+    C -- known_beta_kk --> M["Validate energy axis and known beta"]
+    M --> N["Normalize and optionally _fit_scale_offset()"]
+    N --> O{"known_delta_spectrum supplied?"}
+    O -- No --> P["kk.beta_to_delta()"]
+    O -- Yes --> Q["Scale and center known delta"]
+    F --> R["_complex_spectrum_from_parts()"]
+    L --> R
+    P --> R
+    Q --> R
+    D --> S["Build spectral diagnostics"]
+    R --> S
+    S --> T["Return constrained spectrum and diagnostics"]
+```
+
+### 8.13 Why alternating fitting helps
 
 Ordinary phase retrieval treats each image independently. Noise, missing
 pixels, and non-convex support constraints can then push nominally related
@@ -517,17 +747,8 @@ Joint fitting cannot create information absent from the measurement geometry.
 
 Opposite polarizations at otherwise matching conditions are especially useful:
 
-$$
-\frac{L_{+}+L_{-}}{2}
-=
-c_m+q_c(E),
-$$
-
-$$
-\frac{L_{+}-L_{-}}{2}
-=
-q_m(E)m_z.
-$$
+The polarization-even combination is \((L_{+}+L_{-})/2 = c_m+q_c(E)\), while
+the polarization-odd combination is \((L_{+}-L_{-})/2 = q_m(E)m_z\).
 
 This directly separates polarization-even and polarization-odd contributions.
 

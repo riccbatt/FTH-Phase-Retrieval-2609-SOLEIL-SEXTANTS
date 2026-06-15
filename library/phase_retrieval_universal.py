@@ -31,6 +31,7 @@ state/polarization/energy/illumination datasets.
 import logging
 log = logging.getLogger(__name__)
 
+from functools import partial
 import os
 import time
 import numpy as np
@@ -75,16 +76,10 @@ if GPU:
 else:
     import numpy as xp
     import scipy.fft as fft
-    from scipy.fft import fft2, ifft2
 
     # Use all available CPU workers for FFT operations.
-    def fft2(array, **kwargs):
-        """Run a two-dimensional FFT using all available CPU workers."""
-        return fft.fft2(array, workers=os.cpu_count(), **kwargs)
-    
-    def ifft2(array, **kwargs):
-        """Run a two-dimensional inverse FFT using all CPU workers."""
-        return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):
@@ -2654,6 +2649,11 @@ def multi_energy_phase_retrieval_algorithm(
     }
 
     start_time = time.time()
+    print(
+        "Universal phase retrieval: preparing pure-energy reconstruction "
+        f"with {nE} energies",
+        flush=True,
+    )
 
     warmup_schedule = _build_update_schedule(
         recipe,
@@ -2661,7 +2661,13 @@ def multi_energy_phase_retrieval_algorithm(
         allow_disabled=True,
     )
     if warmup_schedule:
+        print(
+            "Universal phase retrieval: starting independent warmup "
+            f"for {nE} energies",
+            flush=True,
+        )
         for j in range(nE):
+            print(f"  Warmup energy {j + 1}/{nE}", flush=True)
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2678,6 +2684,9 @@ def multi_energy_phase_retrieval_algorithm(
                     "stage": "warmup",
                     **stage_result,
                 })
+        print("Universal phase retrieval: warmup complete", flush=True)
+    else:
+        print("Universal phase retrieval: warmup disabled", flush=True)
 
     outer_iterations = int(recipe["outer_iterations"])
     inner_schedule = _build_update_schedule(
@@ -2689,13 +2698,28 @@ def multi_energy_phase_retrieval_algorithm(
 
     components = {"projection_model": recipe["projection_model"]}
 
+    print(
+        "Universal phase retrieval: starting pure-energy reconstruction "
+        f"with {nE} energies and {outer_iterations} outer loops",
+        flush=True,
+    )
     for outer in range(outer_iterations):
+        print(
+            f"Universal phase retrieval: outer loop "
+            f"{outer + 1}/{outer_iterations}",
+            flush=True,
+        )
         if recipe["shuffle_energies"]:
             energy_order = rng.permutation(nE)
         else:
             energy_order = np.arange(nE)
 
-        for j in energy_order:
+        for position, j in enumerate(energy_order, start=1):
+            print(
+                "  Updating energy "
+                f"{position}/{nE} (index {int(j)})",
+                flush=True,
+            )
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2719,6 +2743,7 @@ def multi_energy_phase_retrieval_algorithm(
         )
 
         if do_projection:
+            print("  Applying joint energy projection", flush=True)
             fields, components = project_fourier_fields_multi_energy(
                 fields,
                 projection_model=recipe["projection_model"],
@@ -2751,8 +2776,10 @@ def multi_energy_phase_retrieval_algorithm(
                     "spectral_coefficients": components.get("spectral_coefficients"),
                 }
             )
+            print("  Joint energy projection complete", flush=True)
 
     # Final projection, unless the user explicitly selected no projection.
+    print("Universal phase retrieval: applying final energy projection", flush=True)
     fields, components = project_fourier_fields_multi_energy(
         fields,
         projection_model=recipe["projection_model"],
@@ -2784,6 +2811,11 @@ def multi_energy_phase_retrieval_algorithm(
         components["final_fourier_constraint_applied"] = False
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
+    print(
+        "Universal phase retrieval: complete in "
+        f"{errors['runtime_seconds']:.3f} s",
+        flush=True,
+    )
 
     return fields, components, bsmasks, errors
 def default_general_phase_retrieval_recipe():
@@ -2982,25 +3014,6 @@ def _constrain_response_values(response, real_range=None, imag_range=None):
     if imag_range is not None:
         constrained.imag = np.clip(constrained.imag, *imag_range)
     return constrained
-
-
-def _apply_spectral_constraint(response, kind, recipe):
-    """Apply the selected charge or magnetic energy-spectrum constraint."""
-    prefix = f"{kind}_"
-    return constrain_complex_spectrum(
-        response,
-        spectral_constraint=recipe[f"{prefix}spectral_constraint"],
-        energy_values=recipe["energy_values"],
-        known_beta_spectrum=recipe[f"known_{kind}_beta_spectrum"],
-        known_delta_spectrum=recipe[f"known_{kind}_delta_spectrum"],
-        absorption_part=recipe[f"{prefix}absorption_part"],
-        kk_sign=recipe["kk_sign"],
-        kk_subtract_baseline=recipe["kk_subtract_baseline"],
-        kk_normalize_input=recipe["kk_normalize_input"],
-        known_beta_normalization=recipe["known_spectrum_normalization"],
-        fit_known_beta_scale=recipe["fit_known_spectrum_scale"],
-        fit_known_beta_offset=recipe["fit_known_spectrum_offset"],
-    )
 
 
 def project_log_objects_general(
@@ -3316,15 +3329,33 @@ def project_log_objects_physical(
         charge -= charge_offset
         common += charge_offset
 
-        charge, charge_spectral_info = _apply_spectral_constraint(
+        charge, charge_spectral_info = constrain_complex_spectrum(
             charge,
-            "charge",
-            recipe,
+            spectral_constraint=recipe["charge_spectral_constraint"],
+            energy_values=recipe["energy_values"],
+            known_beta_spectrum=recipe["known_charge_beta_spectrum"],
+            known_delta_spectrum=recipe["known_charge_delta_spectrum"],
+            absorption_part=recipe["charge_absorption_part"],
+            kk_sign=recipe["kk_sign"],
+            kk_subtract_baseline=recipe["kk_subtract_baseline"],
+            kk_normalize_input=recipe["kk_normalize_input"],
+            known_beta_normalization=recipe["known_spectrum_normalization"],
+            fit_known_beta_scale=recipe["fit_known_spectrum_scale"],
+            fit_known_beta_offset=recipe["fit_known_spectrum_offset"],
         )
-        magnetic, magnetic_spectral_info = _apply_spectral_constraint(
+        magnetic, magnetic_spectral_info = constrain_complex_spectrum(
             magnetic,
-            "magnetic",
-            recipe,
+            spectral_constraint=recipe["magnetic_spectral_constraint"],
+            energy_values=recipe["energy_values"],
+            known_beta_spectrum=recipe["known_magnetic_beta_spectrum"],
+            known_delta_spectrum=recipe["known_magnetic_delta_spectrum"],
+            absorption_part=recipe["magnetic_absorption_part"],
+            kk_sign=recipe["kk_sign"],
+            kk_subtract_baseline=recipe["kk_subtract_baseline"],
+            kk_normalize_input=recipe["kk_normalize_input"],
+            known_beta_normalization=recipe["known_spectrum_normalization"],
+            fit_known_beta_scale=recipe["fit_known_spectrum_scale"],
+            fit_known_beta_offset=recipe["fit_known_spectrum_offset"],
         )
         charge = _constrain_response_values(
             charge,
@@ -3586,10 +3617,21 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
             "free",
             "unconstrained",
         }:
-            _apply_spectral_constraint(
+            constrain_complex_spectrum(
                 np.zeros(n_energies, dtype=np.complex128),
-                kind,
-                recipe,
+                spectral_constraint=recipe[f"{kind}_spectral_constraint"],
+                energy_values=recipe["energy_values"],
+                known_beta_spectrum=recipe[f"known_{kind}_beta_spectrum"],
+                known_delta_spectrum=recipe[f"known_{kind}_delta_spectrum"],
+                absorption_part=recipe[f"{kind}_absorption_part"],
+                kk_sign=recipe["kk_sign"],
+                kk_subtract_baseline=recipe["kk_subtract_baseline"],
+                kk_normalize_input=recipe["kk_normalize_input"],
+                known_beta_normalization=recipe[
+                    "known_spectrum_normalization"
+                ],
+                fit_known_beta_scale=recipe["fit_known_spectrum_scale"],
+                fit_known_beta_offset=recipe["fit_known_spectrum_offset"],
             )
     _observation_weights(recipe["observation_weights"], n_observations)
 
@@ -3788,6 +3830,14 @@ def general_phase_retrieval_algorithm(
         "settings": recipe.copy(),
     }
     start_time = time.time()
+    outer_iterations = int(recipe["outer_iterations"])
+    print(
+        "Universal phase retrieval: starting physical reconstruction "
+        f"with {n_observations} observations, "
+        f"{len(metadata['energy_names'])} energies, and "
+        f"{outer_iterations} outer loops",
+        flush=True,
+    )
 
     # Optional independent warmup before coupling observations.
     warmup_schedule = _build_update_schedule(
@@ -3796,7 +3846,17 @@ def general_phase_retrieval_algorithm(
         allow_disabled=True,
     )
     if warmup_schedule:
+        print(
+            "Universal phase retrieval: starting independent warmup "
+            f"for {n_observations} observations",
+            flush=True,
+        )
         for observation in range(n_observations):
+            print(
+                f"  Warmup observation "
+                f"{observation + 1}/{n_observations}",
+                flush=True,
+            )
             fields[observation], results = _run_update_schedule(
                 fields[observation],
                 amplitudes[observation],
@@ -3817,19 +3877,35 @@ def general_phase_retrieval_algorithm(
                     "stage": "warmup",
                     **result,
                 })
+        print("Universal phase retrieval: warmup complete", flush=True)
+    else:
+        print("Universal phase retrieval: warmup disabled", flush=True)
 
     inner_schedule = _build_update_schedule(recipe, name="inner")
     rng = np.random.default_rng(recipe["random_seed"])
     components = {"projection_model": recipe["projection_model"]}
 
     # Alternate independent data updates with the joint physical fit.
-    for outer in range(recipe["outer_iterations"]):
+    for outer in range(outer_iterations):
+        print(
+            f"Universal phase retrieval: outer loop "
+            f"{outer + 1}/{outer_iterations}",
+            flush=True,
+        )
         order = (
             rng.permutation(n_observations)
             if recipe["shuffle_observations"]
             else np.arange(n_observations)
         )
-        for observation in order:
+        for position, observation in enumerate(order, start=1):
+            print(
+                "  Updating observation "
+                f"{position}/{n_observations} "
+                f"(index {int(observation)}, "
+                f"energy={metadata['energies'][observation]}, "
+                f"polarization={metadata['polarizations'][observation]:g})",
+                flush=True,
+            )
             fields[observation], results = _run_update_schedule(
                 fields[observation],
                 amplitudes[observation],
@@ -3861,6 +3937,7 @@ def general_phase_retrieval_algorithm(
             )
         )
         if projection_due:
+            print("  Applying joint physical projection", flush=True)
             fields, components = project_fourier_fields_general(
                 fields,
                 metadata["states"],
@@ -3884,9 +3961,18 @@ def general_phase_retrieval_algorithm(
                 "design_rank": components.get("design_rank"),
                 "identifiable": components.get("identifiable"),
             })
+            print(
+                "  Joint physical projection complete "
+                f"(fit residual RMS={components['fit_residual_rms']:.6g})",
+                flush=True,
+            )
 
     # Return components from a final full-strength model decomposition.
     if recipe["projection_model"] != "none":
+        print(
+            "Universal phase retrieval: applying final physical projection",
+            flush=True,
+        )
         fields, components = project_fourier_fields_general(
             fields,
             metadata["states"],
@@ -3912,6 +3998,11 @@ def general_phase_retrieval_algorithm(
         components["final_fourier_constraint_applied"] = False
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
+    print(
+        "Universal phase retrieval: complete in "
+        f"{errors['runtime_seconds']:.3f} s",
+        flush=True,
+    )
     return fields, components, bsmasks, errors
 _PHYSICAL_MODELS = {
     "physical_factorized",
@@ -3953,23 +4044,6 @@ def default_universal_phase_retrieval_recipe():
     return recipe
 
 
-def _normalize_universal_metadata(
-    state_labels,
-    energy_labels,
-    polarization_coefficients,
-    illumination_labels,
-    n_observations,
-):
-    """Validate metadata and return the encoding used by the general engine."""
-    return _normalize_metadata(
-        state_labels,
-        energy_labels,
-        polarization_coefficients,
-        illumination_labels,
-        n_observations,
-    )
-
-
 def _canonical_projection_model(model):
     """Return the canonical spelling of a supported projection model."""
     model = str(model).lower()
@@ -3982,19 +4056,6 @@ def _canonical_projection_model(model):
         "c+m*a": "rank1_spectral",
     }
     return aliases.get(model, model)
-
-
-def _normalize_universal_range(value, name):
-    """Validate an optional finite two-value lower/upper bound."""
-    return _normalize_range(value, name)
-
-
-def _negative_range(value):
-    """Map a range for x to the correctly ordered range for -x."""
-    if value is None:
-        return None
-    lower, upper = value
-    return (-upper, -lower)
 
 
 def _apply_kt_product_bounds(recipe):
@@ -4014,16 +4075,17 @@ def _apply_kt_product_bounds(recipe):
         "magnetic_kt_delta_range": "magnetic_response_imag_range",
     }
     for source, target in mappings.items():
-        value = _normalize_universal_range(recipe[source], source)
+        value = _normalize_range(recipe[source], source)
         if value is None:
             continue
         if recipe[target] is not None:
             raise ValueError(
                 f"Specify either {source} or {target}, not both."
             )
-        translated[target] = (
-            _negative_range(value) if "delta" in source else value
-        )
+        if "delta" in source:
+            lower, upper = value
+            value = (-upper, -lower)
+        translated[target] = value
     return translated
 
 
@@ -4193,7 +4255,7 @@ def project_fourier_fields_universal(
         recipe["saturated_states"] = saturated_states
 
     fields = _as_energy_stack(fields, name="fields")
-    metadata = _normalize_universal_metadata(
+    metadata = _normalize_metadata(
         state_labels,
         energy_labels,
         polarization_coefficients,
@@ -4316,7 +4378,7 @@ def universal_phase_retrieval_algorithm(
         holograms,
         name="holograms",
     )
-    metadata = _normalize_universal_metadata(
+    metadata = _normalize_metadata(
         state_labels,
         energy_labels,
         polarization_coefficients,
@@ -4324,6 +4386,12 @@ def universal_phase_retrieval_algorithm(
         holograms.shape[0],
     )
     model = _canonical_projection_model(recipe["projection_model"])
+    print(
+        "Universal phase retrieval: dispatching "
+        f"{holograms.shape[0]} observations with "
+        f"projection_model={model!r}",
+        flush=True,
+    )
 
     # Pure energy modes intentionally use the original multi-energy driver.
     if model in {"svd", "rank1_spectral"}:
