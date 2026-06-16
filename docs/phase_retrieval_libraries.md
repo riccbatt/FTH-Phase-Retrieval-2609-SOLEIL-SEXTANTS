@@ -352,11 +352,17 @@ Input holograms have shape:
 The driver performs:
 
 1. An optional independent warmup schedule at every energy.
-2. The full inner update schedule at every energy.
-3. A projection that couples the reconstructed exit waves across energy.
+2. The full inner update schedule for one energy.
+3. An optional projection that couples all reconstructed exit waves.
 4. Repetition for `outer_iterations`.
 
 The output remains a stack of Fourier fields with shape `(nE, nx, ny)`.
+`projection_every` counts completed energy updates. Its default, `None`,
+resolves to the number of energies, preserving one projection per complete
+sweep. Set it to `1` to project after every energy update.
+`projection_start` uses the same completed-update count. Its default, `None`,
+resolves to the effective `projection_every` value, so projection first becomes
+eligible at the first cadence boundary.
 
 ### Flowchart
 
@@ -366,9 +372,9 @@ flowchart TD
     A[Load energy-resolved<br/>holograms] --> B[Initialize one field<br/>per energy]
     B --> C[Optional warmup<br/>at every energy]
     C --> D[Start outer iteration]
-    D --> E[Run inner schedule<br/>at every energy]
-    E --> F{Projection due at<br/>this outer iteration?}
-    F -- No --> P{More outer iterations?}
+    D --> E[Run inner schedule<br/>for next energy]
+    E --> F{Projection due after<br/>this energy update?}
+    F -- No --> V{More energies<br/>in this sweep?}
     F -- Yes --> G{Projection model}
     G -- none --> H[Keep independent fields]
     G -- SVD --> I[Common component<br/>plus low-rank residual]
@@ -378,12 +384,14 @@ flowchart TD
     K -- KK --> M[Infer dispersion<br/>from absorption]
     K -- known beta --> N[Impose supplied<br/>beta spectrum]
     K -- beta + KK --> O[Impose beta-delta<br/>relation]
-    H --> P{More outer iterations?}
-    I --> P
-    L --> P
-    M --> P
-    N --> P
-    O --> P
+    H --> V
+    I --> V
+    L --> V
+    M --> V
+    N --> V
+    O --> V
+    V -- Yes --> E
+    V -- No --> P{More outer iterations?}
     P -- Yes --> D
     P -- No --> Q[Apply final selected<br/>multi-energy projection]
     Q --> R{Final Fourier<br/>constraint?}
@@ -468,9 +476,9 @@ stage, or lists matching the corresponding mode/iteration schedule.
 |---|---|---|
 | `projection_model` | `"svd"` | Cross-energy model: `"none"`, `"svd"`, or `"rank1_spectral"`. |
 | `rank` | `1` | Rank retained by the SVD residual projection. Ignored by the other models. |
-| `projection_every` | `1` | Apply the joint projection every this many outer iterations. |
+| `projection_every` | `None` | Number of completed energy updates between projections. `None` means the number of energies, or once per complete sweep. |
 | `projection_relaxation` | `1.0` | Mixing strength between current and projected log-objects. |
-| `projection_start` | `0` | First outer-iteration index at which coupling is applied. |
+| `projection_start` | `None` | Completed energy-update count at which coupling first becomes eligible. `None` resolves to the effective `projection_every` value. |
 | `projection_static_mode` | `"mean"` | Static component: weighted energy mean, first channel, or none. |
 | `energy_weights` | `None` | Optional positive weight per energy used by projection fits. |
 | `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
@@ -870,15 +878,17 @@ the multimode recipe table instead.
 flowchart TD
     A[Load energy stack] --> B[Initialize Nmodes fields<br/>at every energy]
     B --> C[Optional warmup<br/>at every energy]
-    C --> D[Run multimode updates<br/>at every energy]
-    D --> E{Projection due at<br/>this outer iteration?}
-    E -- No --> J{More outer<br/>iterations?}
+    C --> D[Run multimode updates<br/>for next energy]
+    D --> E{Projection due after<br/>this energy update?}
+    E -- No --> P{More energies<br/>in this sweep?}
     E -- Yes --> F[Collect mode m<br/>across energies]
     F --> G[Apply multi-energy<br/>projection to mode m]
     G --> H{More modes?}
     H -- Yes --> F
     H -- No --> I[Reassemble energy-mode<br/>field stack]
-    I --> J
+    I --> P
+    P -- Yes --> D
+    P -- No --> J{More outer<br/>iterations?}
     J -- Yes --> D
     J -- No --> K[Apply final projection<br/>to every mode]
     K --> L{Final Fourier<br/>constraint?}
@@ -980,13 +990,14 @@ These tables apply to
 | Recipe key | Default | Meaning |
 |---|---|---|
 | `projection_model` | `"shared_charge"` | Coupling model: `"none"`, `"shared_charge"`, or `"saturated_reference"`. |
-| `projection_every` | `1` | Apply the dichroic projection every this many outer iterations. |
-| `projection_start` | `0` | First outer-iteration index at which the projection is applied. |
+| `projection_every` | `None` | Number of completed observation updates between projections. `None` means the number of holograms, or once per complete sweep. |
+| `projection_start` | `None` | Completed observation-update count at which projection first becomes eligible. `None` resolves to the effective `projection_every` value. |
 | `projection_relaxation` | `1.0` | Mixing strength between current and dichroically projected fields. |
 | `observation_weights` | `None` | Optional positive least-squares weight for each hologram. |
 | `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary pseudoinverse gauge. |
 | `saturated_states` | `None` | Sequence interpreted as saturated `+1` states, or dictionary mapping state labels to `+1`/`-1`. |
 | `clip_magnetization` | `True` | Enforce the reduced-magnetization interval `[-1, 1]` in saturated-reference fits. Set `False` only for diagnostic unconstrained fits. |
+| `zero_magnetization_outside_support` | `False` | Force fitted real magnetization maps to zero outside `supportmask` after shifting it to the log-object frame. |
 | `kt_delta_m_range` | `None` | Optional lower/upper bounds for `k*t*delta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
 | `kt_beta_m_range` | `None` | Optional lower/upper bounds for `k*t*beta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
 | `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
@@ -998,16 +1009,16 @@ These tables apply to
 flowchart TD
     A[Load holograms, states,<br/>and polarization signs] --> B[Initialize one field<br/>per observation]
     B --> C[Optional warmup]
-    C --> D[Run inner schedule<br/>for every observation]
-    D --> E{Joint projection due<br/>at this outer iteration?}
-    E -- No --> O{More outer<br/>iterations?}
+    C --> D[Run inner schedule<br/>for next observation]
+    D --> E{Joint projection due after<br/>this observation update?}
+    E -- No --> Y{More observations<br/>in this sweep?}
     E -- Yes --> F[Convert to complex<br/>log-exit waves]
     F --> G{Dichroic projection}
     G -- shared charge --> I[Fit common charge and<br/>state magnetic terms]
     I --> W{Response ranges<br/>provided?}
     W -- Yes --> X[Fit bounded q and<br/>real mz in -1 to +1]
-    W -- No --> O
-    X --> O
+    W -- No --> Y
+    X --> Y
     G -- saturated --> J[Fit charge and<br/>magnetic terms]
     J --> K[Infer q from<br/>saturated states]
     K --> L{Optional kt-delta<br/>or kt-beta bounds?}
@@ -1015,7 +1026,9 @@ flowchart TD
     L -- Yes --> N[Clip corresponding<br/>q components]
     M --> P[Fit real mz maps<br/>for all states]
     N --> P
-    P --> O
+    P --> Y
+    Y -- Yes --> D
+    Y -- No --> O{More outer<br/>iterations?}
     O -- Yes --> D
     O -- No --> Q{Projection model<br/>is none?}
     Q -- No --> R[Apply final selected<br/>dichroic projection]
@@ -1338,6 +1351,19 @@ This real-`m_z` constraint is what gives the saturated-reference model more
 stabilizing power than the unconstrained `shared_charge` model. Complex
 state-dependent fluctuations that do not lie along the response direction
 $q(\mathbf r)$ are rejected.
+
+If `zero_magnetization_outside_support=True`, both `saturated_reference` and
+the bounded `shared_charge` physical response fit multiply their real
+magnetization maps by `supportmask != 0`. This is an effective observability
+prior: magnetic material may still exist outside the holographic support, but
+the reconstruction treats its retrievable magnetic contrast as zero there.
+The option can improve convergence by preventing unsupported pixels from
+absorbing arbitrary magnetic structure.
+
+The high-level dichroic driver shifts `supportmask` into the same log-object
+frame used by the projection before applying it to real magnetization maps.
+Direct projection calls expect `magnetization_supportmask` to already be in
+that frame.
 
 #### Required number of states and holograms
 
@@ -1719,6 +1745,15 @@ Here:
 Beam condition does not index the charge or magnetic refractive indices.
 Measurements made after moving the beam therefore share both energy responses.
 
+If `zero_magnetization_outside_support=True`, the physical projection
+multiplies each fitted `m_z` map by `supportmask != 0`. This can stabilize the
+factorization when magnetic contrast outside the reconstructed support is
+effectively unobservable and should not absorb residual model error.
+
+The high-level general driver shifts `supportmask` into the same log-object
+frame used by the projection before applying it to `m_z`. Direct projection
+calls expect `magnetization_supportmask` to already be in that frame.
+
 If one experimental change affects both the common illumination field and the
 material response, change both labels. For example, if changing energy also
 changes the incident wavefront significantly, use a new `energy_label` and a
@@ -1993,9 +2028,9 @@ must match `components["energy_names"]`.
 flowchart TD
     A[Load holograms and four<br/>metadata arrays] --> B[Initialize one field<br/>per observation]
     B --> C[Optional independent<br/>warmup]
-    C --> D[Run inner schedule<br/>for every observation]
-    D --> E{Joint projection due?}
-    E -- No --> K{More outer<br/>iterations?}
+    C --> D[Run inner schedule<br/>for next observation]
+    D --> E{Joint projection due after<br/>this observation update?}
+    E -- No --> U{More observations<br/>in this sweep?}
     E -- Yes --> F[Convert fields to<br/>complex log-objects]
     F --> G{Projection model}
     G -- linear --> H[Fit C_m and free<br/>state-energy responses]
@@ -2006,7 +2041,9 @@ flowchart TD
     H --> T[Rebuild all log-objects]
     S --> T
     T --> M[Convert projected objects<br/>back to Fourier fields]
-    M --> K
+    M --> U
+    U -- Yes --> D
+    U -- No --> K{More outer<br/>iterations?}
     K -- Yes --> D
     K -- No --> N[Apply final full-strength<br/>joint projection]
     N --> O{Final Fourier<br/>constraint?}
@@ -2043,13 +2080,14 @@ flowchart TD
 | `final_fourier_constraint` | `True` | Reapply measured amplitudes after the final projection. |
 | `hologram_intensity_cutoff_vmin` | `-1` | Optional low-percentile background subtraction. |
 | `projection_model` | `"physical_factorized"` | Use `"physical_factorized"`, flexible `"state_energy_beam"`, or `"none"`. |
-| `projection_every` | `1` | Apply the joint projection every this many outer iterations. |
-| `projection_start` | `0` | First outer-iteration index eligible for projection. |
+| `projection_every` | `None` | Number of completed observation updates between projections. `None` means the number of holograms, or once per complete sweep. |
+| `projection_start` | `None` | Completed observation-update count at which projection first becomes eligible. `None` resolves to the effective `projection_every` value. |
 | `projection_relaxation` | `1.0` | Mixing strength between current and projected fields. |
 | `observation_weights` | `None` | Optional positive weight for each hologram. |
 | `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary gauge. |
 | `physical_iterations` | `20` | Alternating factorization updates per joint projection. |
 | `saturated_states` | `None` | Optional sequence of `+1` saturated states or mapping to `+1`/`-1`. |
+| `zero_magnetization_outside_support` | `False` | Force fitted magnetization maps to zero outside `supportmask` after shifting it to the log-object frame. |
 | `charge_spectral_constraint` | `"free"` | Charge spectrum mode: free, KK, known beta, or known beta plus KK. |
 | `magnetic_spectral_constraint` | `"free"` | Magnetic spectrum mode with the same choices. |
 | `energy_values` | `None` | Numerical energy axis required by KK constraints. |

@@ -14,6 +14,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 import logging
 log = logging.getLogger(__name__)
 
+from functools import partial
 import os
 import time
 
@@ -54,14 +55,10 @@ if GPU:
 else:
     import numpy as xp
     import scipy.fft as fft
-    from scipy.fft import fft2, ifft2
 
-    # Change number of workers fot fft
-    def fft2(array, **kwargs):
-        return fft.fft2(array, workers=os.cpu_count(), **kwargs)
-    
-    def ifft2(array, **kwargs):
-        return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
+    # Use all available CPU workers for FFT operations.
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):

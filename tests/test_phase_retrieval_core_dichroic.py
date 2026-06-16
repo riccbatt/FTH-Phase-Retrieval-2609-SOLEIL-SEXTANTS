@@ -138,6 +138,104 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
         )
         self.assertFalse(components["physical_response_bounds_applied"])
 
+    def test_saturated_reference_can_zero_magnetization_outside_support(self):
+        support = np.zeros((3, 4), dtype=bool)
+        support[1:, 1:3] = True
+        charge = np.full((3, 4), 0.1 + 0.02j)
+        response = 0.04 - 0.03j
+        mz_domains = np.zeros((3, 4), dtype=float)
+        mz_domains[support] = np.linspace(-0.8, 0.8, support.sum())
+        mz_sat = support.astype(float)
+        log_objects = np.stack([
+            charge + response * mz_sat,
+            charge - response * mz_sat,
+            charge + response * mz_domains,
+            charge - response * mz_domains,
+        ])
+
+        projected, components = (
+            dichroic.project_log_objects_saturated_reference(
+                log_objects,
+                state_labels=["sat", "sat", "domains", "domains"],
+                polarization_signs=[1, -1, 1, -1],
+                saturated_states={"sat": 1},
+                magnetization_supportmask=support,
+                return_components=True,
+            )
+        )
+
+        np.testing.assert_allclose(projected, log_objects, atol=1e-10)
+        self.assertTrue(components["magnetization_supportmask_applied"])
+        self.assertTrue(
+            np.all(
+                components["magnetization_by_state"]["domains"][~support] == 0
+            )
+        )
+        self.assertTrue(
+            np.all(components["magnetization_by_state"]["sat"][~support] == 0)
+        )
+        np.testing.assert_allclose(
+            components["magnetization_by_state"]["domains"][support],
+            mz_domains[support],
+            atol=1e-10,
+        )
+
+    def test_driver_shifts_supportmask_for_magnetization_projection(self):
+        support = np.zeros((4, 6), dtype=bool)
+        support[:2, :3] = True
+        object_support = np.fft.fftshift(support)
+        charge = np.full((4, 6), 0.1 + 0.02j)
+        response = 0.04 - 0.03j
+        mz_domains = np.zeros((4, 6), dtype=float)
+        mz_domains[object_support] = np.linspace(
+            -0.8,
+            0.8,
+            object_support.sum(),
+        )
+        mz_sat = object_support.astype(float)
+        log_objects = np.stack([
+            charge + response * mz_sat,
+            charge - response * mz_sat,
+            charge + response * mz_domains,
+            charge - response * mz_domains,
+        ])
+        fields = dichroic.core.object_log_to_fourier_field(log_objects)
+
+        def identity_core(*args, **kwargs):
+            return kwargs["Phase"], [], [], None
+
+        with mock.patch.object(
+            dichroic,
+            "PhaseRtrv_core",
+            side_effect=identity_core,
+        ):
+            _, components, _, _ = dichroic.dichroic_phase_retrieval_algorithm(
+                np.abs(fields) ** 2,
+                np.zeros_like(support),
+                support,
+                state_labels=["sat", "sat", "domains", "domains"],
+                polarization_signs=[1, -1, 1, -1],
+                saturated_states={"sat": 1},
+                dichroic_recipe={
+                    "warmup_Nit": 0,
+                    "inner_Nit": [1],
+                    "outer_iterations": 1,
+                    "projection_every": 1,
+                    "projection_start": 1,
+                    "zero_magnetization_outside_support": True,
+                    "final_fourier_constraint": False,
+                },
+                start_fields=fields,
+            )
+
+        recovered = components["magnetization_by_state"]["domains"]
+        np.testing.assert_allclose(
+            recovered[object_support],
+            mz_domains[object_support],
+            atol=1e-10,
+        )
+        self.assertTrue(np.all(recovered[~object_support] == 0))
+
     def test_optional_beta_range_constrains_attenuation_only(self):
         charge = np.full((3, 4), 0.02 + 0.01j)
         response = np.full((3, 4), -0.5 + 0.8j)
@@ -422,6 +520,67 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
         )
         np.testing.assert_allclose(result, 2)
         self.assertEqual(len(errors["observation_steps"]), 4)
+
+    def test_projection_every_counts_completed_observation_updates(self):
+        holograms = np.ones((2, 4, 4))
+
+        def fake_core(*, Phase, **kwargs):
+            return Phase, np.array([]), np.array([]), None
+
+        def fake_projection(fields, *args, **kwargs):
+            return fields, {
+                "projection_model": "shared_charge",
+                "identifiable": True,
+                "fit_residual_rms": 0.0,
+            }
+
+        for cadence, projection_start, expected_observations, expected_updates in (
+            (1, 0, [0, 1, 0, 1], [1, 2, 3, 4]),
+            (2, 0, [1, 1], [2, 4]),
+            (None, 0, [1, 1], [2, 4]),
+            (1, 2, [1, 0, 1], [2, 3, 4]),
+            (None, None, [1, 1], [2, 4]),
+        ):
+            with self.subTest(
+                projection_every=cadence,
+                projection_start=projection_start,
+            ), mock.patch.object(
+                dichroic,
+                "PhaseRtrv_core",
+                side_effect=fake_core,
+            ), mock.patch.object(
+                dichroic,
+                "_project_fields",
+                side_effect=fake_projection,
+            ):
+                _, _, _, errors = dichroic.dichroic_phase_retrieval_algorithm(
+                    holograms,
+                    np.zeros((4, 4), dtype=int),
+                    np.ones((4, 4)),
+                    state_labels=["state", "state"],
+                    polarization_signs=[1, -1],
+                    dichroic_recipe={
+                        "inner_mode": "ER",
+                        "inner_Nit": 1,
+                        "outer_iterations": 2,
+                        "warmup_Nit": 0,
+                        "shuffle_observations": False,
+                        "projection_every": cadence,
+                        "projection_start": projection_start,
+                        "final_fourier_constraint": False,
+                    },
+                    start_fields=np.ones_like(holograms, dtype=complex),
+                )
+
+            steps = errors["projection_steps"]
+            self.assertEqual(
+                [step["observation"] for step in steps],
+                expected_observations,
+            )
+            self.assertEqual(
+                [step["completed_update"] for step in steps],
+                expected_updates,
+            )
 
 
 if __name__ == "__main__":

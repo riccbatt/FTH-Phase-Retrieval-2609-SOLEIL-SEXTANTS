@@ -225,6 +225,62 @@ class PhaseRetrievalCoreMultienergyScheduleTests(unittest.TestCase):
 
         np.testing.assert_allclose(retrieved, expected, atol=1e-12)
 
+    def test_projection_every_counts_completed_energy_updates(self):
+        holograms = np.ones((3, 4, 4))
+
+        def fake_core(*, Phase, **kwargs):
+            return Phase, np.array([]), np.array([]), None
+
+        def fake_projection(fields, **kwargs):
+            return fields, {"projection_model": kwargs["projection_model"]}
+
+        for cadence, projection_start, expected_energies, expected_updates in (
+            (1, 0, [0, 1, 2, 0, 1, 2], [1, 2, 3, 4, 5, 6]),
+            (3, 0, [2, 2], [3, 6]),
+            (None, 0, [2, 2], [3, 6]),
+            (1, 3, [2, 0, 1, 2], [3, 4, 5, 6]),
+            (2, None, [1, 0, 2], [2, 4, 6]),
+            (None, None, [2, 2], [3, 6]),
+        ):
+            with self.subTest(
+                projection_every=cadence,
+                projection_start=projection_start,
+            ), mock.patch.object(
+                multi,
+                "PhaseRtrv_core",
+                side_effect=fake_core,
+            ), mock.patch.object(
+                multi,
+                "project_fourier_fields_multi_energy",
+                side_effect=fake_projection,
+            ):
+                _, _, _, errors = multi.multi_energy_phase_retrieval_algorithm(
+                    holograms,
+                    np.zeros((4, 4), dtype=int),
+                    np.ones((4, 4)),
+                    multi_energy_recipe={
+                        "inner_mode": "ER",
+                        "inner_Nit": 1,
+                        "outer_iterations": 2,
+                        "warmup_Nit": 0,
+                        "shuffle_energies": False,
+                        "projection_every": cadence,
+                        "projection_start": projection_start,
+                        "final_fourier_constraint": False,
+                    },
+                    start_fields=np.ones_like(holograms, dtype=complex),
+                )
+
+            steps = errors["projection_steps"]
+            self.assertEqual(
+                [step["energy"] for step in steps],
+                expected_energies,
+            )
+            self.assertEqual(
+                [step["completed_update"] for step in steps],
+                expected_updates,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 import logging
 log = logging.getLogger(__name__)
 
+from functools import partial
 import os
 import time
 import numpy as np
@@ -60,14 +61,10 @@ if GPU:
 else:
     import numpy as xp
     import scipy.fft as fft
-    from scipy.fft import fft2, ifft2
 
-    # Change number of workers fot fft
-    def fft2(array, **kwargs):
-        return fft.fft2(array, workers=os.cpu_count(), **kwargs)
-    
-    def ifft2(array, **kwargs):
-        return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
+    # Use all available CPU workers for FFT operations.
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):
@@ -2207,7 +2204,6 @@ def _verify_multi_energy_recipe(recipe, nE):
         "inner_iterations",
         "warmup_iterations",
         "projection_every",
-        "projection_start",
         "average_img",
     ]
     for key in integer_keys:
@@ -2223,8 +2219,13 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("warmup_iterations must be >= 0.")
     if recipe["projection_every"] <= 0:
         raise ValueError("projection_every must be > 0.")
-    if recipe["projection_start"] < 0:
-        raise ValueError("projection_start must be >= 0.")
+    projection_start = recipe["projection_start"]
+    if projection_start is not None and (
+        isinstance(projection_start, bool)
+        or not isinstance(projection_start, (int, np.integer))
+        or projection_start < 0
+    ):
+        raise ValueError("projection_start must be None or a non-negative integer.")
     if recipe["average_img"] <= 0:
         raise ValueError("average_img must be > 0.")
     if not isinstance(recipe["Fourier_last"], bool):
@@ -2455,7 +2456,11 @@ def multi_energy_phase_retrieval_algorithm(
     outer_iterations = int(recipe["outer_iterations"])
     inner_iterations = int(recipe["inner_iterations"])
     projection_every = int(recipe["projection_every"])
-    projection_start = int(recipe["projection_start"])
+    projection_start = (
+        projection_every
+        if recipe["projection_start"] is None
+        else int(recipe["projection_start"])
+    )
 
     components = {"projection_model": recipe["projection_model"]}
 

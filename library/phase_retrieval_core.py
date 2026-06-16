@@ -29,6 +29,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 import logging
 log = logging.getLogger(__name__)
 
+from functools import partial
 import os
 import time
 import numpy as np
@@ -68,16 +69,10 @@ if GPU:
 else:
     import numpy as xp
     import scipy.fft as fft
-    from scipy.fft import fft2, ifft2
 
     # Use all available CPU workers for FFT operations.
-    def fft2(array, **kwargs):
-        """Run a two-dimensional FFT using all available CPU workers."""
-        return fft.fft2(array, workers=os.cpu_count(), **kwargs)
-    
-    def ifft2(array, **kwargs):
-        """Run a two-dimensional inverse FFT using all CPU workers."""
-        return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):

@@ -61,6 +61,7 @@ def default_general_phase_retrieval_recipe():
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
         "saturated_states": None,
+        "zero_magnetization_outside_support": False,
         "charge_spectral_constraint": "free",
         "magnetic_spectral_constraint": "free",
         "energy_values": None,
@@ -381,6 +382,7 @@ def project_log_objects_physical(
     saturated_states=None,
     iterations=20,
     recipe=None,
+    magnetization_supportmask=None,
     return_components=False,
 ):
     """
@@ -417,6 +419,12 @@ def project_log_objects_physical(
     n_states = len(metadata["state_names"])
     n_energies = len(metadata["energy_names"])
     n_beams = len(metadata["beam_names"])
+    if magnetization_supportmask is not None:
+        magnetization_supportmask = np.asarray(magnetization_supportmask) != 0
+        if magnetization_supportmask.shape != (nx, ny):
+            raise ValueError(
+                "magnetization_supportmask must have shape (nx, ny)."
+            )
 
     # Initialize beam fields from weighted observation means.
     common = np.zeros((n_beams, nx, ny), dtype=np.complex128)
@@ -433,6 +441,8 @@ def project_log_objects_physical(
     for state, sign in saturated.items():
         state_index = metadata["state_names"].index(state)
         magnetization[state_index] = sign
+    if magnetization_supportmask is not None:
+        magnetization *= magnetization_supportmask
 
     # Estimate an initial complex magnetic direction independently per energy.
     for energy in range(n_energies):
@@ -483,6 +493,8 @@ def project_log_objects_physical(
         for state, state_name in enumerate(metadata["state_names"]):
             if state_name in saturated:
                 magnetization[state].fill(saturated[state_name])
+                if magnetization_supportmask is not None:
+                    magnetization[state] *= magnetization_supportmask
                 continue
             numerator = np.zeros((nx, ny), dtype=float)
             denominator = 0.0
@@ -510,6 +522,8 @@ def project_log_objects_physical(
                     -1.0,
                     1.0,
                 )
+                if magnetization_supportmask is not None:
+                    magnetization[state] *= magnetization_supportmask
 
         # Fit scalar charge and magnetic responses independently at each energy.
         for energy in range(n_energies):
@@ -623,6 +637,9 @@ def project_log_objects_physical(
             name: magnetization[index]
             for index, name in enumerate(metadata["state_names"])
         },
+        "magnetization_supportmask_applied": (
+            magnetization_supportmask is not None
+        ),
         "saturated_states": saturated,
         "state_names": metadata["state_names"],
         "energy_names": metadata["energy_names"],
@@ -655,6 +672,7 @@ def project_fourier_fields_general(
     physical_iterations=20,
     recipe=None,
     log_floor=1e-12,
+    magnetization_supportmask=None,
     return_components=False,
 ):
     """Apply the selected general model to Fourier-domain fields."""
@@ -675,6 +693,7 @@ def project_fourier_fields_general(
             saturated_states=saturated_states,
             iterations=physical_iterations,
             recipe=recipe,
+            magnetization_supportmask=magnetization_supportmask,
             return_components=return_components,
         )
     else:
@@ -753,7 +772,6 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     for key in (
         "outer_iterations",
         "projection_every",
-        "projection_start",
         "average_img",
     ):
         value = recipe[key]
@@ -763,8 +781,13 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("outer_iterations must be > 0.")
     if recipe["projection_every"] <= 0:
         raise ValueError("projection_every must be > 0.")
-    if recipe["projection_start"] < 0:
-        raise ValueError("projection_start must be >= 0.")
+    projection_start = recipe["projection_start"]
+    if projection_start is not None and (
+        isinstance(projection_start, bool)
+        or not isinstance(projection_start, (int, np.integer))
+        or projection_start < 0
+    ):
+        raise ValueError("projection_start must be None or a non-negative integer.")
     if recipe["average_img"] <= 0:
         raise ValueError("average_img must be > 0.")
     if recipe["plot_every"] <= 0:
@@ -795,6 +818,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         or physical_iterations <= 0
     ):
         raise ValueError("physical_iterations must be a positive integer.")
+    if not isinstance(recipe["zero_magnetization_outside_support"], bool):
+        raise ValueError("zero_magnetization_outside_support must be bool.")
     for key in (
         "charge_response_real_range",
         "charge_response_imag_range",
@@ -984,6 +1009,13 @@ def general_phase_retrieval_algorithm(
     supportmask = np.asarray(supportmask)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
+    # PhaseRtrv_core applies support constraints in the shifted object frame.
+    # The log-object projection uses the same frame via fft2(fftshift(field)).
+    magnetization_supportmask = (
+        np.fft.fftshift(supportmask)
+        if recipe["zero_magnetization_outside_support"]
+        else None
+    )
 
     # Convert measured intensities to amplitudes and invalid-pixel masks.
     amplitudes, intensities, bsmasks = core._prepare_energy_amplitudes(
@@ -1084,14 +1116,15 @@ def general_phase_retrieval_algorithm(
                     **result,
                 })
 
+        projection_start = (
+            recipe["projection_every"]
+            if recipe["projection_start"] is None
+            else recipe["projection_start"]
+        )
         projection_due = (
             recipe["projection_model"] != "none"
-            and outer >= recipe["projection_start"]
-            and (
-                (outer - recipe["projection_start"])
-                % recipe["projection_every"]
-                == 0
-            )
+            and outer >= projection_start
+            and ((outer - projection_start) % recipe["projection_every"] == 0)
         )
         if projection_due:
             fields, components = project_fourier_fields_general(
@@ -1108,6 +1141,7 @@ def general_phase_retrieval_algorithm(
                 physical_iterations=recipe["physical_iterations"],
                 recipe=recipe,
                 log_floor=recipe["log_floor"],
+                magnetization_supportmask=magnetization_supportmask,
                 return_components=True,
             )
             errors["projection_steps"].append({
@@ -1134,6 +1168,7 @@ def general_phase_retrieval_algorithm(
             physical_iterations=recipe["physical_iterations"],
             recipe=recipe,
             log_floor=recipe["log_floor"],
+            magnetization_supportmask=magnetization_supportmask,
             return_components=True,
         )
 

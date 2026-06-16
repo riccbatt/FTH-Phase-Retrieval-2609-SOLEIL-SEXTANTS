@@ -454,13 +454,18 @@ def multi_energy_phase_retrieval_algorithm(
         recipe,
         name="inner",
     )
-    projection_every = int(recipe["projection_every"])
-    projection_start = int(recipe["projection_start"])
+    projection_every, projection_start = multi_energy._resolve_projection_cadence(
+        recipe,
+        default_every=n_energy,
+    )
+    completed_updates = 0
     components = {
         "projection_model": recipe["projection_model"],
         "Nmodes": nmodes,
     }
 
+    # Each energy update advances all incoherent modes together. Cross-energy
+    # projection then treats each mode index independently.
     for outer in range(outer_iterations):
         if recipe["shuffle_energies"]:
             energy_order = rng.permutation(n_energy)
@@ -486,11 +491,14 @@ def multi_energy_phase_retrieval_algorithm(
                     **stage_result,
                 })
 
-        do_projection = (
-            outer >= projection_start
-            and ((outer - projection_start) % projection_every == 0)
-        )
-        if do_projection:
+            completed_updates += 1
+            if not multi_energy._projection_is_due(
+                completed_updates,
+                projection_start,
+                projection_every,
+            ):
+                continue
+
             fields, components = (
                 project_fourier_fields_multi_energy_multimode(
                     fields,
@@ -519,6 +527,8 @@ def multi_energy_phase_retrieval_algorithm(
             errors["projection_steps"].append(
                 {
                     "outer": outer,
+                    "energy": int(energy_index),
+                    "completed_update": completed_updates,
                     "projection_model": components.get("projection_model"),
                     "Nmodes": nmodes,
                     "rank": recipe["rank"],

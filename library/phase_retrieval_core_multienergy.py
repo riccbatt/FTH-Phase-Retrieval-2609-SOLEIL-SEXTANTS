@@ -34,6 +34,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 import logging
 log = logging.getLogger(__name__)
 
+from functools import partial
 import os
 import time
 import numpy as np
@@ -78,16 +79,10 @@ if GPU:
 else:
     import numpy as xp
     import scipy.fft as fft
-    from scipy.fft import fft2, ifft2
 
     # Use all available CPU workers for FFT operations.
-    def fft2(array, **kwargs):
-        """Run a two-dimensional FFT using all available CPU workers."""
-        return fft.fft2(array, workers=os.cpu_count(), **kwargs)
-    
-    def ifft2(array, **kwargs):
-        """Run a two-dimensional inverse FFT using all CPU workers."""
-        return fft.ifft2(array, workers=os.cpu_count(), **kwargs)
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):
@@ -2134,9 +2129,12 @@ def default_multi_energy_phase_retrieval_recipe():
         # Multi-energy projection settings.
         "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
         "rank": 1,
-        "projection_every": 1,
+        # Number of completed energy updates between projections. None means
+        # one full energy sweep, preserving the historical default cadence.
+        "projection_every": None,
         "projection_relaxation": 1.0,
-        "projection_start": 0,
+        # None starts projection at the first projection_every boundary.
+        "projection_start": None,
         "projection_static_mode": "mean",
         "energy_weights": None,
         "log_floor": 1e-12,
@@ -2380,6 +2378,37 @@ def _run_energy_update_schedule(
     return field, stage_results
 
 
+def _projection_is_due(completed_updates, projection_start, projection_every):
+    """Return whether a projection is scheduled after the current update.
+
+    Both controls are measured in completed updates. A positive start value
+    is itself an eligible projection boundary.
+    """
+    if completed_updates < projection_start:
+        return False
+    offset = (
+        completed_updates
+        if projection_start == 0
+        else completed_updates - projection_start
+    )
+    return offset % projection_every == 0
+
+
+def _resolve_projection_cadence(recipe, default_every):
+    """Return positive integer projection_every and projection_start values."""
+    projection_every = (
+        int(default_every)
+        if recipe["projection_every"] is None
+        else int(recipe["projection_every"])
+    )
+    projection_start = (
+        projection_every
+        if recipe["projection_start"] is None
+        else int(recipe["projection_start"])
+    )
+    return projection_every, projection_start
+
+
 def _verify_multi_energy_recipe(recipe, nE):
     """Validate schedules, projection settings, weights, and spectral inputs."""
     allowed_models = {
@@ -2426,23 +2455,28 @@ def _verify_multi_energy_recipe(recipe, nE):
         allow_disabled=True,
     )
 
-    integer_keys = [
-        "outer_iterations",
-        "projection_every",
-        "projection_start",
-        "average_img",
-    ]
+    integer_keys = ["outer_iterations", "average_img"]
     for key in integer_keys:
         value = recipe[key]
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"{key} must be an integer.")
 
+    projection_every = recipe["projection_every"]
+    if projection_every is not None and (
+        isinstance(projection_every, bool)
+        or not isinstance(projection_every, (int, np.integer))
+        or projection_every <= 0
+    ):
+        raise ValueError("projection_every must be None or a positive integer.")
     if recipe["outer_iterations"] <= 0:
         raise ValueError("outer_iterations must be > 0.")
-    if recipe["projection_every"] <= 0:
-        raise ValueError("projection_every must be > 0.")
-    if recipe["projection_start"] < 0:
-        raise ValueError("projection_start must be >= 0.")
+    projection_start = recipe["projection_start"]
+    if projection_start is not None and (
+        isinstance(projection_start, bool)
+        or not isinstance(projection_start, (int, np.integer))
+        or projection_start < 0
+    ):
+        raise ValueError("projection_start must be None or a non-negative integer.")
     if recipe["average_img"] <= 0:
         raise ValueError("average_img must be > 0.")
     if not isinstance(recipe["Fourier_last"], bool):
@@ -2516,8 +2550,8 @@ def multi_energy_phase_retrieval_algorithm(
     photon energies.
 
     Each outer iteration runs the complete ``inner_mode``/``inner_Nit``
-    schedule at every energy before applying the selected cross-energy
-    projection. For example::
+    schedule at every energy. The selected cross-energy projection is applied
+    after each configured number of completed energy updates. For example::
 
         inner_mode = ["HAPRE", "ER"]
         inner_Nit = [700, 50]
@@ -2682,11 +2716,16 @@ def multi_energy_phase_retrieval_algorithm(
         recipe,
         name="inner",
     )
-    projection_every = int(recipe["projection_every"])
-    projection_start = int(recipe["projection_start"])
+    projection_every, projection_start = _resolve_projection_cadence(
+        recipe,
+        default_every=nE,
+    )
+    completed_updates = 0
 
     components = {"projection_model": recipe["projection_model"]}
 
+    # A sweep visits every energy once. Projection cadence may be finer than
+    # that sweep and is therefore driven by completed_updates.
     for outer in range(outer_iterations):
         if recipe["shuffle_energies"]:
             energy_order = rng.permutation(nE)
@@ -2710,12 +2749,15 @@ def multi_energy_phase_retrieval_algorithm(
                     **stage_result,
                 })
 
-        do_projection = (
-            outer >= projection_start
-            and ((outer - projection_start) % projection_every == 0)
-        )
+            completed_updates += 1
+            if not _projection_is_due(
+                completed_updates,
+                projection_start,
+                projection_every,
+            ):
+                continue
 
-        if do_projection:
+            # Couple the complete stack through the selected energy model.
             fields, components = project_fourier_fields_multi_energy(
                 fields,
                 projection_model=recipe["projection_model"],
@@ -2740,12 +2782,19 @@ def multi_energy_phase_retrieval_algorithm(
             errors["projection_steps"].append(
                 {
                     "outer": outer,
+                    "energy": int(j),
+                    "completed_update": completed_updates,
                     "projection_model": components.get("projection_model"),
                     "rank": recipe["rank"],
-                    "spectral_constraint": components.get("spectral_constraint", recipe["spectral_constraint"]),
+                    "spectral_constraint": components.get(
+                        "spectral_constraint",
+                        recipe["spectral_constraint"],
+                    ),
                     "relaxation": recipe["projection_relaxation"],
                     "singular_values": components.get("singular_values"),
-                    "spectral_coefficients": components.get("spectral_coefficients"),
+                    "spectral_coefficients": components.get(
+                        "spectral_coefficients"
+                    ),
                 }
             )
 

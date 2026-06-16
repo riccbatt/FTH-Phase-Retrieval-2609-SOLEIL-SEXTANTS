@@ -166,6 +166,112 @@ class PhaseRetrievalCoreGeneralTests(unittest.TestCase):
         )
         self.assertLessEqual(np.max(np.abs(components["magnetization"])), 1.0)
 
+    def test_physical_model_can_zero_magnetization_outside_support(self):
+        support = np.zeros((3, 4), dtype=bool)
+        support[1:, 1:3] = True
+        common = np.full((3, 4), 0.1 + 0.02j)
+        magnetic = 0.04 - 0.03j
+        mz_domains = np.zeros((3, 4), dtype=float)
+        mz_domains[support] = np.linspace(-0.8, 0.8, support.sum())
+        mz_sat = support.astype(float)
+        observations = [
+            ("sat", 1, mz_sat),
+            ("sat", -1, mz_sat),
+            ("domains", 1, mz_domains),
+            ("domains", -1, mz_domains),
+        ]
+        log_objects = np.stack([
+            common + polarization * magnetic * mz
+            for _, polarization, mz in observations
+        ])
+
+        projected, components = general.project_log_objects_physical(
+            log_objects,
+            state_labels=[item[0] for item in observations],
+            energy_labels=["energy"] * len(observations),
+            polarization_coefficients=[item[1] for item in observations],
+            beam_labels=["beam"] * len(observations),
+            saturated_states={"sat": 1},
+            iterations=20,
+            magnetization_supportmask=support,
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected, log_objects, atol=1e-10)
+        self.assertTrue(components["magnetization_supportmask_applied"])
+        self.assertTrue(
+            np.all(
+                components["magnetization_by_state"]["domains"][~support] == 0
+            )
+        )
+        self.assertTrue(
+            np.all(components["magnetization_by_state"]["sat"][~support] == 0)
+        )
+        np.testing.assert_allclose(
+            components["magnetization_by_state"]["domains"][support],
+            mz_domains[support],
+            atol=1e-10,
+        )
+
+    def test_driver_shifts_supportmask_for_magnetization_projection(self):
+        support = np.zeros((4, 6), dtype=bool)
+        support[:2, :3] = True
+        object_support = np.fft.fftshift(support)
+        common = np.full((4, 6), 0.1 + 0.02j)
+        magnetic = 0.04 - 0.03j
+        mz_domains = np.zeros((4, 6), dtype=float)
+        mz_domains[object_support] = np.linspace(
+            -0.8,
+            0.8,
+            object_support.sum(),
+        )
+        mz_sat = object_support.astype(float)
+        observations = [
+            ("sat", 1, mz_sat),
+            ("sat", -1, mz_sat),
+            ("domains", 1, mz_domains),
+            ("domains", -1, mz_domains),
+        ]
+        log_objects = np.stack([
+            common + polarization * magnetic * mz
+            for _, polarization, mz in observations
+        ])
+        fields = general.core.object_log_to_fourier_field(log_objects)
+
+        def identity_core(*args, **kwargs):
+            return kwargs["Phase"], [], [], None
+
+        with mock.patch.object(general, "PhaseRtrv_core", side_effect=identity_core):
+            _, components, _, _ = general.general_phase_retrieval_algorithm(
+                np.abs(fields) ** 2,
+                np.zeros_like(support),
+                support,
+                state_labels=[item[0] for item in observations],
+                energy_labels=["energy"] * len(observations),
+                polarization_coefficients=[item[1] for item in observations],
+                beam_labels=["beam"] * len(observations),
+                saturated_states={"sat": 1},
+                general_recipe={
+                    "warmup_Nit": 0,
+                    "inner_Nit": [1],
+                    "outer_iterations": 1,
+                    "projection_every": 1,
+                    "projection_start": 1,
+                    "zero_magnetization_outside_support": True,
+                    "final_fourier_constraint": False,
+                    "physical_iterations": 20,
+                },
+                start_fields=fields,
+            )
+
+        recovered = components["magnetization_by_state"]["domains"]
+        np.testing.assert_allclose(
+            recovered[object_support],
+            mz_domains[object_support],
+            atol=1e-10,
+        )
+        self.assertTrue(np.all(recovered[~object_support] == 0))
+
     def test_physical_model_applies_response_bounds(self):
         shape = (2, 2)
         common = np.zeros(shape, dtype=complex)

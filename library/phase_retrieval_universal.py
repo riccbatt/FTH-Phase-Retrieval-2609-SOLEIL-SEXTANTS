@@ -2126,9 +2126,12 @@ def default_multi_energy_phase_retrieval_recipe():
         # Multi-energy projection settings.
         "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
         "rank": 1,
-        "projection_every": 1,
+        # Number of completed energy updates between projections. None means
+        # one full energy sweep, preserving the historical default cadence.
+        "projection_every": None,
         "projection_relaxation": 1.0,
-        "projection_start": 0,
+        # None starts projection at the first projection_every boundary.
+        "projection_start": None,
         "projection_static_mode": "mean",
         "energy_weights": None,
         "log_floor": 1e-12,
@@ -2375,6 +2378,37 @@ def _run_energy_update_schedule(
     return field, stage_results
 
 
+def _projection_is_due(completed_updates, projection_start, projection_every):
+    """Return whether a joint projection is scheduled after this update.
+
+    Both controls use completed observation or energy updates, not outer-loop
+    indices. A positive start value is itself an eligible boundary.
+    """
+    if completed_updates < projection_start:
+        return False
+    offset = (
+        completed_updates
+        if projection_start == 0
+        else completed_updates - projection_start
+    )
+    return offset % projection_every == 0
+
+
+def _resolve_projection_cadence(recipe, default_every):
+    """Return positive integer projection_every and projection_start values."""
+    projection_every = (
+        int(default_every)
+        if recipe["projection_every"] is None
+        else int(recipe["projection_every"])
+    )
+    projection_start = (
+        projection_every
+        if recipe["projection_start"] is None
+        else int(recipe["projection_start"])
+    )
+    return projection_every, projection_start
+
+
 def _verify_multi_energy_recipe(recipe, nE):
     """Validate schedules, projection settings, weights, and spectral inputs."""
     allowed_models = {
@@ -2421,23 +2455,28 @@ def _verify_multi_energy_recipe(recipe, nE):
         allow_disabled=True,
     )
 
-    integer_keys = [
-        "outer_iterations",
-        "projection_every",
-        "projection_start",
-        "average_img",
-    ]
+    integer_keys = ["outer_iterations", "average_img"]
     for key in integer_keys:
         value = recipe[key]
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"{key} must be an integer.")
 
+    projection_every = recipe["projection_every"]
+    if projection_every is not None and (
+        isinstance(projection_every, bool)
+        or not isinstance(projection_every, (int, np.integer))
+        or projection_every <= 0
+    ):
+        raise ValueError("projection_every must be None or a positive integer.")
     if recipe["outer_iterations"] <= 0:
         raise ValueError("outer_iterations must be > 0.")
-    if recipe["projection_every"] <= 0:
-        raise ValueError("projection_every must be > 0.")
-    if recipe["projection_start"] < 0:
-        raise ValueError("projection_start must be >= 0.")
+    projection_start = recipe["projection_start"]
+    if projection_start is not None and (
+        isinstance(projection_start, bool)
+        or not isinstance(projection_start, (int, np.integer))
+        or projection_start < 0
+    ):
+        raise ValueError("projection_start must be None or a non-negative integer.")
     if recipe["average_img"] <= 0:
         raise ValueError("average_img must be > 0.")
     if not isinstance(recipe["Fourier_last"], bool):
@@ -2512,8 +2551,8 @@ def multi_energy_phase_retrieval_algorithm(
     photon energies.
 
     Each outer iteration runs the complete ``inner_mode``/``inner_Nit``
-    schedule at every energy before applying the selected cross-energy
-    projection. For example::
+    schedule at every energy. The selected cross-energy projection is applied
+    after each configured number of completed energy updates. For example::
 
         inner_mode = ["HAPRE", "ER"]
         inner_Nit = [700, 50]
@@ -2693,8 +2732,11 @@ def multi_energy_phase_retrieval_algorithm(
         recipe,
         name="inner",
     )
-    projection_every = int(recipe["projection_every"])
-    projection_start = int(recipe["projection_start"])
+    projection_every, projection_start = _resolve_projection_cadence(
+        recipe,
+        default_every=nE,
+    )
+    completed_updates = 0
 
     components = {"projection_model": recipe["projection_model"]}
 
@@ -2703,6 +2745,8 @@ def multi_energy_phase_retrieval_algorithm(
         f"with {nE} energies and {outer_iterations} outer loops",
         flush=True,
     )
+    # A sweep visits every energy once. Projection cadence can be finer than
+    # a sweep, so it is driven by the completed-update counter.
     for outer in range(outer_iterations):
         print(
             f"Universal phase retrieval: outer loop "
@@ -2737,12 +2781,15 @@ def multi_energy_phase_retrieval_algorithm(
                     **stage_result,
                 })
 
-        do_projection = (
-            outer >= projection_start
-            and ((outer - projection_start) % projection_every == 0)
-        )
+            completed_updates += 1
+            if not _projection_is_due(
+                completed_updates,
+                projection_start,
+                projection_every,
+            ):
+                continue
 
-        if do_projection:
+            # The projection sees the complete current energy stack.
             print("  Applying joint energy projection", flush=True)
             fields, components = project_fourier_fields_multi_energy(
                 fields,
@@ -2768,12 +2815,19 @@ def multi_energy_phase_retrieval_algorithm(
             errors["projection_steps"].append(
                 {
                     "outer": outer,
+                    "energy": int(j),
+                    "completed_update": completed_updates,
                     "projection_model": components.get("projection_model"),
                     "rank": recipe["rank"],
-                    "spectral_constraint": components.get("spectral_constraint", recipe["spectral_constraint"]),
+                    "spectral_constraint": components.get(
+                        "spectral_constraint",
+                        recipe["spectral_constraint"],
+                    ),
                     "relaxation": recipe["projection_relaxation"],
                     "singular_values": components.get("singular_values"),
-                    "spectral_coefficients": components.get("spectral_coefficients"),
+                    "spectral_coefficients": components.get(
+                        "spectral_coefficients"
+                    ),
                 }
             )
             print("  Joint energy projection complete", flush=True)
@@ -2846,14 +2900,20 @@ def default_general_phase_retrieval_recipe():
         "hologram_intensity_cutoff_vmin": -1,
         # General log-object projection settings.
         "projection_model": "physical_factorized",
-        "projection_every": 1,
-        "projection_start": 0,
+        # Number of completed observation updates between projections. None
+        # means one full observation sweep.
+        "projection_every": None,
+        # None starts projection at the first projection_every boundary.
+        "projection_start": None,
         "projection_relaxation": 1.0,
         "observation_weights": None,
         "rank_deficient": "error",
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
         "saturated_states": None,
+        # If True, force the fitted magnetic state maps to zero outside the
+        # real-space support used by the phase-retrieval kernel.
+        "zero_magnetization_outside_support": False,
         "charge_spectral_constraint": "free",
         "magnetic_spectral_constraint": "free",
         "energy_values": None,
@@ -3155,6 +3215,7 @@ def project_log_objects_physical(
     saturated_states=None,
     iterations=20,
     recipe=None,
+    magnetization_supportmask=None,
     return_components=False,
 ):
     """
@@ -3191,6 +3252,12 @@ def project_log_objects_physical(
     n_states = len(metadata["state_names"])
     n_energies = len(metadata["energy_names"])
     n_beams = len(metadata["beam_names"])
+    if magnetization_supportmask is not None:
+        magnetization_supportmask = np.asarray(magnetization_supportmask) != 0
+        if magnetization_supportmask.shape != (nx, ny):
+            raise ValueError(
+                "magnetization_supportmask must have shape (nx, ny)."
+            )
 
     # Initialize beam fields from weighted observation means.
     common = np.zeros((n_beams, nx, ny), dtype=np.complex128)
@@ -3207,6 +3274,8 @@ def project_log_objects_physical(
     for state, sign in saturated.items():
         state_index = metadata["state_names"].index(state)
         magnetization[state_index] = sign
+    if magnetization_supportmask is not None:
+        magnetization *= magnetization_supportmask
 
     # Estimate an initial complex magnetic direction independently per energy.
     for energy in range(n_energies):
@@ -3257,6 +3326,8 @@ def project_log_objects_physical(
         for state, state_name in enumerate(metadata["state_names"]):
             if state_name in saturated:
                 magnetization[state].fill(saturated[state_name])
+                if magnetization_supportmask is not None:
+                    magnetization[state] *= magnetization_supportmask
                 continue
             numerator = np.zeros((nx, ny), dtype=float)
             denominator = 0.0
@@ -3284,6 +3355,8 @@ def project_log_objects_physical(
                     -1.0,
                     1.0,
                 )
+                if magnetization_supportmask is not None:
+                    magnetization[state] *= magnetization_supportmask
 
         # Fit scalar charge and magnetic responses independently at each energy.
         for energy in range(n_energies):
@@ -3415,6 +3488,9 @@ def project_log_objects_physical(
             name: magnetization[index]
             for index, name in enumerate(metadata["state_names"])
         },
+        "magnetization_supportmask_applied": (
+            magnetization_supportmask is not None
+        ),
         "saturated_states": saturated,
         "state_names": metadata["state_names"],
         "energy_names": metadata["energy_names"],
@@ -3447,6 +3523,7 @@ def project_fourier_fields_general(
     physical_iterations=20,
     recipe=None,
     log_floor=1e-12,
+    magnetization_supportmask=None,
     return_components=False,
 ):
     """Apply the selected general model to Fourier-domain fields."""
@@ -3467,6 +3544,7 @@ def project_fourier_fields_general(
             saturated_states=saturated_states,
             iterations=physical_iterations,
             recipe=recipe,
+            magnetization_supportmask=magnetization_supportmask,
             return_components=return_components,
         )
     else:
@@ -3544,8 +3622,6 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     _build_update_schedule(recipe, name="warmup", allow_disabled=True)
     for key in (
         "outer_iterations",
-        "projection_every",
-        "projection_start",
         "average_img",
     ):
         value = recipe[key]
@@ -3553,10 +3629,20 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
             raise ValueError(f"{key} must be an integer.")
     if recipe["outer_iterations"] <= 0:
         raise ValueError("outer_iterations must be > 0.")
-    if recipe["projection_every"] <= 0:
-        raise ValueError("projection_every must be > 0.")
-    if recipe["projection_start"] < 0:
-        raise ValueError("projection_start must be >= 0.")
+    projection_start = recipe["projection_start"]
+    if projection_start is not None and (
+        isinstance(projection_start, bool)
+        or not isinstance(projection_start, (int, np.integer))
+        or projection_start < 0
+    ):
+        raise ValueError("projection_start must be None or a non-negative integer.")
+    projection_every = recipe["projection_every"]
+    if projection_every is not None and (
+        isinstance(projection_every, bool)
+        or not isinstance(projection_every, (int, np.integer))
+        or projection_every <= 0
+    ):
+        raise ValueError("projection_every must be None or a positive integer.")
     if recipe["average_img"] <= 0:
         raise ValueError("average_img must be > 0.")
     if recipe["plot_every"] <= 0:
@@ -3587,6 +3673,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         or physical_iterations <= 0
     ):
         raise ValueError("physical_iterations must be a positive integer.")
+    if not isinstance(recipe["zero_magnetization_outside_support"], bool):
+        raise ValueError("zero_magnetization_outside_support must be bool.")
     for key in (
         "charge_response_real_range",
         "charge_response_imag_range",
@@ -3791,6 +3879,13 @@ def general_phase_retrieval_algorithm(
     supportmask = np.asarray(supportmask)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
+    # PhaseRtrv_core applies support constraints in the shifted object frame.
+    # The log-object projection uses the same frame via fft2(fftshift(field)).
+    magnetization_supportmask = (
+        np.fft.fftshift(supportmask)
+        if recipe["zero_magnetization_outside_support"]
+        else None
+    )
 
     # Convert measured intensities to amplitudes and invalid-pixel masks.
     amplitudes, intensities, bsmasks = _prepare_energy_amplitudes(
@@ -3884,8 +3979,14 @@ def general_phase_retrieval_algorithm(
     inner_schedule = _build_update_schedule(recipe, name="inner")
     rng = np.random.default_rng(recipe["random_seed"])
     components = {"projection_model": recipe["projection_model"]}
+    projection_every, projection_start = _resolve_projection_cadence(
+        recipe,
+        default_every=n_observations,
+    )
+    completed_updates = 0
 
-    # Alternate independent data updates with the joint physical fit.
+    # Alternate detector/support updates with the metadata-aware object model.
+    # Every projection sees the complete current observation stack.
     for outer in range(outer_iterations):
         print(
             f"Universal phase retrieval: outer loop "
@@ -3927,16 +4028,16 @@ def general_phase_retrieval_algorithm(
                     **result,
                 })
 
-        projection_due = (
-            recipe["projection_model"] != "none"
-            and outer >= recipe["projection_start"]
-            and (
-                (outer - recipe["projection_start"])
-                % recipe["projection_every"]
-                == 0
-            )
-        )
-        if projection_due:
+            if recipe["projection_model"] == "none":
+                continue
+            completed_updates += 1
+            if not _projection_is_due(
+                completed_updates,
+                projection_start,
+                projection_every,
+            ):
+                continue
+
             print("  Applying joint physical projection", flush=True)
             fields, components = project_fourier_fields_general(
                 fields,
@@ -3952,10 +4053,13 @@ def general_phase_retrieval_algorithm(
                 physical_iterations=recipe["physical_iterations"],
                 recipe=recipe,
                 log_floor=recipe["log_floor"],
+                magnetization_supportmask=magnetization_supportmask,
                 return_components=True,
             )
             errors["projection_steps"].append({
                 "outer": outer,
+                "observation": int(observation),
+                "completed_update": completed_updates,
                 "fit_residual_rms": components["fit_residual_rms"],
                 "projection_model": components["projection_model"],
                 "design_rank": components.get("design_rank"),
@@ -3987,6 +4091,7 @@ def general_phase_retrieval_algorithm(
             physical_iterations=recipe["physical_iterations"],
             recipe=recipe,
             log_floor=recipe["log_floor"],
+            magnetization_supportmask=magnetization_supportmask,
             return_components=True,
         )
 

@@ -68,34 +68,128 @@ The library supports three important limiting cases:
 The most general use is a dataset containing several energies, both
 polarizations, several magnetic states, and several illumination conditions.
 
+## Theory Behind The Projection
+
+The universal library is built around a simple separation idea: different
+experimental knobs change different mathematical factors of the exit wave.
+Energy changes the material response, polarization changes the sign of the
+magnetic contribution, magnetic state changes the spatial magnetization map,
+and illumination changes the common beam/reference field. If the metadata
+describe those knobs correctly, several apparently different holograms are not
+independent unknown objects. They are different views of a smaller set of
+shared components.
+
+Ordinary phase retrieval works in the Fourier detector domain and enforces the
+measured amplitudes plus the real-space support. The universal step adds a
+second constraint in object space: after each group of ordinary phase-retrieval
+updates, the current reconstructed fields are projected back onto the set of
+objects that can be explained by the shared physical model.
+
+### Why the logarithm makes the model separable
+
+The exit wave contains multiplicative factors: illumination, charge
+absorption/phase, and magnetic absorption/phase. Multiplicative models are
+awkward to separate directly because products couple the unknowns. The complex
+logarithm turns products into sums. For observation $$a$$, the universal
+physical model becomes $$L_a(\mathbf r) = c_{m(a)}(\mathbf r) + q_c[E(a)] + p_a q_m[E(a)]m_{z,s(a)}(\mathbf r)$$.
+
+This is the key linearization. Once the current Fourier fields have been
+converted to log-object fields $$L_a$$, the common illumination term, charge
+response, magnetic response, and magnetization maps appear as additive terms.
+Some parts are linear immediately, such as the flexible `state_energy_beam`
+model. The fully physical model is bilinear only in the product
+$$q_m(E)m_z(\mathbf r)$$, so the library solves it by alternating linear
+least-squares subproblems while clipping $$m_z$$ to the physical interval
+$$[-1,1]$$.
+
+### Projection theorem used by the linear models
+
+For fixed metadata and positive observation weights, any linear log-object
+model can be written as $$Y = A X + \epsilon$$. Here $$Y$$ is the matrix of
+current log-object pixel values, $$A$$ is the metadata design matrix, $$X$$
+contains the unknown component images or responses, and $$\epsilon$$ is the
+residual. The weighted least-squares solution is $$X^\star = (A^\ast W A)^+ A^\ast W Y$$, where $$+$$ denotes the Moore-Penrose pseudoinverse.
+
+The projection theorem says that $$A X^\star$$ is the unique closest point to
+$$Y$$ inside the column space of $$A$$ when that closest point is measured in
+the weighted Euclidean norm. If the design matrix has full column rank, the
+coefficients $$X^\star$$ are unique. If the design is rank deficient, the
+projected fitted objects can still be computed, but some component
+decomposition is not identifiable without an additional gauge choice or prior.
+
+This is why the projection step is mathematically well-defined: it is not an
+ad-hoc averaging of reconstructions. It is the nearest metadata-consistent
+log-object stack to the current independent reconstructions.
+
+### Projection theorem used by the physical model
+
+The physical factorized model is not globally linear because the magnetic term
+contains the product $$q_m(E)m_z(\mathbf r)$$. The library therefore uses
+alternating projections onto easier subproblems:
+
+- with $$q_c$$, $$q_m$$, and $$m_z$$ fixed, fit the common illumination fields;
+- with illumination and spectra fixed, fit real magnetization maps;
+- with illumination and magnetization fixed, fit the charge and magnetic
+  spectra;
+- then apply spectral priors, response bounds, saturated-state constraints,
+  the optional magnetization support mask, and the $$[-1,1]$$ magnetization
+  bound.
+
+Each substep decreases, or leaves unchanged, the weighted residual for its
+current block of variables before optional physical constraints are applied.
+The result is an alternating least-squares projection onto a physically
+motivated low-dimensional manifold. It is not a proof of global optimality,
+because ordinary phase retrieval and the bilinear magnetic factorization are
+non-convex. It is, however, a principled local projection: every pass replaces
+the current log-object stack by the nearest stack, in the current block sense,
+that better obeys the shared beam, energy, polarization, and state structure.
+
+### Why this helps phase retrieval
+
+Independent reconstructions can drift into mutually inconsistent phase
+origins, missing-pixel fills, support artifacts, and noise fits. The joint
+projection removes degrees of freedom that the experiment says should not be
+independent. Opposite polarizations must share their charge term and reverse
+only the magnetic term. Repeated energies must share the same spectral
+response. Repeated states must share the same magnetization map. Repeated beam
+conditions must share the same illumination field.
+
+This coupling has three practical advantages:
+
+- it lets strong observations stabilize weak or masked observations;
+- it suppresses reconstruction features that cannot be explained by the
+  experimental metadata;
+- it exposes identifiability problems through design rank, residuals, and
+  scale/gauge diagnostics instead of hiding them inside independent images.
+
 ## 2. Physical Model
 
-For illumination condition \(m\), polarization \(p\), photon energy \(E\), and
-magnetic state \(s\), the exit wave is modeled as \(\phi_{m,p,E,s}(\mathbf r) = C_m(\mathbf r)\exp[-i k_E t n_{c,E}]\exp[-p i k_E t n_{m,E}m_{z,s}(\mathbf r)]\).
+For illumination condition $$m$$, polarization $$p$$, photon energy $$E$$, and
+magnetic state $$s$$, the exit wave is modeled as $$\phi_{m,p,E,s}(\mathbf r) = C_m(\mathbf r)\exp[-i k_E t n_{c,E}]\exp[-p i k_E t n_{m,E}m_{z,s}(\mathbf r)]$$.
 
-The first factor, \(C_m(\mathbf r)\), contains the complex illumination field
+The first factor, $$C_m(\mathbf r)$$, contains the complex illumination field
 and any energy-independent reference structure assigned to illumination
-condition \(m\).
+condition $$m$$.
 
-The charge refractive-index contribution is \(n_{c,E} = \delta_{c,E} + i\beta_{c,E}\).
+The charge refractive-index contribution is $$n_{c,E} = \delta_{c,E} + i\beta_{c,E}$$.
 
-The magnetic refractive-index contribution is \(n_{m,E} = \delta_{m,E} + i\beta_{m,E}\).
+The magnetic refractive-index contribution is $$n_{m,E} = \delta_{m,E} + i\beta_{m,E}$$.
 
 The reduced out-of-plane magnetization is a real two-dimensional map with
-\(-1 \le m_{z,s}(\mathbf r) \le 1\).
+$$-1 \le m_{z,s}(\mathbf r) \le 1$$.
 
-The polarization coefficient is normally \(p=+1\) or \(p=-1\). Reversing it
+The polarization coefficient is normally $$p=+1$$ or $$p=-1$$. Reversing it
 reverses the sign of the magnetic term but not the charge term.
 
 ### 2.1 Log-object form
 
 The algorithm applies the joint model after transforming every reconstructed
 Fourier field to object space and taking a complex logarithm. For observation
-\(a\), define \(L_a(\mathbf r) = \log[\phi_a(\mathbf r)]\). The dimensionless
-responses are \(q_c(E) = -i k_E t n_{c,E}\) and \(q_m(E) = -i k_E t n_{m,E}\).
-The log illumination field is \(c_m(\mathbf r) = \log[C_m(\mathbf r)]\).
+$$a$$, define $$L_a(\mathbf r) = \log[\phi_a(\mathbf r)]$$. The dimensionless
+responses are $$q_c(E) = -i k_E t n_{c,E}$$ and $$q_m(E) = -i k_E t n_{m,E}$$.
+The log illumination field is $$c_m(\mathbf r) = \log[C_m(\mathbf r)]$$.
 
-The fitted model is \(L_a(\mathbf r) = c_{m(a)}(\mathbf r) + q_c[E(a)] + p_a q_m[E(a)]m_{z,s(a)}(\mathbf r)\).
+The fitted model is $$L_a(\mathbf r) = c_{m(a)}(\mathbf r) + q_c[E(a)] + p_a q_m[E(a)]m_{z,s(a)}(\mathbf r)$$.
 
 This additive form is the central reason for using log-object space: beam,
 charge, and magnetic contributions become separable by alternating
@@ -103,15 +197,15 @@ least-squares updates.
 
 ## 3. What Is Measurable
 
-If \(n = \delta + i\beta\), then \(q = -ikt(\delta+i\beta) = kt\beta - i kt\delta\).
+If $$n = \delta + i\beta$$, then $$q = -ikt(\delta+i\beta) = kt\beta - i kt\delta$$.
 
 Therefore,
 
-The real and imaginary components are \({\rm Re}(q)=kt\beta\) and
-\({\rm Im}(q)=-kt\delta\).
+The real and imaginary components are $${\rm Re}(q)=kt\beta$$ and
+$${\rm Im}(q)=-kt\delta$$.
 
-An exit-wave reconstruction directly constrains \(kt\delta\) and \(kt\beta\).
-It does not independently determine \(t\), \(\delta\), and \(\beta\).
+An exit-wave reconstruction directly constrains $$kt\delta$$ and $$kt\beta$$.
+It does not independently determine $$t$$, $$\delta$$, and $$\beta$$.
 
 The universal recipe consequently provides direct bounds named:
 
@@ -126,7 +220,7 @@ For example,
 "magnetic_kt_beta_range": (0.01, 0.02)
 ```
 
-constrains \(kt\beta_m\) between 0.01 and 0.02.
+constrains $$kt\beta_m$$ between 0.01 and 0.02.
 
 Known refractive-index spectra can still be supplied. In that case the user
 must also provide either:
@@ -134,13 +228,13 @@ must also provide either:
 - `wave_numbers` and `thickness`; or
 - `energy_values` in eV and `thickness` in metres.
 
-The library converts the known \(\delta(E)\) and \(\beta(E)\) spectra to
+The library converts the known $$\delta(E)$$ and $$\beta(E)$$ spectra to
 dimensionless response spectra before reconstruction.
 
 ## 4. Observation Metadata
 
 Suppose `holograms.shape == (N, nx, ny)`. Each metadata sequence must have
-length \(N\).
+length $$N$$.
 
 | Argument | Meaning | Typical values |
 |---|---|---|
@@ -193,7 +287,7 @@ Use a different `energy_label` when the material response itself can change.
 ## 5. Saturated States
 
 A saturated state has a known spatially uniform reduced magnetization:
-\(m_z(\mathbf r)=+1\) or \(m_z(\mathbf r)=-1\).
+$$m_z(\mathbf r)=+1$$ or $$m_z(\mathbf r)=-1$$.
 
 Supply saturated states as a dictionary:
 
@@ -211,14 +305,14 @@ saturated_states = ["sat_up"]
 ```
 
 Saturated states are optional. Without one, the algorithm remains
-data-driven, but the factorization \(q_m(E)m_z(\mathbf r)\)
+data-driven, but the factorization $$q_m(E)m_z(\mathbf r)$$
 
-has a scale ambiguity: multiplying \(q_m\) by a constant and dividing \(m_z\)
+has a scale ambiguity: multiplying $$q_m$$ by a constant and dividing $$m_z$$
 by the same constant can leave the modeled observations unchanged until the
-\([-1,1]\) bounds become active.
+$$[-1,1]$$ bounds become active.
 
 A known saturated state fixes the scale because its magnetization is exactly
-\(+1\) or \(-1\).
+$$+1$$ or $$-1$$.
 
 ## 6. Projection Models
 
@@ -228,13 +322,26 @@ This is the default and the recommended model for mixed datasets.
 
 It fits:
 
-- one complex field \(C_m(\mathbf r)\) per illumination condition;
-- one complex charge response \(q_c(E)\) per energy;
-- one complex magnetic response \(q_m(E)\) per energy;
-- one real \(m_{z,s}(\mathbf r)\) map per magnetic state.
+- one complex field $$C_m(\mathbf r)$$ per illumination condition;
+- one complex charge response $$q_c(E)$$ per energy;
+- one complex magnetic response $$q_m(E)$$ per energy;
+- one real $$m_{z,s}(\mathbf r)$$ map per magnetic state.
 
-The magnetization maps are always clipped to \([-1,1]\). Saturated maps are
+The magnetization maps are always clipped to $$[-1,1]$$. Saturated maps are
 held fixed.
+
+If `zero_magnetization_outside_support=True`, the physical projection also
+multiplies every fitted magnetization map by the phase-retrieval `supportmask`.
+This treats the magnetic contrast outside the reconstructed object support as
+effectively zero. It can improve convergence by preventing unsupported pixels
+from absorbing arbitrary magnetic structure, but it should be enabled only
+when magnetic contrast outside the support is intentionally considered
+unobservable or irrelevant to the reconstruction.
+
+In the high-level reconstruction driver, `supportmask` is shifted into the
+same log-object frame used by `fourier_field_to_object_log()` before it is
+applied to `m_z`. Direct calls to `project_log_objects_physical()` expect
+`magnetization_supportmask` to already be in that log-object frame.
 
 Use this model when polarization, magnetic state, illumination, or several of
 them change.
@@ -242,7 +349,7 @@ them change.
 ### 6.2 `state_energy_beam`
 
 This is a more flexible linear model:
-\(L_a(\mathbf r) = C_{m(a)}(\mathbf r) + p_a R_{s(a),E(a)}(\mathbf r)\).
+$$L_a(\mathbf r) = C_{m(a)}(\mathbf r) + p_a R_{s(a),E(a)}(\mathbf r)$$.
 
 It assigns a free complex response map to every state-energy pair. It does not
 force the response to factor into a scalar energy spectrum and a real
@@ -260,7 +367,7 @@ observations.
 ### 6.3 `svd`
 
 This applies the multi-energy low-rank projection
-\(L_E(\mathbf r)=C(\mathbf r)+\Delta_E(\mathbf r)\)
+$$L_E(\mathbf r)=C(\mathbf r)+\Delta_E(\mathbf r)$$
 
 with the energy-dependent residual restricted to the selected matrix rank.
 
@@ -278,9 +385,9 @@ multi-energy implementation. Its numerical behavior is tested against
 ### 6.4 `rank1_spectral`
 
 This applies the explicit multi-energy model
-\(L_E(\mathbf r)=C(\mathbf r)+a_E M(\mathbf r)\).
+$$L_E(\mathbf r)=C(\mathbf r)+a_E M(\mathbf r)$$.
 
-The complex spectrum \(a_E\) can be free, KK constrained, or guided by a known
+The complex spectrum $$a_E$$ can be free, KK constrained, or guided by a known
 absorption spectrum.
 
 It has the same pure-energy-scan requirements as `svd`.
@@ -417,11 +524,13 @@ flowchart TD
     I --> J
     J --> K["Start outer iteration"]
     K --> L["Choose observation order"]
-    L --> M["For each observation: _run_update_schedule()"]
-    M --> N{"Joint projection due?"}
+    L --> M["For next observation: _run_update_schedule()"]
+    M --> N{"Projection due after this observation update?"}
     N -- Yes --> O["project_fourier_fields_general()"]
-    N -- No --> P{"More outer iterations?"}
-    O --> P
+    N -- No --> W{"More observations in this sweep?"}
+    O --> W
+    W -- Yes --> M
+    W -- No --> P{"More outer iterations?"}
     P -- Yes --> K
     P -- No --> Q{"projection_model is none?"}
     Q -- No --> R["Final project_fourier_fields_general() with relaxation=1"]
@@ -433,9 +542,13 @@ flowchart TD
     U --> V["Return fields, components, bsmasks, errors"]
 ```
 
-The projection test uses `projection_start` and `projection_every`. Therefore,
-all observations finish their complete inner schedule before the shared model
-is applied.
+`projection_every` and `projection_start` both count completed observation
+updates. The `projection_every` default, `None`, resolves to the number of
+observations, preserving one projection per complete sweep. The
+`projection_start` default, `None`, resolves to the effective
+`projection_every` value, so projection first becomes eligible at the first
+cadence boundary. Set `projection_every=1` to apply the shared model after
+every observation's complete inner schedule.
 
 ### 8.3 Schedule loop for one observation
 
@@ -544,18 +657,21 @@ flowchart TD
     F --> G["Fit common field for each illumination"]
     G --> H["Fit each unsaturated magnetization map"]
     H --> I["np.clip() magnetization to [-1, 1]"]
-    I --> J["Restore fixed saturated-state maps"]
-    J --> K["Fit charge and magnetic scalars per energy with np.linalg.pinv()"]
-    K --> L["Move mean charge offset into common field"]
-    L --> M["constrain_complex_spectrum() for charge"]
-    M --> N["constrain_complex_spectrum() for magnetic"]
-    N --> O["_constrain_response_values() for optional bounds"]
-    O --> P{"More physical-fit iterations?"}
-    P -- Yes --> F
-    P -- No --> Q["Rebuild fitted log objects"]
-    Q --> R["Apply projection_relaxation"]
-    R --> S["Build components and identifiability diagnostics"]
-    S --> T["Return projected log objects and components"]
+    I --> J{"zero_magnetization_outside_support?"}
+    J -- Yes --> K["Multiply magnetization by supportmask"]
+    J -- No --> L["Restore fixed saturated-state maps"]
+    K --> L
+    L --> M["Fit charge and magnetic scalars per energy with np.linalg.pinv()"]
+    M --> N["Move mean charge offset into common field"]
+    N --> O["constrain_complex_spectrum() for charge"]
+    O --> P["constrain_complex_spectrum() for magnetic"]
+    P --> Q["_constrain_response_values() for optional bounds"]
+    Q --> R{"More physical-fit iterations?"}
+    R -- Yes --> F
+    R -- No --> S["Rebuild fitted log objects"]
+    S --> T["Apply projection_relaxation"]
+    T --> U["Build components and identifiability diagnostics"]
+    U --> V["Return projected log objects and components"]
 ```
 
 ### 8.7 Linear `state_energy_beam` projection
@@ -602,11 +718,13 @@ flowchart TD
     D --> E["Optional _run_energy_update_schedule() per energy"]
     E --> F["_build_update_schedule(name=inner)"]
     F --> G["Start outer iteration"]
-    G --> H["Run _run_energy_update_schedule() for every energy"]
-    H --> I{"Energy projection due?"}
+    G --> H["Run _run_energy_update_schedule() for next energy"]
+    H --> I{"Projection due after this energy update?"}
     I -- Yes --> J["project_fourier_fields_multi_energy()"]
-    I -- No --> K{"More outer iterations?"}
-    J --> K
+    I -- No --> P{"More energies in this sweep?"}
+    J --> P
+    P -- Yes --> H
+    P -- No --> K{"More outer iterations?"}
     K -- Yes --> G
     K -- No --> L["Final project_fourier_fields_multi_energy()"]
     L --> M{"final_fourier_constraint?"}
@@ -730,9 +848,9 @@ reconstructions toward incompatible solutions.
 
 The universal projection repeatedly brings them back to a shared manifold:
 
-- observations with the same illumination label share \(C_m\);
-- observations at the same energy share \(q_c(E)\) and \(q_m(E)\);
-- observations of the same state share \(m_z(\mathbf r)\);
+- observations with the same illumination label share $$C_m$$;
+- observations at the same energy share $$q_c(E)$$ and $$q_m(E)$$;
+- observations of the same state share $$m_z(\mathbf r)$$;
 - opposite polarizations must reverse only the magnetic contribution;
 - saturated states provide a known magnetic scale.
 
@@ -747,8 +865,8 @@ Joint fitting cannot create information absent from the measurement geometry.
 
 Opposite polarizations at otherwise matching conditions are especially useful:
 
-The polarization-even combination is \((L_{+}+L_{-})/2 = c_m+q_c(E)\), while
-the polarization-odd combination is \((L_{+}-L_{-})/2 = q_m(E)m_z\).
+The polarization-even combination is $$(L_{+}+L_{-})/2 = c_m+q_c(E)$$, while
+the polarization-odd combination is $$(L_{+}-L_{-})/2 = q_m(E)m_z$$.
 
 This directly separates polarization-even and polarization-odd contributions.
 
@@ -766,7 +884,7 @@ can be confused with a material change.
 ### 9.3 Magnetic scale
 
 At least one saturated state is the clearest way to fix the scale of
-\(q_m(E)\) relative to \(m_z\). Without saturation or an absolute known
+$$q_m(E)$$ relative to $$m_z$$. Without saturation or an absolute known
 magnetic spectrum, only their product is robustly identified.
 
 ### 9.4 Charge offset
@@ -781,7 +899,7 @@ constraints.
 For a strongly constrained mixed experiment, aim for:
 
 - at least two energies when retrieving energy dependence;
-- both \(p=+1\) and \(p=-1\) for representative state-energy conditions;
+- both $$p=+1$$ and $$p=-1$$ for representative state-energy conditions;
 - at least one saturated state, preferably measured in both polarizations;
 - repeated state-energy-polarization conditions across beam changes;
 - more observations than the minimum needed by the factorization.
@@ -833,8 +951,8 @@ must have the same length as the corresponding mode and iteration lists.
 | Key | Default | Meaning |
 |---|---:|---|
 | `projection_model` | `"physical_factorized"` | Joint object model |
-| `projection_every` | `1` | Outer-loop interval between projections |
-| `projection_start` | `0` | First outer iteration eligible for projection |
+| `projection_every` | `None` | Completed observation or energy updates between projections; `None` means once per sweep |
+| `projection_start` | `None` | Completed update count at which projection first becomes eligible; `None` resolves to `projection_every` |
 | `projection_relaxation` | `1.0` | Blend between unprojected and projected objects |
 | `final_fourier_constraint` | `True` | Finish on measured detector amplitudes |
 | `hologram_intensity_cutoff_vmin` | `-1` | Intensity cutoff used in amplitude preparation |
@@ -848,15 +966,16 @@ must have the same length as the corresponding mode and iteration lists.
 |---|---:|---|
 | `physical_iterations` | `20` | Alternating least-squares steps per projection |
 | `saturated_states` | `None` | Mapping from state labels to `+1` or `-1` |
+| `zero_magnetization_outside_support` | `False` | Force fitted magnetization maps to zero outside `supportmask` after shifting it to the log-object frame |
 | `charge_spectral_constraint` | `"free"` | Charge energy-spectrum model |
 | `magnetic_spectral_constraint` | `"free"` | Magnetic energy-spectrum model |
 | `energy_values` | `None` | Ordered energies in eV |
 | `wave_numbers` | `None` | Ordered wave numbers in inverse metres |
 | `thickness` | `None` | Thickness in metres for index-to-response conversion |
-| `charge_kt_delta_range` | `None` | Bounds on \(kt\delta_c\) |
-| `charge_kt_beta_range` | `None` | Bounds on \(kt\beta_c\) |
-| `magnetic_kt_delta_range` | `None` | Bounds on \(kt\delta_m\) |
-| `magnetic_kt_beta_range` | `None` | Bounds on \(kt\beta_m\) |
+| `charge_kt_delta_range` | `None` | Bounds on $$kt\delta_c$$ |
+| `charge_kt_beta_range` | `None` | Bounds on $$kt\beta_c$$ |
+| `magnetic_kt_delta_range` | `None` | Bounds on $$kt\delta_m$$ |
+| `magnetic_kt_beta_range` | `None` | Bounds on $$kt\beta_m$$ |
 | `charge_response_real_range` | `None` | Advanced direct bounds on `Re(q_c)` |
 | `charge_response_imag_range` | `None` | Advanced direct bounds on `Im(q_c)` |
 | `magnetic_response_real_range` | `None` | Advanced direct bounds on `Re(q_m)` |
@@ -869,14 +988,14 @@ range.
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `known_charge_beta_spectrum` | `None` | Known charge \(\beta(E)\) |
-| `known_charge_delta_spectrum` | `None` | Known charge \(\delta(E)\) |
-| `known_magnetic_beta_spectrum` | `None` | Known magnetic \(\beta(E)\) |
-| `known_magnetic_delta_spectrum` | `None` | Known magnetic \(\delta(E)\) |
-| `known_charge_kt_beta_spectrum` | `None` | Known \(kt\beta_c(E)\) |
-| `known_charge_kt_delta_spectrum` | `None` | Known \(kt\delta_c(E)\) |
-| `known_magnetic_kt_beta_spectrum` | `None` | Known \(kt\beta_m(E)\) |
-| `known_magnetic_kt_delta_spectrum` | `None` | Known \(kt\delta_m(E)\) |
+| `known_charge_beta_spectrum` | `None` | Known charge $$\beta(E)$$ |
+| `known_charge_delta_spectrum` | `None` | Known charge $$\delta(E)$$ |
+| `known_magnetic_beta_spectrum` | `None` | Known magnetic $$\beta(E)$$ |
+| `known_magnetic_delta_spectrum` | `None` | Known magnetic $$\delta(E)$$ |
+| `known_charge_kt_beta_spectrum` | `None` | Known $$kt\beta_c(E)$$ |
+| `known_charge_kt_delta_spectrum` | `None` | Known $$kt\delta_c(E)$$ |
+| `known_magnetic_kt_beta_spectrum` | `None` | Known $$kt\beta_m(E)$$ |
+| `known_magnetic_kt_delta_spectrum` | `None` | Known $$kt\delta_m(E)$$ |
 | `known_spectrum_normalization` | `"none"` | Normalization of known physical spectra |
 | `fit_known_spectrum_scale` | `True` | Fit known physical-spectrum scale |
 | `fit_known_spectrum_offset` | `True` | Fit known physical-spectrum offset |
@@ -892,7 +1011,7 @@ range.
 | `magnetic_absorption_part` | `"real"` | Advanced magnetic response component treated as absorption |
 
 The universal physical convention sets the absorption-like part of
-\(q=-iktn\) to its real component.
+$$q=-iktn$$ to its real component.
 
 ### 10.6 Pure multi-energy controls
 
@@ -1063,7 +1182,7 @@ A large `fit_residual_rms` can indicate:
 - illumination changes grouped under one label;
 - state changes grouped under one label;
 - polarization signs assigned incorrectly;
-- a sample that does not satisfy the scalar-response-times-real-\(m_z\) model;
+- a sample that does not satisfy the scalar-response-times-real-$$m_z$$ model;
 - phase wrapping or branch inconsistencies in the complex logarithm.
 
 ### Unstable magnetic scale
@@ -1085,8 +1204,8 @@ only when needed.
 
 ### Known spectra with no thickness
 
-Actual \(\delta(E)\) and \(\beta(E)\) cannot be converted to the measured
-dimensionless response without \(kt\). Supply thickness and either energy or
+Actual $$\delta(E)$$ and $$\beta(E)$$ cannot be converted to the measured
+dimensionless response without $$kt$$. Supply thickness and either energy or
 wave number, or supply the already combined `kt` spectra.
 
 ## 14. Recommended Workflow
