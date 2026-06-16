@@ -2302,6 +2302,8 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         "alpha_zero",
         "alpha_mode",
         "TV_freq",
+        "RL_freq",
+        "RL_IT",
     ]
     controls = {}
     for key in control_keys:
@@ -2327,6 +2329,7 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         stage = {
             "mode": mode,
             "Nit": Nit,
+            "RL_it": RL_it,
             **{
                 key: controls[key][stage_index]
                 for key in control_keys
@@ -2378,6 +2381,20 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
             raise ValueError(
                 f"{prefix}TV_freq[{stage_index}] must be a positive number."
             )
+        
+        RL_freq = stage["RL_freq"]
+        if (
+            isinstance(RL_freq, bool)
+            or not isinstance(RL_freq, (int, float, np.number))
+            or not np.isfinite(RL_freq)
+            or RL_freq <= 0
+        ):
+            raise ValueError(
+                f"{prefix}RL_freq[{stage_index}] must be a positive number."
+            )
+
+
+
 
         schedule.append(stage)
     return schedule
