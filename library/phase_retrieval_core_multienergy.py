@@ -1026,7 +1026,7 @@ def PhaseRtrv_core(
     when ``gamma`` is provided, ``RL_it > 0``, and ``RL_freq <= Nit``. Otherwise
     the same loop behaves as a full-coherence reconstruction.
     """
-    print("mode={mode}, Nit={Nit}, RL_it={RL_it}, RL_freq={RL_freq}")
+    print("mode=%s, Nit=%d, RL_it=%d, RL_freq=%d"%(mode, Nit, RL_it, RL_freq))
 
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
