@@ -120,6 +120,97 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             atol=1e-10,
         )
 
+    def test_physical_constraints_can_be_limited_to_support(self):
+        support = np.zeros((3, 4), dtype=bool)
+        support[1:, 1:3] = True
+        common = np.full((3, 4), 0.1 + 0.02j)
+        magnetic = 0.04 - 0.03j
+        mz = np.zeros((3, 4), dtype=float)
+        mz[support] = np.linspace(-0.8, 0.8, support.sum())
+        observations = [
+            ("domains", 1, mz),
+            ("domains", -1, mz),
+        ]
+        log_objects = np.stack([
+            common + polarization * magnetic * mz
+            for _, polarization, mz in observations
+        ])
+        log_objects[:, ~support] += np.asarray([0.7 - 0.2j, -0.4 + 0.5j])[:, None]
+
+        projected, components = universal.project_log_objects_physical(
+            log_objects,
+            state_labels=[item[0] for item in observations],
+            energy_labels=["energy"] * len(observations),
+            polarization_coefficients=[item[1] for item in observations],
+            beam_labels=["beam"] * len(observations),
+            iterations=20,
+            projection_supportmask=support,
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected[:, ~support], log_objects[:, ~support])
+        self.assertTrue(components["physical_projection_supportmask_applied"])
+
+    def test_state_energy_beam_constraints_can_be_limited_to_support(self):
+        support = np.zeros((3, 4), dtype=bool)
+        support[1:, 1:3] = True
+        common = np.full((3, 4), 0.1 + 0.02j)
+        response = np.full((3, 4), 0.04 - 0.03j)
+        log_objects = np.stack([
+            common + response,
+            common - response,
+            common + response,
+        ])
+        log_objects[:, ~support] += np.asarray([0.3j, 0.5, -0.2j])[:, None]
+
+        projected, components = universal.project_log_objects_general(
+            log_objects,
+            state_labels=["state", "state", "state"],
+            energy_labels=["energy", "energy", "energy"],
+            polarization_coefficients=[1, -1, 1],
+            beam_labels=["beam_1", "beam_1", "beam_2"],
+            projection_supportmask=support,
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected[:, ~support], log_objects[:, ~support])
+        self.assertTrue(components["projection_supportmask_applied"])
+
+    def test_embedded_energy_projections_can_be_limited_to_support(self):
+        rng = np.random.default_rng(23)
+        support = np.zeros((4, 5), dtype=bool)
+        support[1:3, 2:4] = True
+        log_object = (
+            rng.normal(size=(5, 4, 5))
+            + 1j * rng.normal(size=(5, 4, 5))
+        )
+
+        projected_svd, components_svd = universal.project_log_object_low_rank(
+            log_object,
+            rank=1,
+            projection_supportmask=support,
+            return_components=True,
+        )
+        projected_rank1, components_rank1 = (
+            universal.project_log_object_rank1_spectral(
+                log_object,
+                spectral_constraint="free",
+                projection_supportmask=support,
+                return_components=True,
+            )
+        )
+
+        np.testing.assert_allclose(
+            projected_svd[:, ~support],
+            log_object[:, ~support],
+        )
+        np.testing.assert_allclose(
+            projected_rank1[:, ~support],
+            log_object[:, ~support],
+        )
+        self.assertTrue(components_svd["projection_supportmask_applied"])
+        self.assertTrue(components_rank1["projection_supportmask_applied"])
+
     def test_driver_shifts_supportmask_for_magnetization_projection(self):
         support = np.zeros((4, 6), dtype=bool)
         support[:2, :3] = True

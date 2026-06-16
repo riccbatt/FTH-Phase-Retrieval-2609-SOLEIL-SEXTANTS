@@ -90,7 +90,9 @@ def default_dichroic_phase_retrieval_recipe():
         "rank_deficient": "error",
         "saturated_states": None,
         "clip_magnetization": True,
+        "projection_constraints_inside_support_only": False,
         "zero_magnetization_outside_support": False,
+        "physical_constraints_inside_support_only": False,
         "kt_delta_m_range": None,
         "kt_beta_m_range": None,
         "log_floor": 1e-12,
@@ -172,6 +174,7 @@ def project_log_objects_dichroic(
     kt_delta_m_range=None,
     kt_beta_m_range=None,
     magnetization_supportmask=None,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -190,6 +193,12 @@ def project_log_objects_dichroic(
         )
 
     n_observations, nx, ny = log_objects.shape
+    if projection_supportmask is not None:
+        projection_supportmask = np.asarray(projection_supportmask) != 0
+        if projection_supportmask.shape != (nx, ny):
+            raise ValueError(
+                "projection_supportmask must have shape (nx, ny)."
+            )
     design, state_names = dichroic_design_matrix(
         state_labels,
         polarization_signs,
@@ -248,6 +257,12 @@ def project_log_objects_dichroic(
             (1 - relaxation) * log_objects
             + relaxation * projected
         )
+    if projection_supportmask is not None:
+        projected = np.where(
+            projection_supportmask[None],
+            projected,
+            log_objects,
+        )
 
     if not return_components:
         return projected
@@ -269,6 +284,9 @@ def project_log_objects_dichroic(
         ),
         "identifiable": design_rank == n_components,
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
+        "physical_projection_supportmask_applied": (
+            projection_supportmask is not None
+        ),
     }
     if uses_response_bounds:
         components.update({
@@ -495,6 +513,7 @@ def project_log_objects_saturated_reference(
     kt_delta_m_range=None,
     kt_beta_m_range=None,
     magnetization_supportmask=None,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -523,6 +542,12 @@ def project_log_objects_saturated_reference(
         if magnetization_supportmask.shape != original_log_objects.shape[1:]:
             raise ValueError(
                 "magnetization_supportmask must have shape (nx, ny)."
+            )
+    if projection_supportmask is not None:
+        projection_supportmask = np.asarray(projection_supportmask) != 0
+        if projection_supportmask.shape != original_log_objects.shape[1:]:
+            raise ValueError(
+                "projection_supportmask must have shape (nx, ny)."
             )
     _, shared = project_log_objects_dichroic(
         original_log_objects,
@@ -592,6 +617,12 @@ def project_log_objects_saturated_reference(
             (1 - relaxation) * original_log_objects
             + relaxation * projected
         )
+    if projection_supportmask is not None:
+        projected = np.where(
+            projection_supportmask[None],
+            projected,
+            original_log_objects,
+        )
     if not return_components:
         return projected
 
@@ -610,6 +641,9 @@ def project_log_objects_saturated_reference(
         "magnetization_by_state": magnetization_by_state,
         "magnetization_supportmask_applied": (
             magnetization_supportmask is not None
+        ),
+        "physical_projection_supportmask_applied": (
+            projection_supportmask is not None
         ),
         "magnetic_log_objects": response[None] * magnetization,
         "state_names": state_names,
@@ -635,6 +669,7 @@ def project_fourier_fields_dichroic(
     kt_beta_m_range=None,
     log_floor=1e-12,
     magnetization_supportmask=None,
+    projection_supportmask=None,
     return_components=False,
 ):
     """Apply the dichroic projection to Fourier-domain reconstruction fields."""
@@ -653,6 +688,7 @@ def project_fourier_fields_dichroic(
         kt_delta_m_range=kt_delta_m_range,
         kt_beta_m_range=kt_beta_m_range,
         magnetization_supportmask=magnetization_supportmask,
+        projection_supportmask=projection_supportmask,
         return_components=return_components,
     )
     if return_components:
@@ -674,6 +710,7 @@ def project_fourier_fields_saturated_reference(
     kt_beta_m_range=None,
     log_floor=1e-12,
     magnetization_supportmask=None,
+    projection_supportmask=None,
     return_components=False,
 ):
     """Infer the magnetic response from saturated reference reconstruction(s)."""
@@ -694,6 +731,7 @@ def project_fourier_fields_saturated_reference(
         kt_delta_m_range=kt_delta_m_range,
         kt_beta_m_range=kt_beta_m_range,
         magnetization_supportmask=magnetization_supportmask,
+        projection_supportmask=projection_supportmask,
         return_components=return_components,
     )
     if return_components:
@@ -709,6 +747,7 @@ def _project_fields(
     recipe,
     relaxation,
     magnetization_supportmask=None,
+    projection_supportmask=None,
 ):
     """Dispatch fields to the selected dichroic projection model."""
     model = recipe["projection_model"]
@@ -724,6 +763,7 @@ def _project_fields(
             kt_beta_m_range=recipe["kt_beta_m_range"],
             log_floor=recipe["log_floor"],
             magnetization_supportmask=magnetization_supportmask,
+            projection_supportmask=projection_supportmask,
             return_components=True,
         )
     if model == "saturated_reference":
@@ -740,6 +780,7 @@ def _project_fields(
             kt_beta_m_range=recipe["kt_beta_m_range"],
             log_floor=recipe["log_floor"],
             magnetization_supportmask=magnetization_supportmask,
+            projection_supportmask=projection_supportmask,
             return_components=True,
         )
     return fields, {"projection_model": "none"}
@@ -818,6 +859,10 @@ def _verify_recipe(recipe, n_observations):
         raise ValueError("clip_magnetization must be bool.")
     if not isinstance(recipe["zero_magnetization_outside_support"], bool):
         raise ValueError("zero_magnetization_outside_support must be bool.")
+    if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
+        raise ValueError("projection_constraints_inside_support_only must be bool.")
+    if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
+        raise ValueError("physical_constraints_inside_support_only must be bool.")
     _constrain_magnetic_response(
         np.zeros((1, 1), dtype=np.complex128),
         kt_delta_m_range=recipe["kt_delta_m_range"],
@@ -975,6 +1020,14 @@ def dichroic_phase_retrieval_algorithm(
         if recipe["zero_magnetization_outside_support"]
         else None
     )
+    projection_supportmask = (
+        np.fft.fftshift(supportmask)
+        if (
+            recipe["projection_constraints_inside_support_only"]
+            or recipe["physical_constraints_inside_support_only"]
+        )
+        else None
+    )
 
     amplitudes, intensities, bsmasks = core._prepare_energy_amplitudes(
         holograms,
@@ -1114,6 +1167,7 @@ def dichroic_phase_retrieval_algorithm(
                 recipe,
                 relaxation=recipe["projection_relaxation"],
                 magnetization_supportmask=magnetization_supportmask,
+                projection_supportmask=projection_supportmask,
             )
             errors["projection_steps"].append(
                 {
@@ -1133,6 +1187,7 @@ def dichroic_phase_retrieval_algorithm(
             recipe,
             relaxation=1.0,
             magnetization_supportmask=magnetization_supportmask,
+            projection_supportmask=projection_supportmask,
         )
 
     if recipe["final_fourier_constraint"]:

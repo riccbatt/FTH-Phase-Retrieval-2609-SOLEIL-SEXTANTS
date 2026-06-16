@@ -479,6 +479,7 @@ stage, or lists matching the corresponding mode/iteration schedule.
 | `projection_every` | `None` | Number of completed energy updates between projections. `None` means the number of energies, or once per complete sweep. |
 | `projection_relaxation` | `1.0` | Mixing strength between current and projected log-objects. |
 | `projection_start` | `None` | Completed energy-update count at which coupling first becomes eligible. `None` resolves to the effective `projection_every` value. |
+| `projection_constraints_inside_support_only` | `False` | Apply SVD or rank-one spectral projections only inside `supportmask` after shifting it to the log-object frame. |
 | `projection_static_mode` | `"mean"` | Static component: weighted energy mean, first channel, or none. |
 | `energy_weights` | `None` | Optional positive weight per energy used by projection fits. |
 | `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
@@ -998,6 +999,8 @@ These tables apply to
 | `saturated_states` | `None` | Sequence interpreted as saturated `+1` states, or dictionary mapping state labels to `+1`/`-1`. |
 | `clip_magnetization` | `True` | Enforce the reduced-magnetization interval `[-1, 1]` in saturated-reference fits. Set `False` only for diagnostic unconstrained fits. |
 | `zero_magnetization_outside_support` | `False` | Force fitted real magnetization maps to zero outside `supportmask` after shifting it to the log-object frame. |
+| `projection_constraints_inside_support_only` | `False` | Apply dichroic projections only inside `supportmask` after shifting it to the log-object frame. |
+| `physical_constraints_inside_support_only` | `False` | Backward-compatible alias for `projection_constraints_inside_support_only`. |
 | `kt_delta_m_range` | `None` | Optional lower/upper bounds for `k*t*delta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
 | `kt_beta_m_range` | `None` | Optional lower/upper bounds for `k*t*beta_m`, used by `"shared_charge"` and `"saturated_reference"`. |
 | `log_floor` | `1e-12` | Minimum object amplitude before taking the complex logarithm. |
@@ -1360,10 +1363,16 @@ the reconstruction treats its retrievable magnetic contrast as zero there.
 The option can improve convergence by preventing unsupported pixels from
 absorbing arbitrary magnetic structure.
 
+If `projection_constraints_inside_support_only=True`, the dichroic projection
+is applied only inside `supportmask`. Outside the support, each observation's
+current log object is kept unchanged, so charge, polarization, response, and
+real-`m_z` constraints do not overwrite those pixels. The older key
+`physical_constraints_inside_support_only` is accepted as an alias.
+
 The high-level dichroic driver shifts `supportmask` into the same log-object
 frame used by the projection before applying it to real magnetization maps.
-Direct projection calls expect `magnetization_supportmask` to already be in
-that frame.
+Direct projection calls expect `magnetization_supportmask` and
+`projection_supportmask` to already be in that frame.
 
 #### Required number of states and holograms
 
@@ -1750,9 +1759,17 @@ multiplies each fitted `m_z` map by `supportmask != 0`. This can stabilize the
 factorization when magnetic contrast outside the reconstructed support is
 effectively unobservable and should not absorb residual model error.
 
+If `projection_constraints_inside_support_only=True`, the selected general
+projection is applied only inside `supportmask`. Outside the support, each
+observation's current log object is kept unchanged, so beam, energy,
+polarization, charge, magnetic-response, `m_z`, and flexible linear coupling
+constraints do not overwrite those pixels. The older key
+`physical_constraints_inside_support_only` is accepted as an alias.
+
 The high-level general driver shifts `supportmask` into the same log-object
-frame used by the projection before applying it to `m_z`. Direct projection
-calls expect `magnetization_supportmask` to already be in that frame.
+frame used by the projection before applying it to `m_z` or using it to limit
+the projection. Direct projection calls expect `magnetization_supportmask` and
+`projection_supportmask` to already be in that frame.
 
 If one experimental change affects both the common illumination field and the
 material response, change both labels. For example, if changing energy also
@@ -2083,11 +2100,13 @@ flowchart TD
 | `projection_every` | `None` | Number of completed observation updates between projections. `None` means the number of holograms, or once per complete sweep. |
 | `projection_start` | `None` | Completed observation-update count at which projection first becomes eligible. `None` resolves to the effective `projection_every` value. |
 | `projection_relaxation` | `1.0` | Mixing strength between current and projected fields. |
+| `projection_constraints_inside_support_only` | `False` | Apply any joint projection only inside `supportmask` after shifting it to the log-object frame. |
 | `observation_weights` | `None` | Optional positive weight for each hologram. |
 | `rank_deficient` | `"error"` | Reject nonidentifiable designs, or use `"minimum_norm"` for an arbitrary gauge. |
 | `physical_iterations` | `20` | Alternating factorization updates per joint projection. |
 | `saturated_states` | `None` | Optional sequence of `+1` saturated states or mapping to `+1`/`-1`. |
 | `zero_magnetization_outside_support` | `False` | Force fitted magnetization maps to zero outside `supportmask` after shifting it to the log-object frame. |
+| `physical_constraints_inside_support_only` | `False` | Backward-compatible alias for `projection_constraints_inside_support_only`. |
 | `charge_spectral_constraint` | `"free"` | Charge spectrum mode: free, KK, known beta, or known beta plus KK. |
 | `magnetic_spectral_constraint` | `"free"` | Magnetic spectrum mode with the same choices. |
 | `energy_values` | `None` | Numerical energy axis required by KK constraints. |

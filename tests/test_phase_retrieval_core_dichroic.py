@@ -180,6 +180,41 @@ class PhaseRetrievalCoreDichroicTests(unittest.TestCase):
             atol=1e-10,
         )
 
+    def test_saturated_reference_constraints_can_be_limited_to_support(self):
+        support = np.zeros((3, 4), dtype=bool)
+        support[1:, 1:3] = True
+        charge = np.full((3, 4), 0.1 + 0.02j)
+        response = 0.04 - 0.03j
+        mz_domains = np.zeros((3, 4), dtype=float)
+        mz_domains[support] = np.linspace(-0.8, 0.8, support.sum())
+        mz_sat = support.astype(float)
+        log_objects = np.stack([
+            charge + response * mz_sat,
+            charge - response * mz_sat,
+            charge + response * mz_domains,
+            charge - response * mz_domains,
+        ])
+        log_objects[:, ~support] += np.asarray([
+            0.7 - 0.2j,
+            -0.4 + 0.5j,
+            0.3 + 0.1j,
+            -0.2 - 0.6j,
+        ])[:, None]
+
+        projected, components = (
+            dichroic.project_log_objects_saturated_reference(
+                log_objects,
+                state_labels=["sat", "sat", "domains", "domains"],
+                polarization_signs=[1, -1, 1, -1],
+                saturated_states={"sat": 1},
+                projection_supportmask=support,
+                return_components=True,
+            )
+        )
+
+        np.testing.assert_allclose(projected[:, ~support], log_objects[:, ~support])
+        self.assertTrue(components["physical_projection_supportmask_applied"])
+
     def test_driver_shifts_supportmask_for_magnetization_projection(self):
         support = np.zeros((4, 6), dtype=bool)
         support[:2, :3] = True

@@ -338,10 +338,18 @@ from absorbing arbitrary magnetic structure, but it should be enabled only
 when magnetic contrast outside the support is intentionally considered
 unobservable or irrelevant to the reconstruction.
 
+If `projection_constraints_inside_support_only=True`, the selected joint
+projection is applied only inside `supportmask`. Outside the support, each
+observation's current log object is kept unchanged, so physical, flexible
+linear, SVD, and rank-one spectral constraints do not overwrite those pixels.
+The older key `physical_constraints_inside_support_only` is accepted as an
+alias.
+
 In the high-level reconstruction driver, `supportmask` is shifted into the
 same log-object frame used by `fourier_field_to_object_log()` before it is
-applied to `m_z`. Direct calls to `project_log_objects_physical()` expect
-`magnetization_supportmask` to already be in that log-object frame.
+applied to `m_z` or used to limit a projection. Direct projection calls expect
+`magnetization_supportmask` and `projection_supportmask` to already be in that
+log-object frame.
 
 Use this model when polarization, magnetic state, illumination, or several of
 them change.
@@ -954,6 +962,7 @@ must have the same length as the corresponding mode and iteration lists.
 | `projection_every` | `None` | Completed observation or energy updates between projections; `None` means once per sweep |
 | `projection_start` | `None` | Completed update count at which projection first becomes eligible; `None` resolves to `projection_every` |
 | `projection_relaxation` | `1.0` | Blend between unprojected and projected objects |
+| `projection_constraints_inside_support_only` | `False` | Apply any joint projection only inside `supportmask` after shifting it to the log-object frame |
 | `final_fourier_constraint` | `True` | Finish on measured detector amplitudes |
 | `hologram_intensity_cutoff_vmin` | `-1` | Intensity cutoff used in amplitude preparation |
 | `observation_weights` | `None` | Positive weight per observation |
@@ -967,6 +976,7 @@ must have the same length as the corresponding mode and iteration lists.
 | `physical_iterations` | `20` | Alternating least-squares steps per projection |
 | `saturated_states` | `None` | Mapping from state labels to `+1` or `-1` |
 | `zero_magnetization_outside_support` | `False` | Force fitted magnetization maps to zero outside `supportmask` after shifting it to the log-object frame |
+| `physical_constraints_inside_support_only` | `False` | Backward-compatible alias for `projection_constraints_inside_support_only` |
 | `charge_spectral_constraint` | `"free"` | Charge energy-spectrum model |
 | `magnetic_spectral_constraint` | `"free"` | Magnetic energy-spectrum model |
 | `energy_values` | `None` | Ordered energies in eV |

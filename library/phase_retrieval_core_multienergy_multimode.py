@@ -96,6 +96,7 @@ def project_fourier_fields_multi_energy_multimode(
     known_beta_normalization="none",
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -109,10 +110,35 @@ def project_fourier_fields_multi_energy_multimode(
         phase_stack, name="phase_stack"
     )
     n_energy, nmodes, nx, ny = modal_fields.shape
+    if projection_supportmask is not None:
+        projection_supportmask = np.asarray(projection_supportmask) != 0
+        if projection_supportmask.ndim == 2:
+            if projection_supportmask.shape != (nx, ny):
+                raise ValueError(
+                    "projection_supportmask must have shape (nx, ny)."
+                )
+        elif projection_supportmask.ndim == 3:
+            if projection_supportmask.shape[1:] != (nx, ny):
+                raise ValueError(
+                    "modal projection_supportmask must have shape "
+                    "(Nmodes, nx, ny)."
+                )
+            if projection_supportmask.shape[0] not in {1, nmodes}:
+                raise ValueError(
+                    "projection_supportmask first axis must be 1 or Nmodes."
+                )
+        else:
+            raise ValueError("projection_supportmask must be 2D or 3D.")
     projected = np.empty_like(modal_fields, dtype=np.complex128)
     mode_components = []
 
     for mode_index in range(nmodes):
+        if projection_supportmask is None or projection_supportmask.ndim == 2:
+            mode_projection_supportmask = projection_supportmask
+        elif projection_supportmask.shape[0] == 1:
+            mode_projection_supportmask = projection_supportmask[0]
+        else:
+            mode_projection_supportmask = projection_supportmask[mode_index]
         result = multi_energy.project_fourier_fields_multi_energy(
             modal_fields[:, mode_index],
             projection_model=projection_model,
@@ -132,6 +158,7 @@ def project_fourier_fields_multi_energy_multimode(
             known_beta_normalization=known_beta_normalization,
             fit_known_beta_scale=fit_known_beta_scale,
             fit_known_beta_offset=fit_known_beta_offset,
+            projection_supportmask=mode_projection_supportmask,
             return_components=return_components,
         )
         if return_components:
@@ -386,6 +413,14 @@ def multi_energy_phase_retrieval_algorithm(
             raise ValueError("supportmask first axis must be 1 or Nmodes.")
     else:
         raise ValueError("supportmask must be 2D or 3D.")
+    projection_supportmask = (
+        np.fft.fftshift(supportmask, axes=(-2, -1))
+        if (
+            recipe["projection_constraints_inside_support_only"]
+            or recipe["physical_constraints_inside_support_only"]
+        )
+        else None
+    )
 
     amplitudes, intensities, bsmasks = multi_energy._prepare_energy_amplitudes(
         holograms,
@@ -521,6 +556,7 @@ def multi_energy_phase_retrieval_algorithm(
                     ],
                     fit_known_beta_scale=recipe["fit_known_beta_scale"],
                     fit_known_beta_offset=recipe["fit_known_beta_offset"],
+                    projection_supportmask=projection_supportmask,
                     return_components=True,
                 )
             )
@@ -556,6 +592,7 @@ def multi_energy_phase_retrieval_algorithm(
         known_beta_normalization=recipe["known_beta_normalization"],
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
+        projection_supportmask=projection_supportmask,
         return_components=True,
     )
     fields, _ = _as_energy_mode_stack(fields)

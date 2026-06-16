@@ -1475,6 +1475,23 @@ def object_log_to_fourier_field(L_stack):
     return phase_stack
 
 
+def _normalize_projection_supportmask(projection_supportmask, image_shape):
+    """Validate an optional log-object-frame mask for limiting projections."""
+    if projection_supportmask is None:
+        return None
+    mask = np.asarray(projection_supportmask) != 0
+    if mask.shape != tuple(image_shape):
+        raise ValueError("projection_supportmask must have shape (nx, ny).")
+    return mask
+
+
+def _apply_projection_supportmask(projected, original, projection_supportmask):
+    """Keep projected values only inside projection_supportmask."""
+    if projection_supportmask is None:
+        return projected
+    return np.where(projection_supportmask[None], projected, original)
+
+
 # -------------------------------------------------------------------------
 #  Generic SVD low-rank projection: L_E(r) = C(r) + low-rank residual
 # -------------------------------------------------------------------------
@@ -1485,6 +1502,7 @@ def project_log_object_low_rank(
     static_mode="mean",
     weights=None,
     relaxation=1.0,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -1505,6 +1523,10 @@ def project_log_object_low_rank(
         raise ValueError("relaxation must be between 0 and 1.")
 
     nE, nx, ny = L_stack.shape
+    projection_supportmask = _normalize_projection_supportmask(
+        projection_supportmask,
+        (nx, ny),
+    )
     rank = min(int(rank), nE)
     Lmat = L_stack.reshape(nE, -1).T  # pixels x energies
 
@@ -1546,6 +1568,11 @@ def project_log_object_low_rank(
 
     if relaxation < 1:
         Lproj = (1 - relaxation) * L_stack + relaxation * Lproj
+    Lproj = _apply_projection_supportmask(
+        Lproj,
+        L_stack,
+        projection_supportmask,
+    )
 
     if return_components:
         components = {
@@ -1553,6 +1580,9 @@ def project_log_object_low_rank(
             "static_log_object": C.reshape(nx, ny),
             "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
             "singular_values": singular_values,
+            "projection_supportmask_applied": (
+                projection_supportmask is not None
+            ),
         }
         return Lproj, components
 
@@ -1871,6 +1901,7 @@ def project_log_object_rank1_spectral(
     known_beta_normalization="none",
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -1887,6 +1918,10 @@ def project_log_object_rank1_spectral(
         raise ValueError("relaxation must be between 0 and 1.")
 
     nE, nx, ny = L_stack.shape
+    projection_supportmask = _normalize_projection_supportmask(
+        projection_supportmask,
+        (nx, ny),
+    )
     Lmat = L_stack.reshape(nE, -1).T  # pixels x energies
 
     if weights is None:
@@ -1962,6 +1997,11 @@ def project_log_object_rank1_spectral(
 
     if relaxation < 1:
         Lproj = (1 - relaxation) * L_stack + relaxation * Lproj
+    Lproj = _apply_projection_supportmask(
+        Lproj,
+        L_stack,
+        projection_supportmask,
+    )
 
     if return_components:
         components = {
@@ -1972,6 +2012,9 @@ def project_log_object_rank1_spectral(
             "spectral_coefficients": a_constrained,
             "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
             "singular_values": s,
+            "projection_supportmask_applied": (
+                projection_supportmask is not None
+            ),
         }
         components.update(spectral_info)
         return Lproj, components
@@ -1998,6 +2041,7 @@ def project_fourier_fields_multi_energy(
     known_beta_normalization="none",
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
+    projection_supportmask=None,
     return_components=False,
 ):
     """
@@ -2051,6 +2095,7 @@ def project_fourier_fields_multi_energy(
             static_mode=static_mode,
             weights=weights,
             relaxation=relaxation,
+            projection_supportmask=projection_supportmask,
             return_components=return_components,
         )
     else:
@@ -2070,6 +2115,7 @@ def project_fourier_fields_multi_energy(
             known_beta_normalization=known_beta_normalization,
             fit_known_beta_scale=fit_known_beta_scale,
             fit_known_beta_offset=fit_known_beta_offset,
+            projection_supportmask=projection_supportmask,
             return_components=return_components,
         )
 
@@ -2135,6 +2181,10 @@ def default_multi_energy_phase_retrieval_recipe():
         "projection_relaxation": 1.0,
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
+        # If True, apply any joint energy projection only inside the support.
+        "projection_constraints_inside_support_only": False,
+        # Backward-compatible alias accepted by the general/universal libraries.
+        "physical_constraints_inside_support_only": False,
         "projection_static_mode": "mean",
         "energy_weights": None,
         "log_floor": 1e-12,
@@ -2487,6 +2537,10 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("plot_every must be > 0.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
+    if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
+        raise ValueError("projection_constraints_inside_support_only must be bool.")
+    if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
+        raise ValueError("physical_constraints_inside_support_only must be bool.")
 
     if isinstance(recipe["rank"], bool) or not isinstance(
         recipe["rank"], (int, np.integer)
@@ -2647,6 +2701,14 @@ def multi_energy_phase_retrieval_algorithm(
     _verify_multi_energy_recipe(recipe, nE)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
+    projection_supportmask = (
+        np.fft.fftshift(supportmask)
+        if (
+            recipe["projection_constraints_inside_support_only"]
+            or recipe["physical_constraints_inside_support_only"]
+        )
+        else None
+    )
 
     amplitudes, intensities, bsmasks = _prepare_energy_amplitudes(
         holograms,
@@ -2777,6 +2839,7 @@ def multi_energy_phase_retrieval_algorithm(
                 known_beta_normalization=recipe["known_beta_normalization"],
                 fit_known_beta_scale=recipe["fit_known_beta_scale"],
                 fit_known_beta_offset=recipe["fit_known_beta_offset"],
+                projection_supportmask=projection_supportmask,
                 return_components=True,
             )
             errors["projection_steps"].append(
@@ -2818,6 +2881,7 @@ def multi_energy_phase_retrieval_algorithm(
         known_beta_normalization=recipe["known_beta_normalization"],
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
+        projection_supportmask=projection_supportmask,
         return_components=True,
     )
 

@@ -126,6 +126,44 @@ class PhaseRetrievalCoreMultienergyTests(unittest.TestCase):
 
         self.assertLessEqual(np.linalg.matrix_rank(residual, tol=1e-10), 2)
 
+    def test_svd_projection_can_be_limited_to_support(self):
+        rng = np.random.default_rng(21)
+        support = np.zeros((4, 5), dtype=bool)
+        support[1:3, 2:4] = True
+        log_object = (
+            rng.normal(size=(5, 4, 5))
+            + 1j * rng.normal(size=(5, 4, 5))
+        )
+
+        projected, components = multi.project_log_object_low_rank(
+            log_object,
+            rank=1,
+            projection_supportmask=support,
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected[:, ~support], log_object[:, ~support])
+        self.assertTrue(components["projection_supportmask_applied"])
+
+    def test_rank1_spectral_projection_can_be_limited_to_support(self):
+        rng = np.random.default_rng(22)
+        support = np.zeros((4, 5), dtype=bool)
+        support[1:3, 2:4] = True
+        log_object = (
+            rng.normal(size=(5, 4, 5))
+            + 1j * rng.normal(size=(5, 4, 5))
+        )
+
+        projected, components = multi.project_log_object_rank1_spectral(
+            log_object,
+            spectral_constraint="free",
+            projection_supportmask=support,
+            return_components=True,
+        )
+
+        np.testing.assert_allclose(projected[:, ~support], log_object[:, ~support])
+        self.assertTrue(components["projection_supportmask_applied"])
+
     def test_known_beta_kk_keeps_delta_shape(self):
         energies = np.linspace(770, 790, 11)
         beta = np.exp(-((energies - 780) / 3) ** 2)
