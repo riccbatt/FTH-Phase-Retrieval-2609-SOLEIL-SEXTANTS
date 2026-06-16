@@ -2788,6 +2788,7 @@ def multi_energy_phase_retrieval_algorithm(
     )
     if warmup_schedule:
         for j in range(nE):
+            print("warmup", j)
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2820,12 +2821,14 @@ def multi_energy_phase_retrieval_algorithm(
     # A sweep visits every energy once. Projection cadence may be finer than
     # that sweep and is therefore driven by completed_updates.
     for outer in range(outer_iterations):
+        print("outer loop", outer)
         if recipe["shuffle_energies"]:
             energy_order = rng.permutation(nE)
         else:
             energy_order = np.arange(nE)
 
         for j in energy_order:
+            print("energy", j)
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2850,6 +2853,7 @@ def multi_energy_phase_retrieval_algorithm(
             ):
                 continue
 
+            print("projecting", recipe["projection_model"])
             # Couple the complete stack through the selected energy model.
             fields, components = project_fourier_fields_multi_energy(
                 fields,
