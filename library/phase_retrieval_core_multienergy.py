@@ -1652,7 +1652,7 @@ def _canonicalize_rank1_factors(
     spatial_factor,
     spectral_factor,
     known_beta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
 ):
     """
     Fix the arbitrary complex phase/sign of a rank-1 factorization.
@@ -1695,7 +1695,7 @@ def _canonicalize_rank1_factors(
     return spatial_factor, spectral_factor
 
 
-def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real"):
+def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="imag"):
     """
     Build a complex spectrum from absorptive and dispersive real vectors.
 
@@ -1717,7 +1717,7 @@ def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real")
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_absorption_part(a, absorption_part="real"):
+def _extract_absorption_part(a, absorption_part="imag"):
     """Extract the designated absorptive component of a complex spectrum."""
     if absorption_part == "real":
         return np.real(a)
@@ -1726,7 +1726,7 @@ def _extract_absorption_part(a, absorption_part="real"):
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_dispersion_part(a, absorption_part="real"):
+def _extract_dispersion_part(a, absorption_part="imag"):
     """Extract the designated dispersive component of a complex spectrum."""
     if absorption_part == "real":
         return np.imag(a)
@@ -2034,7 +2034,7 @@ def project_fourier_fields_multi_energy(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
