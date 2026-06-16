@@ -532,6 +532,10 @@ def multi_energy_phase_retrieval_algorithm(
                 projection_start,
                 projection_every,
             ):
+                # Report progress for the completed energy update
+                print(
+                    f"Outer {outer}: completed update {completed_updates} for energy {int(energy_index)} (no projection due)"
+                )
                 continue
 
             fields, components = (
@@ -572,6 +576,10 @@ def multi_energy_phase_retrieval_algorithm(
                     "relaxation": recipe["projection_relaxation"],
                 }
             )
+            # Print projection summary
+            print(
+                f"Outer {outer}: projection applied after update {completed_updates} for energy {int(energy_index)} - model={components.get('projection_model')}, Nmodes={nmodes}, rank={recipe['rank']}, spectral_constraint={recipe['spectral_constraint']}"
+            )
 
     fields, components = project_fourier_fields_multi_energy_multimode(
         fields,
@@ -605,6 +613,8 @@ def multi_energy_phase_retrieval_algorithm(
 
     components["Nmodes"] = nmodes
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
+    print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
+    print("Multi-energy multimode Phase Retrieval Done!")
     return (
         _maybe_squeeze_energy_modes(fields, nmodes),
         components,

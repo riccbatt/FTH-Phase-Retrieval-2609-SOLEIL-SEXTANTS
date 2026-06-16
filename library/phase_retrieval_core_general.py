@@ -493,7 +493,9 @@ def project_log_objects_physical(
 
     charge_spectral_info = {}
     magnetic_spectral_info = {}
-    for _ in range(int(iterations)):
+    for it in range(int(iterations)):
+        # Report progress for the physical projection iterations
+        print(f"Physical projection iteration {it+1}/{int(iterations)}")
         # Fit one common complex field for every beam condition.
         common.fill(0.0)
         beam_weight.fill(0.0)
@@ -689,6 +691,7 @@ def project_log_objects_physical(
         "magnetic_spectral_info": magnetic_spectral_info,
         "magnetization_bounds": (-1.0, 1.0),
     }
+    print("Physical projection Done!")
     return projected, components
 
 
