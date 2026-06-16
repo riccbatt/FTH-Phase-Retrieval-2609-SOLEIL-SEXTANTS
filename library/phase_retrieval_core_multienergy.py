@@ -2303,7 +2303,7 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         "alpha_mode",
         "TV_freq",
         "RL_freq",
-        "RL_IT",
+        "RL_it",
     ]
     controls = {}
     for key in control_keys:
