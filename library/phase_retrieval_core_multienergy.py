@@ -1026,6 +1026,8 @@ def PhaseRtrv_core(
     when ``gamma`` is provided, ``RL_it > 0``, and ``RL_freq <= Nit``. Otherwise
     the same loop behaves as a full-coherence reconstruction.
     """
+    print("mode=%s, Nit=%d, RL_it=%d, RL_freq=%d"%(mode, Nit, RL_it, RL_freq))
+
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
 
@@ -1652,7 +1654,7 @@ def _canonicalize_rank1_factors(
     spatial_factor,
     spectral_factor,
     known_beta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
 ):
     """
     Fix the arbitrary complex phase/sign of a rank-1 factorization.
@@ -1695,7 +1697,7 @@ def _canonicalize_rank1_factors(
     return spatial_factor, spectral_factor
 
 
-def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real"):
+def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="imag"):
     """
     Build a complex spectrum from absorptive and dispersive real vectors.
 
@@ -1717,7 +1719,7 @@ def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real")
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_absorption_part(a, absorption_part="real"):
+def _extract_absorption_part(a, absorption_part="imag"):
     """Extract the designated absorptive component of a complex spectrum."""
     if absorption_part == "real":
         return np.real(a)
@@ -1726,7 +1728,7 @@ def _extract_absorption_part(a, absorption_part="real"):
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_dispersion_part(a, absorption_part="real"):
+def _extract_dispersion_part(a, absorption_part="imag"):
     """Extract the designated dispersive component of a complex spectrum."""
     if absorption_part == "real":
         return np.imag(a)
@@ -1741,7 +1743,7 @@ def constrain_complex_spectrum(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -1894,7 +1896,7 @@ def project_log_object_rank1_spectral(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -2034,7 +2036,7 @@ def project_fourier_fields_multi_energy(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -2143,6 +2145,9 @@ def default_multi_energy_phase_retrieval_recipe():
         "inner_mode": ["HAPRE", "ER"],
         "inner_Nit": [700,50],
         "outer_iterations": 100,
+        "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
 
         # Optional independent warmup schedule, run once at every energy.
         # Set warmup_Nit=0 to disable it.
@@ -2156,7 +2161,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "beta_mode": "arctan",
         "alpha_zero": 0.0,
         "alpha_mode": "const",
-        "TV_freq": 1e9,
+
+
 
         # Optional warmup overrides. None inherits the corresponding joint
         # setting. If the schedule lengths differ, the first joint-stage value
@@ -2166,6 +2172,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_freq": None,
+        "warmup_RL_it": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -2296,6 +2304,8 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         "alpha_zero",
         "alpha_mode",
         "TV_freq",
+        "RL_freq",
+        "RL_it",
     ]
     controls = {}
     for key in control_keys:
@@ -2372,6 +2382,29 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
             raise ValueError(
                 f"{prefix}TV_freq[{stage_index}] must be a positive number."
             )
+        
+        RL_freq = stage["RL_freq"]
+        if (
+            isinstance(RL_freq, bool)
+            or not isinstance(RL_freq, (int, float, np.number))
+            or not np.isfinite(RL_freq)
+            or RL_freq <= 0
+        ):
+            raise ValueError(
+                f"{prefix}RL_freq[{stage_index}] must be a positive number."
+            )
+
+        RL_it = stage["RL_it"]
+        if (
+            isinstance(RL_it, bool)
+            or not isinstance(RL_it, (int, float, np.number))
+            or not np.isfinite(RL_it)
+            or RL_it < 0
+        ):
+            raise ValueError(
+                f"{prefix}RL_it[{stage_index}] must be a positive number."
+            )
+
 
         schedule.append(stage)
     return schedule
@@ -2407,8 +2440,8 @@ def _run_energy_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append(
@@ -2757,6 +2790,7 @@ def multi_energy_phase_retrieval_algorithm(
     )
     if warmup_schedule:
         for j in range(nE):
+            print("warmup", j)
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2789,12 +2823,14 @@ def multi_energy_phase_retrieval_algorithm(
     # A sweep visits every energy once. Projection cadence may be finer than
     # that sweep and is therefore driven by completed_updates.
     for outer in range(outer_iterations):
+        print("outer loop", outer)
         if recipe["shuffle_energies"]:
             energy_order = rng.permutation(nE)
         else:
             energy_order = np.arange(nE)
 
         for j in energy_order:
+            print("energy", j)
             fields[j], stage_results = _run_energy_update_schedule(
                 fields[j],
                 amplitudes[j],
@@ -2819,6 +2855,7 @@ def multi_energy_phase_retrieval_algorithm(
             ):
                 continue
 
+            print("projecting", recipe["projection_model"])
             # Couple the complete stack through the selected energy model.
             fields, components = project_fourier_fields_multi_energy(
                 fields,

@@ -118,6 +118,10 @@ def default_phase_retrieval_recipe():
         "RL_freqs": [1e9, 1e9, 1e9, 20, 20, 20],
         "TV_freqs": [1e9, 1e9, 1e9, 1e9, 1e9, 1e9],
 
+        # Optional shared Richardson-Lucy overrides for all steps.
+        "RL_it": 0,
+        "RL_freq": 1e9,
+
         "plot_every": [349, 24, 24, 349, 24, 24],
         "average_img": [30, 30, 30, 30, 30, 30],
         "Fourier_last": [True, True, True, True, True, True],
@@ -255,6 +259,22 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(isinstance(flag, bool) for flag in recipe["Fourier_last"]):
         raise ValueError("All Fourier_last values must be bool.")
+
+    if "RL_it" in recipe:
+        if isinstance(recipe["RL_it"], bool) or not isinstance(
+            recipe["RL_it"],
+            (int, np.integer),
+        ) or recipe["RL_it"] < 0:
+            raise ValueError("RL_it must be a non-negative integer.")
+
+    if "RL_freq" in recipe:
+        if (
+            isinstance(recipe["RL_freq"], bool)
+            or not isinstance(recipe["RL_freq"], (int, float, np.number))
+            or not np.isfinite(recipe["RL_freq"])
+            or recipe["RL_freq"] <= 0
+        ):
+            raise ValueError("RL_freq must be a positive finite number.")
 
     for key in ["Startimage", "Startgamma"]:
         if key not in recipe:
@@ -442,6 +462,11 @@ def phase_retrieval_algorithm(
                 f"{sorted(unknown_keys)}"
             )
         recipe.update(phase_retrieval_recipe)
+
+    if "RL_it" in recipe:
+        recipe["RL_its"] = [int(recipe["RL_it"])] * len(recipe["algorithm_list"])
+    if "RL_freq" in recipe:
+        recipe["RL_freqs"] = [float(recipe["RL_freq"])] * len(recipe["algorithm_list"])
     _verify_valid_phase_retrieval_recipe(recipe)
 
     pos_input = np.asarray(pos).copy()

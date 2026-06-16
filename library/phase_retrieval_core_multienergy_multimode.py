@@ -190,6 +190,9 @@ def default_multi_energy_phase_retrieval_recipe():
         {
             "Nmodes": 1,
             "mode_initialization_seed": 0,
+                # Optional Richardson-Lucy controls shared by all update stages.
+                "RL_it": 0,
+                "RL_freq": 1e9,
         }
     )
     return recipe
@@ -317,8 +320,8 @@ def _run_energy_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=recipe["RL_freq"],
+            RL_it=recipe["RL_it"],
             TV_freq=stage["TV_freq"],
             Nmodes=nmodes,
         )
@@ -477,12 +480,14 @@ def multi_energy_phase_retrieval_algorithm(
                 (nx, ny),
             )
             for stage_result in stage_results:
-                errors["energy_steps"].append({
-                    "outer": -1,
-                    "energy": energy_index,
-                    "stage": "warmup",
-                    **stage_result,
-                })
+                errors["energy_steps"].append(
+                    {
+                        "outer": -1,
+                        "energy": energy_index,
+                        "stage": "warmup",
+                        **stage_result,
+                    }
+                )
 
     outer_iterations = int(recipe["outer_iterations"])
     inner_schedule = multi_energy._build_update_schedule(
