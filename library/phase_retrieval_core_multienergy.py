@@ -2143,6 +2143,9 @@ def default_multi_energy_phase_retrieval_recipe():
         "inner_mode": ["HAPRE", "ER"],
         "inner_Nit": [700,50],
         "outer_iterations": 100,
+        "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
 
         # Optional independent warmup schedule, run once at every energy.
         # Set warmup_Nit=0 to disable it.
@@ -2156,7 +2159,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "beta_mode": "arctan",
         "alpha_zero": 0.0,
         "alpha_mode": "const",
-        "TV_freq": 1e9,
+
+
 
         # Optional warmup overrides. None inherits the corresponding joint
         # setting. If the schedule lengths differ, the first joint-stage value
@@ -2166,6 +2170,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_freq": None,
+        "warmup_RL_it": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -2407,8 +2413,8 @@ def _run_energy_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append(
