@@ -2789,6 +2789,7 @@ def multi_energy_phase_retrieval_algorithm(
     else:
         print("Universal phase retrieval: warmup disabled", flush=True)
 
+    fieldswarmup=fields.copy()
     outer_iterations = int(recipe["outer_iterations"])
     inner_schedule = _build_update_schedule(
         recipe,
@@ -2935,7 +2936,9 @@ def multi_energy_phase_retrieval_algorithm(
         flush=True,
     )
 
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup,components, bsmasks, errors
+
+
 def default_general_phase_retrieval_recipe():
     """Return defaults for joint state/energy/polarization/beam retrieval."""
     return {
@@ -4092,6 +4095,8 @@ def general_phase_retrieval_algorithm(
     else:
         print("Universal phase retrieval: warmup disabled", flush=True)
 
+    fieldswarmup=fields.copy()
+
     inner_schedule = _build_update_schedule(recipe, name="inner")
     rng = np.random.default_rng(recipe["random_seed"])
     components = {"projection_model": recipe["projection_model"]}
@@ -4226,7 +4231,9 @@ def general_phase_retrieval_algorithm(
         f"{errors['runtime_seconds']:.3f} s",
         flush=True,
     )
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup,components, bsmasks, errors
+
+
 _PHYSICAL_MODELS = {
     "physical_factorized",
     "state_energy_beam",
@@ -4623,7 +4630,7 @@ def universal_phase_retrieval_algorithm(
                 f"projection_model={model!r} requires a pure energy scan. "
                 "Use 'physical_factorized' for mixed metadata."
             )
-        fields, components, bsmasks, errors = (
+        fields, fieldswarmup,components, bsmasks, errors = (
             multi_energy_phase_retrieval_algorithm(
                 holograms,
                 mask_pixel,
@@ -4638,7 +4645,7 @@ def universal_phase_retrieval_algorithm(
             recipe,
             len(metadata["energy_names"]),
         )
-        fields, components, bsmasks, errors = (
+        fields, fieldswarmup,components, bsmasks, errors = (
             general_phase_retrieval_algorithm(
                 holograms,
                 mask_pixel,
@@ -4670,4 +4677,4 @@ def universal_phase_retrieval_algorithm(
     components["observation_metadata"] = metadata_summary
     errors["observation_metadata"] = metadata_summary
     errors["universal_settings"] = recipe.copy()
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup,components, bsmasks, errors
