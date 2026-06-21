@@ -66,11 +66,15 @@ def default_dichroic_phase_retrieval_recipe():
         "alpha_zero": 0.0,
         "alpha_mode": "const",
         "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
         "warmup_beta_zero": None,
         "warmup_beta_mode": None,
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_it": None,
+        "warmup_RL_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -931,8 +935,8 @@ def _run_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append(
@@ -985,6 +989,19 @@ def dichroic_phase_retrieval_algorithm(
         as ``mz=+1``. A dictionary may assign ``+1`` or ``-1`` explicitly.
         Supplying this argument automatically selects the saturated-reference
         projection unless the recipe explicitly chooses another model.
+
+    Returns
+    -------
+    fields : ndarray, shape (n_observations, nx, ny)
+        Final Fourier-domain fields.
+    fieldswarmup : ndarray, shape (n_observations, nx, ny)
+        Fourier-domain fields immediately after the independent warmup schedule.
+    components : dict
+        Dichroic projection components and diagnostics.
+    bsmasks : ndarray, shape (n_observations, nx, ny)
+        Invalid-pixel masks used by the reconstruction.
+    errors : dict
+        Per-stage errors and projection diagnostics.
     """
     recipe = default_dichroic_phase_retrieval_recipe()
     projection_model_explicit = False
@@ -1110,6 +1127,8 @@ def dichroic_phase_retrieval_algorithm(
                 }
             )
 
+    fieldswarmup = fields.copy()
+
     inner_schedule = core._build_update_schedule(recipe, name="inner")
     components = {
         "projection_model": recipe["projection_model"],
@@ -1199,4 +1218,4 @@ def dichroic_phase_retrieval_algorithm(
     components["state_labels"] = labels.copy()
     components["polarization_signs"] = signs.copy()
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup, components, bsmasks, errors

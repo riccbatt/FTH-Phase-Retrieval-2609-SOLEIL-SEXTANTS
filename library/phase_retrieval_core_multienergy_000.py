@@ -2453,6 +2453,8 @@ def multi_energy_phase_retrieval_algorithm(
                 }
             )
 
+    fieldswarmup = fields.copy()
+
     outer_iterations = int(recipe["outer_iterations"])
     inner_iterations = int(recipe["inner_iterations"])
     projection_every = int(recipe["projection_every"])
@@ -2574,4 +2576,4 @@ def multi_energy_phase_retrieval_algorithm(
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
 
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup, components, bsmasks, errors

@@ -2397,12 +2397,11 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         RL_it = stage["RL_it"]
         if (
             isinstance(RL_it, bool)
-            or not isinstance(RL_it, (int, float, np.number))
-            or not np.isfinite(RL_it)
+            or not isinstance(RL_it, (int, np.integer))
             or RL_it < 0
         ):
             raise ValueError(
-                f"{prefix}RL_it[{stage_index}] must be a positive number."
+                f"{prefix}RL_it[{stage_index}] must be a non-negative integer."
             )
 
 
@@ -2454,6 +2453,8 @@ def _run_energy_update_schedule(
                 "alpha_zero": stage["alpha_zero"],
                 "alpha_mode": stage["alpha_mode"],
                 "TV_freq": stage["TV_freq"],
+                "RL_it": stage["RL_it"],
+                "RL_freq": stage["RL_freq"],
                 "error": np.asarray(err_d),
                 "support_error": np.asarray(err_s),
             }
@@ -2705,6 +2706,8 @@ def multi_energy_phase_retrieval_algorithm(
     -------
     retrieved : array, shape (nE, nx, ny)
         Final Fourier-domain reconstructions, one per energy.
+    fieldswarmup : array, shape (nE, nx, ny)
+        Fourier-domain fields immediately after the independent warmup schedule.
     components : dict
         Static/energy-dependent components from the final cross-energy
         projection. If ``final_fourier_constraint`` is True, these components
@@ -2806,6 +2809,8 @@ def multi_energy_phase_retrieval_algorithm(
                     "stage": "warmup",
                     **stage_result,
                 })
+
+    fieldswarmup = fields.copy()
 
     outer_iterations = int(recipe["outer_iterations"])
     inner_schedule = _build_update_schedule(
@@ -2932,4 +2937,4 @@ def multi_energy_phase_retrieval_algorithm(
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
 
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup, components, bsmasks, errors

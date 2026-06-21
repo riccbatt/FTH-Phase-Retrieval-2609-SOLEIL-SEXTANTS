@@ -317,8 +317,8 @@ def _run_energy_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
             Nmodes=nmodes,
         )
@@ -339,6 +339,8 @@ def _run_energy_update_schedule(
                 "alpha_zero": stage["alpha_zero"],
                 "alpha_mode": stage["alpha_mode"],
                 "TV_freq": stage["TV_freq"],
+                "RL_it": stage["RL_it"],
+                "RL_freq": stage["RL_freq"],
                 "Nmodes": nmodes,
                 "error": np.asarray(err_d),
                 "support_error": np.asarray(err_s),
@@ -378,6 +380,9 @@ def multi_energy_phase_retrieval_algorithm(
     retrieved : ndarray
         Shape ``(nE, nx, ny)`` for one mode or
         ``(nE, Nmodes, nx, ny)`` for multiple modes.
+    fieldswarmup : ndarray
+        Fields immediately after the independent warmup schedule, with the
+        same shape convention as ``retrieved``.
     components : dict
         Per-mode cross-energy projection results under ``mode_components``.
     bsmasks : ndarray
@@ -483,6 +488,8 @@ def multi_energy_phase_retrieval_algorithm(
                     "stage": "warmup",
                     **stage_result,
                 })
+
+    fieldswarmup = fields.copy()
 
     outer_iterations = int(recipe["outer_iterations"])
     inner_schedule = multi_energy._build_update_schedule(
@@ -607,6 +614,7 @@ def multi_energy_phase_retrieval_algorithm(
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
     return (
         _maybe_squeeze_energy_modes(fields, nmodes),
+        _maybe_squeeze_energy_modes(fieldswarmup, nmodes),
         components,
         bsmasks,
         errors,

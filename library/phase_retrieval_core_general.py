@@ -41,11 +41,15 @@ def default_general_phase_retrieval_recipe():
         "alpha_zero": 0.0,
         "alpha_mode": "const",
         "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
         "warmup_beta_zero": None,
         "warmup_beta_mode": None,
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_it": None,
+        "warmup_RL_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -928,8 +932,8 @@ def _run_update_schedule(
             average_img=min(max(1, recipe["average_img"]), iterations),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=iterations + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append({
@@ -1012,6 +1016,8 @@ def general_phase_retrieval_algorithm(
     -------
     fields : ndarray, shape (n_observations, nx, ny)
         Final Fourier-domain fields.
+    fieldswarmup : ndarray, shape (n_observations, nx, ny)
+        Fourier-domain fields immediately after the independent warmup schedule.
     components : dict
         Common beam fields, state-energy responses, and design diagnostics.
     bsmasks : ndarray, shape (n_observations, nx, ny)
@@ -1133,6 +1139,8 @@ def general_phase_retrieval_algorithm(
                     **result,
                 })
 
+    fieldswarmup = fields.copy()
+
     inner_schedule = core._build_update_schedule(recipe, name="inner")
     rng = np.random.default_rng(recipe["random_seed"])
     components = {"projection_model": recipe["projection_model"]}
@@ -1231,4 +1239,4 @@ def general_phase_retrieval_algorithm(
         components["final_fourier_constraint_applied"] = False
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return fields, components, bsmasks, errors
+    return fields, fieldswarmup, components, bsmasks, errors

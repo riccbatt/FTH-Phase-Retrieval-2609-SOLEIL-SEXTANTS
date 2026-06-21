@@ -1649,7 +1649,7 @@ def _canonicalize_rank1_factors(
     spatial_factor,
     spectral_factor,
     known_beta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
 ):
     """
     Fix the arbitrary complex phase/sign of a rank-1 factorization.
@@ -1692,7 +1692,7 @@ def _canonicalize_rank1_factors(
     return spatial_factor, spectral_factor
 
 
-def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real"):
+def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="imag"):
     """
     Build a complex spectrum from absorptive and dispersive real vectors.
 
@@ -1714,7 +1714,7 @@ def _complex_spectrum_from_parts(absorption, dispersion, absorption_part="real")
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_absorption_part(a, absorption_part="real"):
+def _extract_absorption_part(a, absorption_part="imag"):
     """Extract the designated absorptive component of a complex spectrum."""
     if absorption_part == "real":
         return np.real(a)
@@ -1723,7 +1723,7 @@ def _extract_absorption_part(a, absorption_part="real"):
     raise ValueError("absorption_part must be 'real' or 'imag'.")
 
 
-def _extract_dispersion_part(a, absorption_part="real"):
+def _extract_dispersion_part(a, absorption_part="imag"):
     """Extract the designated dispersive component of a complex spectrum."""
     if absorption_part == "real":
         return np.imag(a)
@@ -1738,7 +1738,7 @@ def constrain_complex_spectrum(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -1891,7 +1891,7 @@ def project_log_object_rank1_spectral(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -2031,7 +2031,7 @@ def project_fourier_fields_multi_energy(
     energy_values=None,
     known_beta_spectrum=None,
     known_delta_spectrum=None,
-    absorption_part="real",
+    absorption_part="imag",
     kk_sign=1.0,
     kk_subtract_baseline=True,
     kk_normalize_input=False,
@@ -2154,6 +2154,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "alpha_zero": 0.0,
         "alpha_mode": "const",
         "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
 
         # Optional warmup overrides. None inherits the corresponding joint
         # setting. If the schedule lengths differ, the first joint-stage value
@@ -2163,6 +2165,8 @@ def default_multi_energy_phase_retrieval_recipe():
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_it": None,
+        "warmup_RL_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -2293,6 +2297,8 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
         "alpha_zero",
         "alpha_mode",
         "TV_freq",
+        "RL_it",
+        "RL_freq",
     ]
     controls = {}
     for key in control_keys:
@@ -2370,6 +2376,27 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
                 f"{prefix}TV_freq[{stage_index}] must be a positive number."
             )
 
+        RL_it = stage["RL_it"]
+        if (
+            isinstance(RL_it, bool)
+            or not isinstance(RL_it, (int, np.integer))
+            or RL_it < 0
+        ):
+            raise ValueError(
+                f"{prefix}RL_it[{stage_index}] must be a non-negative integer."
+            )
+
+        RL_freq = stage["RL_freq"]
+        if (
+            isinstance(RL_freq, bool)
+            or not isinstance(RL_freq, (int, float, np.number))
+            or not np.isfinite(RL_freq)
+            or RL_freq <= 0
+        ):
+            raise ValueError(
+                f"{prefix}RL_freq[{stage_index}] must be a positive number."
+            )
+
         schedule.append(stage)
     return schedule
 
@@ -2407,8 +2434,8 @@ def _run_energy_update_schedule(
             average_img=min(max(1, recipe["average_img"]), Nit),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=Nit + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append(
@@ -2421,6 +2448,8 @@ def _run_energy_update_schedule(
                 "alpha_zero": stage["alpha_zero"],
                 "alpha_mode": stage["alpha_mode"],
                 "TV_freq": stage["TV_freq"],
+                "RL_it": stage["RL_it"],
+                "RL_freq": stage["RL_freq"],
                 "error": np.asarray(err_d),
                 "support_error": np.asarray(err_s),
             }
@@ -2955,11 +2984,15 @@ def default_general_phase_retrieval_recipe():
         "alpha_zero": 0.0,
         "alpha_mode": "const",
         "TV_freq": 1e9,
+        "RL_it": 0,
+        "RL_freq": 1e9,
         "warmup_beta_zero": None,
         "warmup_beta_mode": None,
         "warmup_alpha_zero": None,
         "warmup_alpha_mode": None,
         "warmup_TV_freq": None,
+        "warmup_RL_it": None,
+        "warmup_RL_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
@@ -3867,8 +3900,8 @@ def _run_update_schedule(
             average_img=min(max(1, recipe["average_img"]), iterations),
             Fourier_last=recipe["Fourier_last"],
             gamma=None,
-            RL_freq=iterations + 1,
-            RL_it=0,
+            RL_freq=stage["RL_freq"],
+            RL_it=stage["RL_it"],
             TV_freq=stage["TV_freq"],
         )
         stage_results.append({
