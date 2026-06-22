@@ -8,6 +8,7 @@ This page describes the theory, implementation, and main usage of:
 - `phase_retrieval_core_multienergy_multimode.py`
 - `phase_retrieval_core_dichroic.py`
 - `phase_retrieval_core_general.py`
+- `phase_retrieval_gradient.py`
 
 The examples focus on the reconstruction calls. Data preparation, centering,
 support construction, and detector corrections are intentionally outside their
@@ -31,6 +32,42 @@ constraint spaces:
 The available real-space algorithms include ER, HAPRE, RAAR, HIO, SF, OSS,
 CHIO, and HPR. Their feedback parameter is generated from `beta_zero` and
 `beta_mode`.
+
+The base recipe driver also accepts a `gradient_descent` stage. It refines the
+current Fourier field directly with a differentiable Fourier-amplitude loss
+and an optional support-leakage penalty. This is normally used as a polishing
+step after ordinary projection stages. The same stage name is accepted by the
+multimode, multi-energy, multi-energy multimode, and universal recipe drivers.
+
+For projection algorithms, `beta_zero` and `beta_mode` keep their usual
+feedback-parameter meaning. For `gradient_descent`, the same recipe keys are
+reused as optimizer controls:
+
+```text
+beta_zero + beta_mode   learning-rate schedule
+alpha_zero + alpha_mode support-leakage loss weight schedule
+number_iterations       number of gradient steps
+```
+
+The gradient objective is:
+
+```text
+diffraction_amplitude_loss + alpha * support_leakage_loss
+```
+
+where the diffraction term compares `abs(field)` against the measured
+amplitude on unmasked Fourier pixels, and the support term penalizes real-space
+object power outside `supportmask`. Set `alpha_zero=0` for a pure
+Fourier-amplitude refinement, or increase it when the goal is to polish support
+leakage. A `gradient_descent` stage is full-coherence only; Richardson-Lucy
+partial-coherence updates are rejected for that stage.
+
+`Fourier_last=True` reapplies the measured amplitude after the gradient stage.
+That preserves the usual returned Fourier-field convention, but it can make the
+final diffraction error look unchanged if the previous projection stage already
+enforced the Fourier amplitudes. In that case inspect `support_error`,
+`loss`, or the selected output fields rather than expecting a large drop in
+diffraction error.
 
 An optional total-variation step is controlled by:
 
@@ -59,8 +96,29 @@ nonzero unconstrained/invalid Fourier pixel
 Zero measured intensity remains a valid constraint unless explicitly masked.
 
 The reconstruction functions return Fourier-domain complex fields in the
-convention used internally by `PhaseRtrv_core`. In the multi-energy libraries,
-the corresponding real-space complex log-exit-wave is obtained by:
+convention used internally by `PhaseRtrv_core`. The internal support-space
+object is computed as:
+
+```python
+object_internal = fft2(fftshift(field))
+```
+
+This internal frame is the one used by support projections. For normal
+`imshow` inspection against a centered support mask, use the display-frame
+helpers:
+
+```python
+object_display = fourier_field_to_display_object(fields)
+```
+
+or, for a single gradient-refinement field:
+
+```python
+object_display = phase_retrieval_gradient.fourier_field_to_display_object(field)
+```
+
+In the multi-energy and universal libraries, the corresponding real-space
+complex log-exit-wave in the internal projection frame is obtained by:
 
 ```python
 L = fourier_field_to_object_log(fields)
@@ -70,6 +128,13 @@ and converted back with:
 
 ```python
 fields = object_log_to_fourier_field(L)
+```
+
+For centered display-frame log objects, use:
+
+```python
+L_display = fourier_field_to_display_object_log(fields)
+fields = display_object_log_to_fourier_field(L_display)
 ```
 
 The complex log representation is
@@ -145,21 +210,22 @@ Every list index defines one complete reconstruction step:
 
 ```python
 recipe = {
-    "algorithm_list": ["HAPRE", "ER", "ER"],
-    "number_iterations": [700, 50, 50],
-    "helicity": ["pos", "pos", "neg"],
-    "beta_zero": [0.5, 0.5, 0.5],
-    "beta_mode": ["arctan", "const", "const"],
-    "alpha_zero": [0.0, 0.0, 0.0],
-    "alpha_mode": ["const", "const", "const"],
-    "TV_freqs": [1e9, 1e9, 1e9],
-    "RL_its": [0, 0, 0],
-    "RL_freqs": [1e9, 1e9, 1e9],
-    "plot_every": [350, 25, 25],
-    "average_img": [30, 30, 30],
-    "Fourier_last": [True, True, True],
-    "Startimage": [None, "pos", "pos"],
-    "Startgamma": [None, None, None],
+    "algorithm_list": ["HAPRE", "ER", "ER", "gradient_descent"],
+    "number_iterations": [700, 50, 50, 500],
+    "helicity": ["pos", "pos", "pos", "pos"],
+    "beta_zero": [0.5, 0.5, 0.5, 100.0],
+    "beta_mode": ["arctan", "const", "const", "const"],
+    "alpha_zero": [0.0, 0.0, 0.0, 1.0],
+    "alpha_mode": ["const", "const", "const", "const"],
+    "TV_freqs": [1e9, 1e9, 1e9, 1e9],
+    "RL_its": [0, 0, 50, 0],
+    "RL_freqs": [1e9, 1e9, 20, 1e9],
+    "plot_every": [350, 25, 25, 1],
+    "average_img": [30, 30, 30, 1],
+    "Fourier_last": [True, True, True, True],
+    "output": [False, True, True, True],
+    "Startimage": [None, "pos", "pos", "pos"],
+    "Startgamma": [None, None, "pos", None],
 }
 ```
 
@@ -173,6 +239,20 @@ Richardson-Lucy partial coherence is active when:
 RL_its[i] > 0 and RL_freqs[i] <= number_iterations[i].
 ```
 
+For a `gradient_descent` step:
+
+```text
+number_iterations[i]  -> gradient steps
+beta_zero/mode[i]     -> learning-rate schedule
+alpha_zero/mode[i]    -> support-loss weight schedule
+Fourier_last[i]       -> reapply measured amplitudes after the gradient step
+```
+
+Gradient steps currently use full-coherence measured-amplitude data; they do
+not run Richardson-Lucy updates. The returned step diagnostics include the
+per-iteration diffraction `error`, `support_error`, and, for gradient stages,
+the combined objective `loss`.
+
 ### Base recipe reference
 
 This table applies to `phase_retrieval_core.phase_retrieval_algorithm()`.
@@ -182,22 +262,56 @@ length.
 
 | Recipe key | Default | Meaning |
 |---|---|---|
-| `algorithm_list` | `["HAPRE", "ER", "ER", "HAPRE", "ER", "ER"]` | Real-space projection algorithm used by each step. |
-| `number_iterations` | `[700, 50, 50, 700, 50, 50]` | Number of iterations in each step. |
+| `algorithm_list` | `["HAPRE", "ER", "ER", "HAPRE", "ER", "ER"]` | Real-space projection algorithm used by each step. May include `gradient_descent` as a polishing stage. |
+| `number_iterations` | `[700, 50, 50, 700, 50, 50]` | Number of iterations in each step. For `gradient_descent`, this is the number of gradient steps. |
 | `helicity` | `["pos", "pos", "neg", "pos", "pos", "neg"]` | Selects the positive or negative input hologram for each step. |
-| `beta_zero` | `[0.5, 0.5, 0.5, 0.5, 0.5, 0.5]` | Initial or constant feedback parameter for each projection step. |
-| `beta_mode` | `["arctan", "const", "const", "arctan", "const", "const"]` | Feedback schedule used to generate beta during each step. |
-| `alpha_zero` | `[0, 0, 0, 0, 0, 0]` | Total-variation descent strength. Zero disables TV descent. |
-| `alpha_mode` | `["const", "const", "const", "const", "const", "const"]` | Schedule used to generate the TV strength. |
+| `beta_zero` | `[0.5, 0.5, 0.5, 0.5, 0.5, 0.5]` | Initial or constant feedback parameter for each projection step. For `gradient_descent`, this is the learning rate. |
+| `beta_mode` | `["arctan", "const", "const", "arctan", "const", "const"]` | Feedback schedule used to generate beta during each step. For `gradient_descent`, this schedules the learning rate. |
+| `alpha_zero` | `[0, 0, 0, 0, 0, 0]` | Total-variation descent strength. Zero disables TV descent. For `gradient_descent`, this is the support-loss weight. |
+| `alpha_mode` | `["const", "const", "const", "const", "const", "const"]` | Schedule used to generate the TV strength. For `gradient_descent`, this schedules the support-loss weight. |
 | `RL_its` | `[0, 0, 0, 50, 50, 50]` | Richardson-Lucy iterations per coherence update. Zero selects full coherence. |
 | `RL_freqs` | `[1e9, 1e9, 1e9, 20, 20, 20]` | Interval between Richardson-Lucy updates. Values larger than the step length disable them. |
 | `TV_freqs` | `[1e9, 1e9, 1e9, 1e9, 1e9, 1e9]` | Interval between TV updates. A very large value effectively disables repeated TV updates. |
 | `plot_every` | `[349, 24, 24, 349, 24, 24]` | Error-sampling and optional plotting interval passed to the core. |
 | `average_img` | `[30, 30, 30, 30, 30, 30]` | Number of low-error late iterations averaged for the returned field. |
 | `Fourier_last` | `[True, True, True, True, True, True]` | If true, return the result in the Fourier-field convention. |
+| `output` | automatically last `pos` and last `neg` step | If true, store this step's result in `errors["outputs"]`. If omitted, the driver selects only the final step for each helicity. |
 | `hologram_intensity_cutoff_vmin` | `-1` | Lower-percentile background subtraction. A negative value disables subtraction. |
 | `Startimage` | `[None, "pos", "pos", "pos", "pos", "pos"]` | Starting field for each step: default support start, explicit array, or latest `pos`/`neg` result. |
 | `Startgamma` | `[None, None, None, None, "pos", "pos"]` | Starting mutual-coherence estimate: default, explicit array, or latest `pos`/`neg` estimate. |
+
+Every `errors["steps"][i]` entry contains:
+
+| Key | Meaning |
+|---|---|
+| `field_after` | Fourier field returned after the stage, including `Fourier_last` if requested. |
+| `support_error` | Support-error history for the stage. |
+
+For gradient stages, the step entry also contains `loss`, the combined
+gradient objective history.
+
+After the recipe completes, `errors["outputs"]` contains the explicitly
+selected output checkpoints:
+
+```python
+for item in errors["outputs"]:
+    print(item["step"], item["helicity"], item["mode"], item["field"].shape)
+```
+
+`errors["outputs_by_helicity"]` stores the same selected outputs grouped under
+`"pos"` and `"neg"`.
+
+`errors["latest"]` also keeps the latest result from each stage family
+separately:
+
+```python
+field_full = errors["latest"]["full_coherence"]["pos"]
+field_partial = errors["latest"]["partial_coherence"]["pos"]
+field_gradient = errors["latest"]["gradient_descent"]["pos"]
+```
+
+This is the preferred way to inspect a recipe that runs full-coherence,
+partial-coherence, and gradient-descent stages consecutively.
 
 ### Usage
 
@@ -206,9 +320,22 @@ from library import phase_retrieval_core as pr
 
 recipe = pr.default_phase_retrieval_recipe()
 recipe.update({
-    "algorithm_list": ["HAPRE", "ER", "ER"],
-    "number_iterations": [700, 50, 50],
-    "helicity": ["pos", "pos", "neg"],
+    "algorithm_list": ["HAPRE", "ER", "ER", "gradient_descent"],
+    "number_iterations": [700, 50, 50, 500],
+    "helicity": ["pos", "pos", "pos", "pos"],
+    "beta_zero": [0.5, 0.5, 0.5, 100.0],
+    "beta_mode": ["arctan", "const", "const", "const"],
+    "alpha_zero": [0.0, 0.0, 0.0, 1.0],
+    "alpha_mode": ["const", "const", "const", "const"],
+    "RL_its": [0, 0, 50, 0],
+    "RL_freqs": [1e9, 1e9, 20, 1e9],
+    "TV_freqs": [1e9, 1e9, 1e9, 1e9],
+    "plot_every": [350, 25, 25, 1],
+    "average_img": [30, 30, 30, 1],
+    "Fourier_last": [True, True, True, True],
+    "output": [False, True, True, True],
+    "Startimage": [None, "pos", "pos", "pos"],
+    "Startgamma": [None, None, "pos", None],
 })
 
 (
@@ -228,6 +355,18 @@ recipe.update({
     supportmask,
     phase_retrieval_recipe=recipe,
 )
+
+gradient_step = next(
+    step for step in reversed(errors["steps"])
+    if step["mode"] == "gradient_descent"
+)
+field_after_gradient = gradient_step["field_after"]
+
+field_full = errors["latest"]["full_coherence"]["pos"]
+field_partial = errors["latest"]["partial_coherence"]["pos"]
+field_gradient = errors["latest"]["gradient_descent"]["pos"]
+
+selected_outputs = errors["outputs"]
 ```
 
 ## 3. Multimode Library
@@ -279,6 +418,11 @@ meaning, plus:
 
 For `Nmodes > 1`, a two-dimensional `Startimage` is copied to every mode. A
 three-dimensional start may instead provide one field per mode.
+
+`algorithm_list` may include `gradient_descent`. In multimode reconstructions
+the gradient step refines each modal Fourier field, and `Fourier_last=True`
+reapplies the measured incoherent modal amplitude constraint to the summed
+modal intensity.
 
 ### Flowchart
 
@@ -447,17 +591,17 @@ stage, or lists matching the corresponding mode/iteration schedule.
 
 | Recipe key | Default | Meaning |
 |---|---|---|
-| `inner_mode` | `["HAPRE", "ER"]` | Ordered phase-retrieval algorithms run at every energy during each outer iteration. |
-| `inner_Nit` | `[700, 50]` | Iteration count for each inner stage. |
+| `inner_mode` | `["HAPRE", "ER"]` | Ordered phase-retrieval algorithms run at every energy during each outer iteration. May include `gradient_descent`. |
+| `inner_Nit` | `[700, 50]` | Iteration count for each inner stage. For `gradient_descent`, this is the number of gradient steps. |
 | `outer_iterations` | `100` | Number of cycles containing all energy updates and the joint projection. |
-| `warmup_mode` | `["HAPRE", "ER"]` | Independent algorithms run once at every energy before joint iterations. |
+| `warmup_mode` | `["HAPRE", "ER"]` | Independent algorithms run once at every energy before joint iterations. May include `gradient_descent`. |
 | `warmup_Nit` | `[700, 50]` | Warmup iterations per stage. Set to `0` to disable warmup. |
 | `shuffle_energies` | `True` | Randomize energy update order during each outer iteration. |
 | `random_seed` | `None` | Seed used for energy shuffling. `None` uses nondeterministic initialization. |
-| `beta_zero` | `0.5` | Inner-stage feedback strength; scalar or one value per inner stage. |
-| `beta_mode` | `"arctan"` | Inner-stage beta schedule; scalar or one value per inner stage. |
-| `alpha_zero` | `0.0` | Inner-stage TV strength. Zero disables TV descent. |
-| `alpha_mode` | `"const"` | Inner-stage alpha schedule. |
+| `beta_zero` | `0.5` | Inner-stage feedback strength; scalar or one value per inner stage. For `gradient_descent`, this is the learning rate. |
+| `beta_mode` | `"arctan"` | Inner-stage beta schedule; scalar or one value per inner stage. For `gradient_descent`, this schedules the learning rate. |
+| `alpha_zero` | `0.0` | Inner-stage TV strength. Zero disables TV descent. For `gradient_descent`, this is the support-loss weight. |
+| `alpha_mode` | `"const"` | Inner-stage alpha schedule. For `gradient_descent`, this schedules the support-loss weight. |
 | `TV_freq` | `1e9` | Inner-stage interval between TV updates. |
 | `warmup_beta_zero` | `None` | Warmup beta strength. `None` inherits `beta_zero`. |
 | `warmup_beta_mode` | `None` | Warmup beta schedule. `None` inherits `beta_mode`. |
@@ -866,6 +1010,11 @@ defaults and meaning, plus:
 |---|---|---|
 | `Nmodes` | `1` | Number of mutually incoherent modes reconstructed at every energy. |
 | `mode_initialization_seed` | `0` | Random seed used to create nondegenerate initial modes. May be `None`. |
+
+Its `inner_mode` and `warmup_mode` schedules also accept `gradient_descent`.
+The stage refines the modal Fourier fields for each energy before any
+scheduled multi-energy projection; with `Fourier_last=True`, the summed modal
+intensity is projected back to the measured diffraction amplitude.
 
 The cross-energy projection is applied separately to each mode using the same
 `projection_model`, rank, weights, and spectral settings.
@@ -2074,17 +2223,17 @@ flowchart TD
 
 | Recipe key | Default | Meaning |
 |---|---|---|
-| `inner_mode` | `["HAPRE"]` | Ordered phase-retrieval algorithms run for every observation in each outer iteration. |
-| `inner_Nit` | `[1]` | Iteration count for every inner stage. |
+| `inner_mode` | `["HAPRE"]` | Ordered phase-retrieval algorithms run for every observation in each outer iteration. May include `gradient_descent`. |
+| `inner_Nit` | `[1]` | Iteration count for every inner stage. For `gradient_descent`, this is the number of gradient steps. |
 | `outer_iterations` | `300` | Number of independent-update and joint-projection cycles. |
-| `warmup_mode` | `["HAPRE"]` | Independent algorithm schedule run before joint iterations. |
+| `warmup_mode` | `["HAPRE"]` | Independent algorithm schedule run before joint iterations. May include `gradient_descent`. |
 | `warmup_Nit` | `[20]` | Warmup iterations. Set to `0` to disable warmup. |
 | `shuffle_observations` | `True` | Randomize observation order in each outer iteration. |
 | `random_seed` | `None` | Seed for observation shuffling. |
-| `beta_zero` | `0.5` | Feedback strength; scalar or one value per inner stage. |
-| `beta_mode` | `"arctan"` | Feedback schedule. |
-| `alpha_zero` | `0.0` | TV strength. Zero disables TV descent. |
-| `alpha_mode` | `"const"` | TV-strength schedule. |
+| `beta_zero` | `0.5` | Feedback strength; scalar or one value per inner stage. For `gradient_descent`, this is the learning rate. |
+| `beta_mode` | `"arctan"` | Feedback schedule. For `gradient_descent`, this schedules the learning rate. |
+| `alpha_zero` | `0.0` | TV strength. Zero disables TV descent. For `gradient_descent`, this is the support-loss weight. |
+| `alpha_mode` | `"const"` | TV-strength schedule. For `gradient_descent`, this schedules the support-loss weight. |
 | `TV_freq` | `1e9` | Interval between TV updates. |
 | `warmup_beta_zero` | `None` | Warmup feedback strength. `None` inherits `beta_zero`. |
 | `warmup_beta_mode` | `None` | Warmup feedback schedule. |

@@ -37,6 +37,11 @@ import matplotlib.pyplot as plt
 
 from scipy import stats
 
+try:
+    from . import phase_retrieval_gradient as gradient
+except ImportError:
+    import phase_retrieval_gradient as gradient
+
     
 #############################################################
 #       GPU handling
@@ -263,6 +268,86 @@ def _apply_modal_fourier_constraint(
     )
 
 
+def _apply_modal_fourier_constraint_numpy(field_modes, measured_amplitude, bsmask):
+    """NumPy version of the summed-intensity modal Fourier constraint."""
+    observed = bsmask == 0
+    invalid = ~observed
+    total_amplitude = _modal_amplitude_numpy(field_modes)
+    total_amplitude = np.where(total_amplitude > 1e-30, total_amplitude, 1e-30)
+    factor = measured_amplitude / total_amplitude
+    return field_modes * (
+        observed[None, :, :] * factor[None, :, :]
+        + invalid[None, :, :]
+    )
+
+
+def _refine_modes_gradient(
+    phase,
+    measured_amplitude,
+    supportmask,
+    bsmask,
+    *,
+    nmodes,
+    image_shape,
+    Nit,
+    learning_rate,
+    support_weight,
+    Fourier_last,
+):
+    """Refine every coherent mode and preserve summed-amplitude convention."""
+    phase_modes = _as_modes(
+        phase,
+        nmodes,
+        image_shape,
+        "Phase",
+        dtype=np.complex128,
+    )
+    support_modes = _as_modes(
+        supportmask,
+        nmodes,
+        image_shape,
+        "supportmask",
+        dtype=np.asarray(supportmask).dtype,
+    )
+    refined_modes = np.empty_like(phase_modes, dtype=np.complex128)
+    diffraction_losses = []
+    support_losses = []
+    total_losses = []
+    modal_target = measured_amplitude / np.sqrt(max(nmodes, 1))
+
+    for mode_index in range(nmodes):
+        result = gradient.refine_field_gradient(
+            phase_modes[mode_index],
+            modal_target,
+            supportmask=support_modes[mode_index],
+            mask_pixel=bsmask,
+            n_steps=Nit,
+            learning_rate=learning_rate,
+            support_weight=support_weight,
+            loss_mode="amplitude",
+            support_projection=False,
+            fourier_projection=False,
+        )
+        refined_modes[mode_index] = result.fields
+        diffraction_losses.append(result.diffraction_loss)
+        support_losses.append(result.support_loss)
+        total_losses.append(result.loss)
+
+    if Fourier_last:
+        refined_modes = _apply_modal_fourier_constraint_numpy(
+            refined_modes,
+            measured_amplitude,
+            bsmask,
+        )
+
+    return (
+        _maybe_squeeze_modes(refined_modes, nmodes),
+        np.mean(np.stack(diffraction_losses), axis=0),
+        np.mean(np.stack(support_losses), axis=0),
+        np.mean(np.stack(total_losses), axis=0),
+    )
+
+
 def _verify_valid_phase_retrieval_recipe(recipe):
     """
     Validate the flat phase-retrieval recipe.
@@ -282,6 +367,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "OSS",
         "CHIO",
         "HPR",
+        "gradient_descent",
     }
 
     required_list_keys = [
@@ -736,28 +822,58 @@ def phase_retrieval_algorithm(
                 bsmasks={key: data[key]["bsmask"] for key in ["pos", "neg"]},
             )
 
-        result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
-            diffract=diffract,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=recipe["beta_zero"][i],
-            beta_mode=recipe["beta_mode"][i],
-            alpha_zero=recipe["alpha_zero"][i],
-            alpha_mode=recipe["alpha_mode"][i],
-            Phase=Phase,
-            seed=False,
-            plot_every=recipe["plot_every"][i],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=recipe["average_img"][i],
-            Fourier_last=recipe["Fourier_last"][i],
-            gamma=gamma_in,
-            RL_freq=RL_freq,
-            RL_it=RL_it,
-            TV_freq=recipe["TV_freqs"][i],
-            Nmodes=Nmodes,
-        )
+        if mode == "gradient_descent":
+            if use_RL:
+                raise ValueError(
+                    "gradient_descent recipe stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+            Error_loss = None
+            result, Error_diff, Error_supp, Error_loss = _refine_modes_gradient(
+                Phase,
+                diffract,
+                supportmask,
+                bsmask,
+                nmodes=Nmodes,
+                image_shape=shape_2d,
+                Nit=Nit,
+                learning_rate=make_beta_schedule(
+                    recipe["beta_mode"][i],
+                    Nit,
+                    recipe["beta_zero"][i],
+                ),
+                support_weight=make_alpha_schedule(
+                    recipe["alpha_mode"][i],
+                    Nit,
+                    recipe["alpha_zero"][i],
+                ),
+                Fourier_last=recipe["Fourier_last"][i],
+            )
+            gamma_out = None
+        else:
+            Error_loss = None
+            result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
+                diffract=diffract,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=recipe["beta_zero"][i],
+                beta_mode=recipe["beta_mode"][i],
+                alpha_zero=recipe["alpha_zero"][i],
+                alpha_mode=recipe["alpha_mode"][i],
+                Phase=Phase,
+                seed=False,
+                plot_every=recipe["plot_every"][i],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=recipe["average_img"][i],
+                Fourier_last=recipe["Fourier_last"][i],
+                gamma=gamma_in,
+                RL_freq=RL_freq,
+                RL_it=RL_it,
+                TV_freq=recipe["TV_freqs"][i],
+                Nmodes=Nmodes,
+            )
 
         retrieved[h] = result
 
@@ -769,19 +885,21 @@ def phase_retrieval_algorithm(
         if gamma_out is not None:
             gamma[h] = gamma_out
 
-        error["steps"].append(
-            {
-                "step": i,
-                "helicity": h,
-                "mode": mode,
-                "Nit": Nit,
-                "RL_it": RL_it,
-                "RL_freq": RL_freq,
-                "coherence": "partial" if use_RL else "full",
-                "Nmodes": Nmodes,
-                "error": np.asarray(Error_diff),
-            }
-        )
+        step_info = {
+            "step": i,
+            "helicity": h,
+            "mode": mode,
+            "Nit": Nit,
+            "RL_it": RL_it,
+            "RL_freq": RL_freq,
+            "coherence": "partial" if use_RL else "full",
+            "Nmodes": Nmodes,
+            "error": np.asarray(Error_diff),
+            "support_error": np.asarray(Error_supp),
+        }
+        if Error_loss is not None:
+            step_info["loss"] = np.asarray(Error_loss)
+        error["steps"].append(step_info)
 
         print(
             f"Step {i}: helicity={h}, mode={mode}, Nit={Nit}, "

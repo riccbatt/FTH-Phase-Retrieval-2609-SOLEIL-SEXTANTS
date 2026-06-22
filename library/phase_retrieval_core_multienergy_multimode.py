@@ -300,28 +300,55 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
-        result, err_d, err_s, _ = multimode.PhaseRtrv_core(
-            diffract=amplitude,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=stage["beta_zero"],
-            beta_mode=stage["beta_mode"],
-            alpha_zero=stage["alpha_zero"],
-            alpha_mode=stage["alpha_mode"],
-            Phase=field,
-            seed=False,
-            plot_every=recipe["plot_every"],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=min(max(1, recipe["average_img"]), Nit),
-            Fourier_last=recipe["Fourier_last"],
-            gamma=None,
-            RL_freq=stage["RL_freq"],
-            RL_it=stage["RL_it"],
-            TV_freq=stage["TV_freq"],
-            Nmodes=nmodes,
-        )
+        if mode == "gradient_descent":
+            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+                raise ValueError(
+                    "gradient_descent update stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+            result, err_d, err_s, _ = multimode._refine_modes_gradient(
+                field,
+                amplitude,
+                supportmask,
+                bsmask,
+                nmodes=nmodes,
+                image_shape=image_shape,
+                Nit=Nit,
+                learning_rate=multi_energy.make_beta_schedule(
+                    stage["beta_mode"],
+                    Nit,
+                    stage["beta_zero"],
+                ),
+                support_weight=multi_energy.make_alpha_schedule(
+                    stage["alpha_mode"],
+                    Nit,
+                    stage["alpha_zero"],
+                ),
+                Fourier_last=recipe["Fourier_last"],
+            )
+        else:
+            result, err_d, err_s, _ = multimode.PhaseRtrv_core(
+                diffract=amplitude,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=stage["beta_zero"],
+                beta_mode=stage["beta_mode"],
+                alpha_zero=stage["alpha_zero"],
+                alpha_mode=stage["alpha_mode"],
+                Phase=field,
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), Nit),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=stage["RL_freq"],
+                RL_it=stage["RL_it"],
+                TV_freq=stage["TV_freq"],
+                Nmodes=nmodes,
+            )
         field = multimode._as_modes(
             result,
             nmodes,

@@ -46,6 +46,11 @@ try:
 except ImportError:
     import kramers_kronig as kk
 
+try:
+    from . import phase_retrieval_gradient as gradient
+except ImportError:
+    import phase_retrieval_gradient as gradient
+
     
 #############################################################
 #       GPU handling
@@ -128,12 +133,24 @@ def default_phase_retrieval_recipe():
         "plot_every": [349, 24, 24, 349, 24, 24],
         "average_img": [30, 30, 30, 30, 30, 30],
         "Fourier_last": [True, True, True, True, True, True],
+        "output": [False, False, False, False, True, True],
 
         "hologram_intensity_cutoff_vmin": -1,
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
     return recipe
+
+
+def _default_output_flags(helicity):
+    """Return True for the last recipe step of each helicity."""
+    flags = [False] * len(helicity)
+    for h in ("pos", "neg"):
+        for index in range(len(helicity) - 1, -1, -1):
+            if helicity[index] == h:
+                flags[index] = True
+                break
+    return flags
 
 
 def _resolve_start_field(start_spec, default_field, latest, name):
@@ -186,6 +203,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "OSS",
         "CHIO",
         "HPR",
+        "gradient_descent",
     }
 
     required_list_keys = [
@@ -202,6 +220,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "plot_every",
         "average_img",
         "Fourier_last",
+        "output",
     ]
 
     lengths = []
@@ -262,6 +281,9 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(isinstance(flag, bool) for flag in recipe["Fourier_last"]):
         raise ValueError("All Fourier_last values must be bool.")
+
+    if not all(isinstance(flag, bool) for flag in recipe["output"]):
+        raise ValueError("All output values must be bool.")
 
     for key in ["Startimage", "Startgamma"]:
         if key not in recipe:
@@ -437,9 +459,11 @@ def phase_retrieval_algorithm(
 
     # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
+    user_supplied_output = False
     if phase_retrieval_recipe is not None:
         if not isinstance(phase_retrieval_recipe, dict):
             raise TypeError("phase_retrieval_recipe must be a dictionary.")
+        user_supplied_output = "output" in phase_retrieval_recipe
         unknown_keys = set(phase_retrieval_recipe) - set(recipe)
         if unknown_keys:
             raise ValueError(
@@ -447,6 +471,8 @@ def phase_retrieval_algorithm(
                 f"{sorted(unknown_keys)}"
             )
         recipe.update(phase_retrieval_recipe)
+    if not user_supplied_output:
+        recipe["output"] = _default_output_flags(recipe["helicity"])
     _verify_valid_phase_retrieval_recipe(recipe)
 
     pos_input = np.asarray(pos).copy()
@@ -558,6 +584,7 @@ def phase_retrieval_algorithm(
     retrieved = {"pos": None, "neg": None}
     retrieved_fc = {"pos": None, "neg": None}
     retrieved_pc = {"pos": None, "neg": None}
+    retrieved_gradient = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
 
 
@@ -565,7 +592,7 @@ def phase_retrieval_algorithm(
     default_start_gamma = Startgamma.copy()
 
 
-    error = {"steps": []}
+    error = {"steps": [], "outputs": [], "outputs_by_helicity": {"pos": [], "neg": []}}
     start_time = time.time()
 
     for i, mode in enumerate(recipe["algorithm_list"]):
@@ -623,31 +650,71 @@ def phase_retrieval_algorithm(
             )
             
 
-        result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
-            diffract=diffract,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=recipe["beta_zero"][i],
-            beta_mode=recipe["beta_mode"][i],
-            alpha_zero=recipe["alpha_zero"][i],
-            alpha_mode=recipe["alpha_mode"][i],
-            Phase=Phase,
-            seed=False,
-            plot_every=recipe["plot_every"][i],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=recipe["average_img"][i],
-            Fourier_last=recipe["Fourier_last"][i],
-            gamma=gamma_in,
-            RL_freq=RL_freq,
-            RL_it=RL_it,
-            TV_freq=recipe["TV_freqs"][i],
-        )
+        if mode == "gradient_descent":
+            if use_RL:
+                raise ValueError(
+                    "gradient_descent recipe stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+
+            refined = gradient.refine_field_gradient(
+                Phase,
+                diffract,
+                supportmask=supportmask,
+                mask_pixel=bsmask,
+                n_steps=Nit,
+                learning_rate=make_beta_schedule(
+                    recipe["beta_mode"][i],
+                    Nit,
+                    recipe["beta_zero"][i],
+                ),
+                support_weight=make_alpha_schedule(
+                    recipe["alpha_mode"][i],
+                    Nit,
+                    recipe["alpha_zero"][i],
+                ),
+                loss_mode="amplitude",
+                support_projection=False,
+                fourier_projection=False,
+            )
+            result = refined.fields
+            if recipe["Fourier_last"][i]:
+                result = _apply_measured_amplitude(result, diffract, bsmask)
+            Error_diff = refined.diffraction_loss
+            Error_supp = refined.support_loss
+            gamma_out = None
+            extra_diagnostics = {"loss": refined.loss}
+        else:
+            result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
+                diffract=diffract,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=recipe["beta_zero"][i],
+                beta_mode=recipe["beta_mode"][i],
+                alpha_zero=recipe["alpha_zero"][i],
+                alpha_mode=recipe["alpha_mode"][i],
+                Phase=Phase,
+                seed=False,
+                plot_every=recipe["plot_every"][i],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=recipe["average_img"][i],
+                Fourier_last=recipe["Fourier_last"][i],
+                gamma=gamma_in,
+                RL_freq=RL_freq,
+                RL_it=RL_it,
+                TV_freq=recipe["TV_freqs"][i],
+            )
+            extra_diagnostics = {}
 
         retrieved[h] = result
 
-        if use_RL:
+        if mode == "gradient_descent":
+            retrieved_gradient[h] = result
+            if retrieved_fc[h] is None:
+                retrieved_fc[h] = result
+        elif use_RL:
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
@@ -656,18 +723,32 @@ def phase_retrieval_algorithm(
         if gamma_out is not None:
             gamma[h] = gamma_out
 
-        error["steps"].append(
-            {
+        step_info = {
+            "step": i,
+            "helicity": h,
+            "mode": mode,
+            "Nit": Nit,
+            "RL_it": RL_it,
+            "RL_freq": RL_freq,
+            "coherence": "partial" if use_RL else "full",
+            "output": recipe["output"][i],
+            "error": np.asarray(Error_diff),
+            "support_error": np.asarray(Error_supp),
+            "field_after": result.copy(),
+            **extra_diagnostics,
+        }
+        error["steps"].append(step_info)
+
+        if recipe["output"][i]:
+            output_info = {
                 "step": i,
                 "helicity": h,
                 "mode": mode,
-                "Nit": Nit,
-                "RL_it": RL_it,
-                "RL_freq": RL_freq,
-                "coherence": "partial" if use_RL else "full",
-                "error": np.asarray(Error_diff),
+                "coherence": step_info["coherence"],
+                "field": result.copy(),
             }
-        )
+            error["outputs"].append(output_info)
+            error["outputs_by_helicity"][h].append(output_info)
 
         print(
             f"Step {i}: helicity={h}, mode={mode}, Nit={Nit}, "
@@ -676,6 +757,12 @@ def phase_retrieval_algorithm(
 
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
+
+    error["latest"] = {
+        "full_coherence": retrieved_fc.copy(),
+        "partial_coherence": retrieved_pc.copy(),
+        "gradient_descent": retrieved_gradient.copy(),
+    }
 
     return (
         retrieved_fc["pos"],
@@ -864,6 +951,16 @@ def make_beta_schedule(beta_mode, Nit, beta_zero):
 def make_alpha_schedule(alpha_mode, Nit, alpha_zero):
     """Create an alpha schedule using the same schedule definitions as beta."""
     return make_beta_schedule(alpha_mode, Nit, alpha_zero)
+
+
+def _apply_measured_amplitude(field, amplitude, bsmask):
+    """Apply measured Fourier amplitudes outside invalid-pixel regions."""
+    constrained = np.asarray(field).copy()
+    observed = np.asarray(bsmask) == 0
+    constrained[observed] = (
+        amplitude[observed] * np.exp(1j * np.angle(constrained[observed]))
+    )
+    return constrained
 
 
 # ----------------------------
@@ -1457,6 +1554,71 @@ def fourier_field_to_object_log(
         phase = np.unwrap(phase, axis=0)
 
     return np.log(amp) + 1j * phase
+
+
+def fourier_field_to_display_object(phase_stack):
+    """
+    Convert returned Fourier fields to centered real-space objects for display.
+
+    The phase-retrieval kernels and log-object projections use the shifted
+    support-space frame returned by ``fft2(fftshift(field))``. For plotting with
+    ``imshow`` against the usual centered support mask, shift that object once
+    more so the sample appears in the middle instead of at the array corners.
+    """
+    phase_stack = np.asarray(phase_stack)
+    single_field = phase_stack.ndim == 2
+    if single_field:
+        phase_stack = phase_stack[None, ...]
+    else:
+        phase_stack = _as_energy_stack(phase_stack, name="phase_stack")
+
+    obj = np.empty_like(phase_stack, dtype=np.complex128)
+
+    for j in range(phase_stack.shape[0]):
+        obj[j] = np.fft.fftshift(
+            np.fft.fft2(np.fft.fftshift(phase_stack[j]))
+        )
+
+    return obj[0] if single_field else obj
+
+
+def fourier_field_to_display_object_log(
+    phase_stack,
+    log_floor=1e-12,
+    unwrap_energy_phase=True,
+):
+    """
+    Convert returned Fourier fields to centered complex log-objects for display.
+
+    This is the display-frame counterpart of :func:`fourier_field_to_object_log`.
+    Use it for plotting or notebook inspection when the support/object should be
+    visually centered.
+    """
+    if not np.isfinite(log_floor) or log_floor <= 0:
+        raise ValueError("log_floor must be finite and > 0.")
+
+    obj = fourier_field_to_display_object(phase_stack)
+    amp = np.maximum(np.abs(obj), log_floor)
+    phase = np.angle(obj)
+    if unwrap_energy_phase:
+        phase = np.unwrap(phase, axis=0)
+
+    return np.log(amp) + 1j * phase
+
+
+def display_object_log_to_fourier_field(L_stack):
+    """
+    Convert centered display-frame log-objects back to returned Fourier fields.
+    """
+    L_stack = _as_energy_stack(L_stack, name="L_stack")
+    phase_stack = np.empty_like(L_stack, dtype=np.complex128)
+
+    for j in range(L_stack.shape[0]):
+        phase_stack[j] = np.fft.ifftshift(
+            np.fft.ifft2(np.fft.ifftshift(np.exp(L_stack[j])))
+        )
+
+    return phase_stack
 
 
 def object_log_to_fourier_field(L_stack):
@@ -2217,6 +2379,7 @@ def _normalize_update_schedule(modes, iterations, name, allow_disabled=False):
         "OSS",
         "CHIO",
         "HPR",
+        "gradient_descent",
     }
 
     if isinstance(modes, str):
@@ -2417,27 +2580,63 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
-        field, err_d, err_s, _ = phase_retrieval_kernel(
-            diffract=amplitude,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=stage["beta_zero"],
-            beta_mode=stage["beta_mode"],
-            alpha_zero=stage["alpha_zero"],
-            alpha_mode=stage["alpha_mode"],
-            Phase=field,
-            seed=False,
-            plot_every=recipe["plot_every"],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=min(max(1, recipe["average_img"]), Nit),
-            Fourier_last=recipe["Fourier_last"],
-            gamma=None,
-            RL_freq=stage["RL_freq"],
-            RL_it=stage["RL_it"],
-            TV_freq=stage["TV_freq"],
-        )
+        if mode == "gradient_descent":
+            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+                raise ValueError(
+                    "gradient_descent update stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+            refined = gradient.refine_field_gradient(
+                field,
+                amplitude,
+                supportmask=supportmask,
+                mask_pixel=bsmask,
+                n_steps=Nit,
+                learning_rate=make_beta_schedule(
+                    stage["beta_mode"],
+                    Nit,
+                    stage["beta_zero"],
+                ),
+                support_weight=make_alpha_schedule(
+                    stage["alpha_mode"],
+                    Nit,
+                    stage["alpha_zero"],
+                ),
+                loss_mode="amplitude",
+                support_projection=False,
+                fourier_projection=False,
+            )
+            field = refined.fields
+            if recipe["Fourier_last"]:
+                observed = bsmask == 0
+                field = np.asarray(field).copy()
+                field[observed] = (
+                    amplitude[observed] * np.exp(1j * np.angle(field[observed]))
+                )
+            err_d = refined.diffraction_loss
+            err_s = refined.support_loss
+        else:
+            field, err_d, err_s, _ = phase_retrieval_kernel(
+                diffract=amplitude,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=stage["beta_zero"],
+                beta_mode=stage["beta_mode"],
+                alpha_zero=stage["alpha_zero"],
+                alpha_mode=stage["alpha_mode"],
+                Phase=field,
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), Nit),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=stage["RL_freq"],
+                RL_it=stage["RL_it"],
+                TV_freq=stage["TV_freq"],
+            )
         stage_results.append(
             {
                 "schedule_stage": stage_index,
@@ -3883,27 +4082,63 @@ def _run_update_schedule(
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         iterations = stage["Nit"]
-        field, error, support_error, _ = phase_retrieval_kernel(
-            diffract=amplitude,
-            mask=supportmask,
-            mode=stage["mode"],
-            Nit=iterations,
-            beta_zero=stage["beta_zero"],
-            beta_mode=stage["beta_mode"],
-            alpha_zero=stage["alpha_zero"],
-            alpha_mode=stage["alpha_mode"],
-            Phase=field,
-            seed=False,
-            plot_every=recipe["plot_every"],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=min(max(1, recipe["average_img"]), iterations),
-            Fourier_last=recipe["Fourier_last"],
-            gamma=None,
-            RL_freq=stage["RL_freq"],
-            RL_it=stage["RL_it"],
-            TV_freq=stage["TV_freq"],
-        )
+        if stage["mode"] == "gradient_descent":
+            if stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
+                raise ValueError(
+                    "gradient_descent update stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+            refined = gradient.refine_field_gradient(
+                field,
+                amplitude,
+                supportmask=supportmask,
+                mask_pixel=bsmask,
+                n_steps=iterations,
+                learning_rate=make_beta_schedule(
+                    stage["beta_mode"],
+                    iterations,
+                    stage["beta_zero"],
+                ),
+                support_weight=make_alpha_schedule(
+                    stage["alpha_mode"],
+                    iterations,
+                    stage["alpha_zero"],
+                ),
+                loss_mode="amplitude",
+                support_projection=False,
+                fourier_projection=False,
+            )
+            field = refined.fields
+            if recipe["Fourier_last"]:
+                observed = bsmask == 0
+                field = np.asarray(field).copy()
+                field[observed] = (
+                    amplitude[observed] * np.exp(1j * np.angle(field[observed]))
+                )
+            error = refined.diffraction_loss
+            support_error = refined.support_loss
+        else:
+            field, error, support_error, _ = phase_retrieval_kernel(
+                diffract=amplitude,
+                mask=supportmask,
+                mode=stage["mode"],
+                Nit=iterations,
+                beta_zero=stage["beta_zero"],
+                beta_mode=stage["beta_mode"],
+                alpha_zero=stage["alpha_zero"],
+                alpha_mode=stage["alpha_mode"],
+                Phase=field,
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), iterations),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=stage["RL_freq"],
+                RL_it=stage["RL_it"],
+                TV_freq=stage["TV_freq"],
+            )
         stage_results.append({
             "schedule_stage": stage_index,
             **stage,

@@ -39,6 +39,11 @@ import matplotlib.pyplot as plt
 
 from scipy import stats
 
+try:
+    from . import phase_retrieval_gradient as gradient
+except ImportError:
+    import phase_retrieval_gradient as gradient
+
     
 #############################################################
 #       GPU handling
@@ -121,12 +126,24 @@ def default_phase_retrieval_recipe():
         "plot_every": [349, 24, 24, 349, 24, 24],
         "average_img": [30, 30, 30, 30, 30, 30],
         "Fourier_last": [True, True, True, True, True, True],
+        "output": [False, False, False, False, True, True],
 
         "hologram_intensity_cutoff_vmin": -1,
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
     return recipe
+
+
+def _default_output_flags(helicity):
+    """Return True for the last recipe step of each helicity."""
+    flags = [False] * len(helicity)
+    for h in ("pos", "neg"):
+        for index in range(len(helicity) - 1, -1, -1):
+            if helicity[index] == h:
+                flags[index] = True
+                break
+    return flags
 
 
 def _resolve_start_field(start_spec, default_field, latest, name):
@@ -179,6 +196,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "OSS",
         "CHIO",
         "HPR",
+        "gradient_descent",
     }
 
     required_list_keys = [
@@ -195,6 +213,7 @@ def _verify_valid_phase_retrieval_recipe(recipe):
         "plot_every",
         "average_img",
         "Fourier_last",
+        "output",
     ]
 
     lengths = []
@@ -255,6 +274,9 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(isinstance(flag, bool) for flag in recipe["Fourier_last"]):
         raise ValueError("All Fourier_last values must be bool.")
+
+    if not all(isinstance(flag, bool) for flag in recipe["output"]):
+        raise ValueError("All output values must be bool.")
 
     for key in ["Startimage", "Startgamma"]:
         if key not in recipe:
@@ -390,6 +412,16 @@ def _scale_phase_between_helicities(
     return scaled_phase
 
 
+def _apply_measured_amplitude(field, amplitude, bsmask):
+    """Apply measured Fourier amplitudes outside invalid-pixel regions."""
+    constrained = np.asarray(field).copy()
+    observed = np.asarray(bsmask) == 0
+    constrained[observed] = (
+        amplitude[observed] * np.exp(1j * np.angle(constrained[observed]))
+    )
+    return constrained
+
+
 def phase_retrieval_algorithm(
     pos: ArrayLike,
     neg: ArrayLike,
@@ -403,6 +435,11 @@ def phase_retrieval_algorithm(
     The recipe is a flat sequence of steps. Each step selects an algorithm,
     iteration count, helicity (``"pos"`` or ``"neg"``), beta schedule, optional TV
     schedule through alpha, and optional Richardson-Lucy parameters.
+    ``algorithm_list`` may also contain ``"gradient_descent"``. In that case
+    ``number_iterations`` is the number of gradient steps, ``beta_zero`` and
+    ``beta_mode`` define the learning-rate schedule, and ``alpha_zero`` plus
+    ``alpha_mode`` define the support-loss weight schedule. Gradient stages use
+    the same centered supportmask convention as normal ``PhaseRtrv_core`` stages.
 
     The starting phase of each step is controlled by recipe["Startimage"].
     Startimage[i] may be:
@@ -428,13 +465,24 @@ def phase_retrieval_algorithm(
         performed for a helicity, this is the initial gamma estimate.
     error : dict
         Step-wise error information stored under ``error["steps"]``.
+        Every step dictionary contains the ``field_after`` Fourier field.
+        ``error["latest"]`` stores the latest
+        ``full_coherence``, ``partial_coherence``, and ``gradient_descent``
+        outputs separately for each helicity. For ``gradient_descent`` stages,
+        the step dictionary also contains the combined gradient ``loss``
+        history. Recipe steps with ``output=True`` are collected in
+        ``error["outputs"]`` and grouped in ``error["outputs_by_helicity"]``.
+        If the recipe omits ``output``, only the last step for each helicity is
+        selected.
     """
 
     # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
+    user_supplied_output = False
     if phase_retrieval_recipe is not None:
         if not isinstance(phase_retrieval_recipe, dict):
             raise TypeError("phase_retrieval_recipe must be a dictionary.")
+        user_supplied_output = "output" in phase_retrieval_recipe
         unknown_keys = set(phase_retrieval_recipe) - set(recipe)
         if unknown_keys:
             raise ValueError(
@@ -442,6 +490,8 @@ def phase_retrieval_algorithm(
                 f"{sorted(unknown_keys)}"
             )
         recipe.update(phase_retrieval_recipe)
+    if not user_supplied_output:
+        recipe["output"] = _default_output_flags(recipe["helicity"])
     _verify_valid_phase_retrieval_recipe(recipe)
 
     pos_input = np.asarray(pos).copy()
@@ -553,6 +603,7 @@ def phase_retrieval_algorithm(
     retrieved = {"pos": None, "neg": None}
     retrieved_fc = {"pos": None, "neg": None}
     retrieved_pc = {"pos": None, "neg": None}
+    retrieved_gradient = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
 
 
@@ -560,7 +611,7 @@ def phase_retrieval_algorithm(
     default_start_gamma = Startgamma.copy()
 
 
-    error = {"steps": []}
+    error = {"steps": [], "outputs": [], "outputs_by_helicity": {"pos": [], "neg": []}}
     start_time = time.time()
 
     for i, mode in enumerate(recipe["algorithm_list"]):
@@ -616,33 +667,74 @@ def phase_retrieval_algorithm(
                 intensity_data={key: data[key]["input"] for key in ["pos", "neg"]},
                 bsmasks={key: data[key]["bsmask"] for key in ["pos", "neg"]},
             )
-            
 
-        result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
-            diffract=diffract,
-            mask=supportmask,
-            mode=mode,
-            Nit=Nit,
-            beta_zero=recipe["beta_zero"][i],
-            beta_mode=recipe["beta_mode"][i],
-            alpha_zero=recipe["alpha_zero"][i],
-            alpha_mode=recipe["alpha_mode"][i],
-            Phase=Phase,
-            seed=False,
-            plot_every=recipe["plot_every"][i],
-            bsmask=bsmask,
-            real_object=False,
-            average_img=recipe["average_img"][i],
-            Fourier_last=recipe["Fourier_last"][i],
-            gamma=gamma_in,
-            RL_freq=RL_freq,
-            RL_it=RL_it,
-            TV_freq=recipe["TV_freqs"][i],
-        )
+        if mode == "gradient_descent":
+            if use_RL:
+                raise ValueError(
+                    "gradient_descent recipe stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
+
+            refined = gradient.refine_field_gradient(
+                Phase,
+                diffract,
+                supportmask=supportmask,
+                mask_pixel=bsmask,
+                n_steps=Nit,
+                learning_rate=make_beta_schedule(
+                    recipe["beta_mode"][i],
+                    Nit,
+                    recipe["beta_zero"][i],
+                ),
+                support_weight=make_alpha_schedule(
+                    recipe["alpha_mode"][i],
+                    Nit,
+                    recipe["alpha_zero"][i],
+                ),
+                loss_mode="amplitude",
+                support_projection=False,
+                fourier_projection=False,
+            )
+            result = refined.fields
+            if recipe["Fourier_last"][i]:
+                result = _apply_measured_amplitude(result, diffract, bsmask)
+            Error_diff = refined.diffraction_loss
+            Error_supp = refined.support_loss
+            gamma_out = None
+            extra_diagnostics = {
+                "loss": refined.loss,
+            }
+        else:
+            result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
+                diffract=diffract,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=recipe["beta_zero"][i],
+                beta_mode=recipe["beta_mode"][i],
+                alpha_zero=recipe["alpha_zero"][i],
+                alpha_mode=recipe["alpha_mode"][i],
+                Phase=Phase,
+                seed=False,
+                plot_every=recipe["plot_every"][i],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=recipe["average_img"][i],
+                Fourier_last=recipe["Fourier_last"][i],
+                gamma=gamma_in,
+                RL_freq=RL_freq,
+                RL_it=RL_it,
+                TV_freq=recipe["TV_freqs"][i],
+            )
+            extra_diagnostics = {}
 
         retrieved[h] = result
 
-        if use_RL:
+        if mode == "gradient_descent":
+            retrieved_gradient[h] = result
+            if retrieved_fc[h] is None:
+                retrieved_fc[h] = result
+        elif use_RL:
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
@@ -651,18 +743,32 @@ def phase_retrieval_algorithm(
         if gamma_out is not None:
             gamma[h] = gamma_out
 
-        error["steps"].append(
-            {
+        step_info = {
+            "step": i,
+            "helicity": h,
+            "mode": mode,
+            "Nit": Nit,
+            "RL_it": RL_it,
+            "RL_freq": RL_freq,
+            "coherence": "partial" if use_RL else "full",
+            "output": recipe["output"][i],
+            "error": np.asarray(Error_diff),
+            "support_error": np.asarray(Error_supp),
+            "field_after": result.copy(),
+            **extra_diagnostics,
+        }
+        error["steps"].append(step_info)
+
+        if recipe["output"][i]:
+            output_info = {
                 "step": i,
                 "helicity": h,
                 "mode": mode,
-                "Nit": Nit,
-                "RL_it": RL_it,
-                "RL_freq": RL_freq,
-                "coherence": "partial" if use_RL else "full",
-                "error": np.asarray(Error_diff),
+                "coherence": step_info["coherence"],
+                "field": result.copy(),
             }
-        )
+            error["outputs"].append(output_info)
+            error["outputs_by_helicity"][h].append(output_info)
 
         print(
             f"Step {i}: helicity={h}, mode={mode}, Nit={Nit}, "
@@ -671,6 +777,12 @@ def phase_retrieval_algorithm(
 
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
+
+    error["latest"] = {
+        "full_coherence": retrieved_fc.copy(),
+        "partial_coherence": retrieved_pc.copy(),
+        "gradient_descent": retrieved_gradient.copy(),
+    }
 
     return (
         retrieved_fc["pos"],

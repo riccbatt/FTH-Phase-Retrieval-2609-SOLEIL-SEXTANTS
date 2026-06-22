@@ -94,6 +94,7 @@ The following support projections have fused CUDA-JIT kernels:
 | `CHIO` | Yes |
 | `HPR` | Yes |
 | `OSS` | Ordinary-kernel fallback |
+| `gradient_descent` | Not a JIT projection stage |
 
 The first JIT version accelerates full-coherence iterations.
 
@@ -102,6 +103,9 @@ The following features currently use the ordinary universal kernel:
 - Richardson-Lucy partial-coherence updates;
 - active total-variation descent;
 - OSS, because its Gaussian filtering adds another FFT-dependent operation.
+- `gradient_descent` recipe polishing, because it is implemented by the
+  separate NumPy gradient-refinement helper rather than the fused projection
+  kernels.
 
 This fallback is deliberate. Those paths need additional global transforms or
 finite-difference operations and do not benefit from the current elementwise
@@ -320,4 +324,3 @@ The repository tests verify:
 CUDA execution and performance must be benchmarked on an NVIDIA machine. A
 machine without CuPy or an NVIDIA GPU cannot compile or execute the NVRTC
 kernels, even though it can test the fallback and integration paths.
-

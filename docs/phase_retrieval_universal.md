@@ -1,21 +1,23 @@
 # Universal Phase Retrieval
 
-This document describes `library/phase_retrieval_universal.py` as a standalone
-library. It covers the physical model, measurable quantities, input metadata,
-projection choices, constraints, reconstruction loop, outputs, limitations,
-and practical use.
+This document describes `library/phase_retrieval_universal.py`. It covers the
+physical model, measurable quantities, input metadata, projection choices,
+constraints, reconstruction loop, outputs, limitations, and practical use.
 
 ## Standalone Architecture
 
-`phase_retrieval_universal.py` is self-contained with respect to phase
-retrieval. It does not import:
+`phase_retrieval_universal.py` owns its Fourier/support phase-retrieval
+kernel, update projections, multi-energy projections, and universal physical
+projections. It does not import:
 
 - `phase_retrieval_core.py`;
 - `phase_retrieval_core_general.py`;
 - `phase_retrieval_core_multienergy.py`;
 - `phase_retrieval_core_multimode.py`;
 - `phase_retrieval_core_dichroic.py`;
-- any other phase-retrieval implementation in this repository.
+- any other phase-retrieval implementation in this repository, except the
+  shared `phase_retrieval_gradient.py` helper used only when a recipe contains
+  `gradient_descent`.
 
 The universal file contains its own copies of the required numerical
 implementations:
@@ -31,14 +33,20 @@ implementations:
 - physical state/energy/polarization/illumination factorization;
 - complete reconstruction drivers.
 
+The optional `gradient_descent` update stage is shared with the base libraries
+so that the same learning-rate/support-loss convention is used everywhere.
+It may be used anywhere an ordinary projection mode is accepted, for example in
+`inner_mode`, `warmup_mode`, or the flat two-helicity
+`phase_retrieval_algorithm()` recipe.
+
 The scientific `kramers_kronig.py` utility remains an allowed dependency for
 KK transforms. It is not a phase-retrieval library. NumPy, SciPy, and
 Matplotlib are also imported directly. CuPy is optional; the module falls back
 to CPU execution when it is unavailable.
 
-This means the universal module can be distributed with
-`kramers_kronig.py` and the ordinary scientific Python dependencies without
-shipping the older phase-retrieval modules.
+This means the universal module can be distributed with `kramers_kronig.py`,
+`phase_retrieval_gradient.py`, and the ordinary scientific Python dependencies
+without shipping the older phase-retrieval modules.
 
 ## 1. Purpose
 
@@ -351,6 +359,18 @@ applied to `m_z` or used to limit a projection. Direct projection calls expect
 `magnetization_supportmask` and `projection_supportmask` to already be in that
 log-object frame.
 
+For display, use the centered helpers instead of adding ad hoc shifts:
+
+```python
+object_display = fourier_field_to_display_object(fields)
+log_display = fourier_field_to_display_object_log(fields)
+fields = display_object_log_to_fourier_field(log_display)
+```
+
+The display helpers are for plotting and notebook inspection. The ordinary
+`fourier_field_to_object_log()` / `object_log_to_fourier_field()` pair remains
+the internal projection-frame API.
+
 Use this model when polarization, magnetic state, illumination, or several of
 them change.
 
@@ -582,9 +602,35 @@ flowchart TD
 ```
 
 For example, `inner_mode=["HAPRE", "ER"]` and `inner_Nit=[700, 50]`
-produce two sequential calls to `PhaseRtrv_core()` for every observation in
-every outer iteration. The ER stage starts from the Fourier field returned by
-the HAPRE stage.
+produce two sequential update stages for every observation in every outer
+iteration. The ER stage starts from the Fourier field returned by the HAPRE
+stage. `inner_mode` and `warmup_mode` may also include `gradient_descent`;
+that stage refines the current Fourier field directly with a measured-amplitude
+loss and optional support-loss penalty.
+
+For `gradient_descent`, the normal stage controls are interpreted as optimizer
+settings rather than projection feedback settings:
+
+```text
+inner_Nit / warmup_Nit      number of gradient steps
+beta_zero + beta_mode       learning-rate schedule
+alpha_zero + alpha_mode     support-leakage loss weight schedule
+Fourier_last                reapply measured amplitudes after the stage
+```
+
+The loss minimized by the gradient helper is the mean Fourier-amplitude
+mismatch on unmasked pixels plus `alpha * support_loss`, where `support_loss`
+is the mean object power outside the support. Use `alpha_zero=0` when you want
+pure diffraction-amplitude descent. Use a positive `alpha_zero` when the
+gradient stage should polish support leakage after ordinary HAPRE/ER/OSS
+stages. `gradient_descent` does not run Richardson-Lucy partial-coherence
+updates; setting active RL controls for that stage raises a `ValueError`.
+
+Because projection stages with `Fourier_last=True` already enforce the measured
+Fourier amplitude, a following gradient stage may show little or no decrease in
+the diffraction error. In that situation inspect the gradient `loss`,
+`support_error`, and output fields to see whether the support penalty changed
+the reconstruction.
 
 ### 8.4 `PhaseRtrv_core()` iteration loop
 
@@ -930,17 +976,17 @@ recipe = universal.default_universal_phase_retrieval_recipe()
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `inner_mode` | `["HAPRE"]` | Algorithms run for every observation in each outer loop |
-| `inner_Nit` | `[1]` | Iterations for each inner stage |
+| `inner_mode` | `["HAPRE"]` | Algorithms run for every observation in each outer loop; may include `gradient_descent` |
+| `inner_Nit` | `[1]` | Iterations for each inner stage; for `gradient_descent`, this is the number of gradient steps |
 | `outer_iterations` | `300` | Number of alternating data/model cycles |
-| `warmup_mode` | `["HAPRE"]` | Independent pre-coupling algorithms |
+| `warmup_mode` | `["HAPRE"]` | Independent pre-coupling algorithms; may include `gradient_descent` |
 | `warmup_Nit` | `[20]` | Warmup iterations; use `0` to disable |
 | `shuffle_observations` | `True` | Randomize observation update order |
 | `random_seed` | `None` | Seed controlling update-order randomization |
-| `beta_zero` | `0.5` | Inner-stage beta value or values |
-| `beta_mode` | `"arctan"` | Inner-stage beta schedule or schedules |
-| `alpha_zero` | `0.0` | Inner-stage alpha value or values |
-| `alpha_mode` | `"const"` | Inner-stage alpha schedule or schedules |
+| `beta_zero` | `0.5` | Inner-stage beta value or values; for `gradient_descent`, this is the learning rate |
+| `beta_mode` | `"arctan"` | Inner-stage beta schedule or schedules; for `gradient_descent`, this schedules the learning rate |
+| `alpha_zero` | `0.0` | Inner-stage alpha value or values; for `gradient_descent`, this is the support-loss weight |
+| `alpha_mode` | `"const"` | Inner-stage alpha schedule or schedules; for `gradient_descent`, this schedules the support-loss weight |
 | `TV_freq` | `1e9` | Total-variation update frequency |
 | `warmup_beta_zero` | `None` | Warmup beta; `None` inherits inner setting |
 | `warmup_beta_mode` | `None` | Warmup beta schedule |

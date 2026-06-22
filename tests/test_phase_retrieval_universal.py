@@ -239,7 +239,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
         def identity_kernel(*args, **kwargs):
             return kwargs["Phase"], [], [], None
 
-        _, components, _, _ = universal.general_phase_retrieval_algorithm(
+        _, _, components, _, _ = universal.general_phase_retrieval_algorithm(
             np.abs(fields) ** 2,
             np.zeros_like(support),
             support,
@@ -353,7 +353,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             "final_fourier_constraint": False,
         }
 
-        actual, _, _, _ = universal.universal_phase_retrieval_algorithm(
+        actual, _, _, _, _ = universal.universal_phase_retrieval_algorithm(
             holograms,
             np.zeros((5, 5), dtype=int),
             np.ones((5, 5)),
@@ -364,7 +364,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             universal_recipe=universal_recipe,
             start_fields=start_fields,
         )
-        expected, _, _, _ = (
+        expected, _, _, _, _ = (
             multienergy.multi_energy_phase_retrieval_algorithm(
                 holograms,
                 np.zeros((5, 5), dtype=int),
@@ -402,6 +402,10 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             name
             for name in imported_modules
             if "phase_retrieval" in name
+            and name not in {
+                "library.phase_retrieval_gradient",
+                "phase_retrieval_gradient",
+            }
         ]
         self.assertEqual(forbidden, [])
 
@@ -420,7 +424,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
                 None,
             ),
         ):
-            fields, components, _, errors = (
+            fields, _, components, _, errors = (
                 universal.universal_phase_retrieval_algorithm(
                     holograms,
                     np.zeros(shape, dtype=int),
@@ -461,7 +465,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             "project_fourier_fields_general",
             side_effect=fake_projection,
         ):
-            _, _, _, errors = universal.general_phase_retrieval_algorithm(
+            _, _, _, _, errors = universal.general_phase_retrieval_algorithm(
                 holograms,
                 np.zeros((4, 4), dtype=int),
                 np.ones((4, 4)),
@@ -506,7 +510,7 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             "project_fourier_fields_multi_energy",
             side_effect=fake_projection,
         ):
-            _, _, _, errors = universal.multi_energy_phase_retrieval_algorithm(
+            _, _, _, _, errors = universal.multi_energy_phase_retrieval_algorithm(
                 holograms,
                 np.zeros((4, 4), dtype=int),
                 np.ones((4, 4)),
@@ -532,6 +536,201 @@ class PhaseRetrievalUniversalTests(unittest.TestCase):
             [step["completed_update"] for step in errors["projection_steps"]],
             [3],
         )
+
+    def test_gradient_descent_is_valid_universal_update_stage(self):
+        rng = np.random.default_rng(35)
+        holograms = rng.uniform(0.5, 2.0, (3, 5, 5))
+        start_fields = np.sqrt(holograms) * np.exp(
+            1j * rng.uniform(-np.pi, np.pi, holograms.shape)
+        )
+
+        fields, _, _, _, errors = universal.universal_phase_retrieval_algorithm(
+            holograms,
+            np.zeros((5, 5), dtype=int),
+            np.ones((5, 5)),
+            state_labels=["state"] * 3,
+            energy_labels=[0, 1, 2],
+            polarization_coefficients=[1] * 3,
+            illumination_labels=["beam"] * 3,
+            universal_recipe={
+                "projection_model": "none",
+                "inner_mode": "gradient_descent",
+                "inner_Nit": 2,
+                "outer_iterations": 1,
+                "warmup_Nit": 0,
+                "shuffle_observations": False,
+                "beta_zero": 0.1,
+                "beta_mode": "const",
+                "alpha_zero": 0.0,
+                "alpha_mode": "const",
+                "final_fourier_constraint": False,
+                "Fourier_last": True,
+            },
+            start_fields=start_fields,
+        )
+
+        self.assertEqual(fields.shape, holograms.shape)
+        self.assertTrue(
+            all(
+                step["mode"] == "gradient_descent"
+                for step in errors["observation_steps"]
+            )
+        )
+        np.testing.assert_allclose(np.abs(fields), np.sqrt(holograms), atol=1e-12)
+
+    def test_pair_phase_retrieval_accepts_gradient_descent_stage(self):
+        data = np.ones((4, 4), dtype=float)
+        support = np.ones((4, 4), dtype=float)
+        start = np.ones((4, 4), dtype=complex)
+        refined_field = 2 * start
+        recipe = {
+            "algorithm_list": ["gradient_descent"],
+            "number_iterations": [3],
+            "helicity": ["pos"],
+            "beta_zero": [0.2],
+            "beta_mode": ["const"],
+            "alpha_zero": [0.7],
+            "alpha_mode": ["const"],
+            "RL_its": [0],
+            "RL_freqs": [10],
+            "TV_freqs": [10],
+            "plot_every": [1],
+            "average_img": [1],
+            "Fourier_last": [False],
+            "hologram_intensity_cutoff_vmin": -1,
+            "Startimage": [start],
+            "Startgamma": [None],
+        }
+        fake_result = universal.gradient.GradientRefinementResult(
+            fields=refined_field,
+            loss=np.array([3.0, 2.0, 1.0]),
+            diffraction_loss=np.array([0.3, 0.2, 0.1]),
+            support_loss=np.array([0.03, 0.02, 0.01]),
+        )
+
+        with mock.patch.object(
+            universal.gradient,
+            "refine_field_gradient",
+            return_value=fake_result,
+        ) as refine:
+            result = universal.phase_retrieval_algorithm(
+                data,
+                data,
+                np.zeros_like(data, dtype=int),
+                support,
+                phase_retrieval_recipe=recipe,
+            )
+
+        np.testing.assert_allclose(result[0], refined_field)
+        call = refine.call_args.kwargs
+        self.assertEqual(call["n_steps"], 3)
+        np.testing.assert_allclose(call["learning_rate"], [0.2, 0.2, 0.2])
+        np.testing.assert_allclose(call["support_weight"], [0.7, 0.7, 0.7])
+        np.testing.assert_allclose(result[-1]["steps"][0]["error"], [0.3, 0.2, 0.1])
+        np.testing.assert_allclose(
+            result[-1]["steps"][0]["support_error"],
+            [0.03, 0.02, 0.01],
+        )
+        np.testing.assert_allclose(
+            result[-1]["latest"]["gradient_descent"]["pos"],
+            refined_field,
+        )
+
+    def test_pair_phase_retrieval_output_defaults_to_last_helicity_steps(self):
+        data = np.ones((4, 4), dtype=float)
+        support = np.ones((4, 4), dtype=float)
+        start = np.ones((4, 4), dtype=complex)
+        recipe = {
+            "algorithm_list": ["ER", "ER", "ER"],
+            "number_iterations": [1, 1, 1],
+            "helicity": ["pos", "neg", "pos"],
+            "beta_zero": [0.5, 0.5, 0.5],
+            "beta_mode": ["const", "const", "const"],
+            "alpha_zero": [0.0, 0.0, 0.0],
+            "alpha_mode": ["const", "const", "const"],
+            "RL_its": [0, 0, 0],
+            "RL_freqs": [10, 10, 10],
+            "TV_freqs": [10, 10, 10],
+            "plot_every": [1, 1, 1],
+            "average_img": [1, 1, 1],
+            "Fourier_last": [False, False, False],
+            "hologram_intensity_cutoff_vmin": -1,
+            "Startimage": [start, start, "pos"],
+            "Startgamma": [None, None, None],
+        }
+        core_outputs = [2 * start, 3 * start, 4 * start]
+
+        def fake_core(**kwargs):
+            return core_outputs.pop(0), np.array([0.1]), np.array([0.01]), None
+
+        with mock.patch.object(universal, "PhaseRtrv_core", side_effect=fake_core):
+            result = universal.phase_retrieval_algorithm(
+                data,
+                data,
+                np.zeros_like(data, dtype=int),
+                support,
+                phase_retrieval_recipe=recipe,
+            )
+
+        outputs = result[-1]["outputs"]
+        self.assertEqual([item["step"] for item in outputs], [1, 2])
+        self.assertEqual([item["helicity"] for item in outputs], ["neg", "pos"])
+
+    def test_pair_phase_retrieval_accepts_explicit_output_flags(self):
+        data = np.ones((4, 4), dtype=float)
+        support = np.ones((4, 4), dtype=float)
+        start = np.ones((4, 4), dtype=complex)
+        recipe = {
+            "algorithm_list": ["ER", "ER", "ER"],
+            "number_iterations": [1, 1, 1],
+            "helicity": ["pos", "neg", "pos"],
+            "beta_zero": [0.5, 0.5, 0.5],
+            "beta_mode": ["const", "const", "const"],
+            "alpha_zero": [0.0, 0.0, 0.0],
+            "alpha_mode": ["const", "const", "const"],
+            "RL_its": [0, 0, 0],
+            "RL_freqs": [10, 10, 10],
+            "TV_freqs": [10, 10, 10],
+            "plot_every": [1, 1, 1],
+            "average_img": [1, 1, 1],
+            "Fourier_last": [False, False, False],
+            "output": [True, False, True],
+            "hologram_intensity_cutoff_vmin": -1,
+            "Startimage": [start, start, "pos"],
+            "Startgamma": [None, None, None],
+        }
+        core_outputs = [2 * start, 3 * start, 4 * start]
+
+        def fake_core(**kwargs):
+            return core_outputs.pop(0), np.array([0.1]), np.array([0.01]), None
+
+        with mock.patch.object(universal, "PhaseRtrv_core", side_effect=fake_core):
+            result = universal.phase_retrieval_algorithm(
+                data,
+                data,
+                np.zeros_like(data, dtype=int),
+                support,
+                phase_retrieval_recipe=recipe,
+            )
+
+        outputs = result[-1]["outputs"]
+        self.assertEqual([item["step"] for item in outputs], [0, 2])
+        self.assertEqual(
+            [item["step"] for item in result[-1]["outputs_by_helicity"]["pos"]],
+            [0, 2],
+        )
+
+    def test_display_object_conversion_accepts_single_field(self):
+        support = np.zeros((6, 8), dtype=float)
+        support[2:4, 3:5] = 1.0
+        field = np.fft.ifftshift(
+            np.fft.ifft2(np.fft.ifftshift(support)),
+        )
+
+        display_object = universal.fourier_field_to_display_object(field)
+
+        self.assertEqual(display_object.shape, support.shape)
+        np.testing.assert_allclose(display_object, support, atol=1e-12)
 
 
 if __name__ == "__main__":

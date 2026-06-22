@@ -125,6 +125,50 @@ class PhaseRetrievalCoreMultimodeTests(unittest.TestCase):
                 rtol=1e-7,
             )
 
+    def test_gradient_descent_stage_is_valid_in_multimode_wrapper(self):
+        rng = np.random.default_rng(23)
+        shape = (6, 6)
+        pos = rng.uniform(0.5, 2.0, shape)
+        neg = rng.uniform(0.5, 2.0, shape)
+        support = np.ones(shape)
+        recipe = {
+            "algorithm_list": ["gradient_descent"],
+            "number_iterations": [2],
+            "helicity": ["pos"],
+            "beta_zero": [0.1],
+            "beta_mode": ["const"],
+            "alpha_zero": [0.0],
+            "alpha_mode": ["const"],
+            "RL_its": [0],
+            "RL_freqs": [10],
+            "TV_freqs": [10],
+            "plot_every": [1],
+            "average_img": [1],
+            "Fourier_last": [True],
+            "hologram_intensity_cutoff_vmin": -1,
+            "Startimage": [
+                np.stack([
+                    np.sqrt(pos) * np.exp(1j * rng.uniform(-np.pi, np.pi, shape))
+                    for _ in range(2)
+                ])
+            ],
+            "Startgamma": [None],
+            "Nmodes": 2,
+        }
+
+        result = multi.phase_retrieval_algorithm(
+            pos,
+            neg,
+            np.zeros(shape, dtype=int),
+            support,
+            recipe,
+        )
+
+        self.assertEqual(result[0].shape, (2, *shape))
+        self.assertEqual(result[8]["steps"][0]["mode"], "gradient_descent")
+        reconstructed = np.sqrt(np.sum(np.abs(result[0]) ** 2, axis=0))
+        np.testing.assert_allclose(reconstructed, np.sqrt(pos), atol=1e-12)
+
     def test_multimode_final_constraint_uses_summed_intensity(self):
         rng = np.random.default_rng(4)
         shape = (8, 8)
