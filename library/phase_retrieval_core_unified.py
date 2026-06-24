@@ -1024,7 +1024,6 @@ def phase_retrieval_algorithm(
             "RL_it": RL_it,
             "RL_freq": RL_freq,
             "coherence": "partial" if use_RL else "full",
-            "Nmodes": Nmodes,
             "output": recipe["output"][i],
             "error": np.asarray(Error_diff),
             "support_error": np.asarray(Error_supp),
@@ -1062,7 +1061,6 @@ def phase_retrieval_algorithm(
         "gamma": gamma,
         "error": error,
         "recipe": recipe,
-        "Nmodes": Nmodes,
     }
 
     return_format = recipe["return_format"]

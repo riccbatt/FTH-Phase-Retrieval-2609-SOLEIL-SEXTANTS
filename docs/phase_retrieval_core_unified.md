@@ -232,8 +232,7 @@ Dictionary calls return:
 | `bsmasks` | Beamstop/invalid-pixel masks by label. |
 | `gamma` | Latest mutual-coherence estimate by label. |
 | `error` | Step errors, selected outputs, and per-step diagnostics. |
-| `recipe` | Effective recipe after defaults and overrides. |
-| `Nmodes` | Number of modes used. |
+| `recipe` | Effective recipe after defaults and overrides, including `recipe["Nmodes"]`. |
 
 Each entry in `result["error"]["steps"]` contains the step index, label, mode,
 coherence type, error arrays, and `field_after`.
