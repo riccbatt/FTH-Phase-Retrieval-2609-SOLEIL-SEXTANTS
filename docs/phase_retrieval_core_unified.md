@@ -130,7 +130,7 @@ flowchart TD
     N --> O
     O -->|"1"| P["PhaseRtrv_core_single: fast 2D core"]
     O -->|">1"| Q["PhaseRtrv_core_multimode: summed modal intensity"]
-    P --> R["Store latest result for label"]
+    P --> R["Store result in its output category"]
     Q --> R
     R --> S{"More recipe steps?"}
     S -->|"yes"| I
@@ -229,10 +229,9 @@ Dictionary calls return:
 | `full_coherence` | Latest non-RL output for each label. |
 | `partial_coherence` | Latest RL partial-coherence output for each label. |
 | `gradient_descent` | Latest gradient-descent output for each label. |
-| `latest` | Latest output of any kind for each label. |
 | `bsmasks` | Beamstop/invalid-pixel masks by label. |
 | `gamma` | Latest mutual-coherence estimate by label. |
-| `error` | Step errors, selected outputs, and latest-output metadata. |
+| `error` | Step errors, selected outputs, and per-step diagnostics. |
 | `recipe` | Effective recipe after defaults and overrides. |
 | `Nmodes` | Number of modes used. |
 

@@ -1054,16 +1054,10 @@ def phase_retrieval_algorithm(
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
 
-    error["latest"] = {
-        "full_coherence": retrieved_fc.copy(),
-        "partial_coherence": retrieved_pc.copy(),
-        "gradient_descent": retrieved_gradient.copy(),
-    }
     result = {
         "full_coherence": retrieved_fc,
         "partial_coherence": retrieved_pc,
         "gradient_descent": retrieved_gradient,
-        "latest": retrieved,
         "bsmasks": {label: data[label]["bsmask"] for label in labels},
         "gamma": gamma,
         "error": error,
