@@ -17,6 +17,12 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_rescale_roi_preserves_relative_image_coverage(self):
+        scaled = fth_phase_workflow.rescale_roi(
+            [200, 600, 100, 500], (1000, 800), (600, 400)
+        )
+        np.testing.assert_array_equal(scaled, [120, 360, 50, 250])
+
     def test_fth_pixel_mask_is_dilated_and_gaussian_smoothed(self):
         binary = np.zeros((31, 31), dtype=np.uint8)
         binary[15, 15] = 1

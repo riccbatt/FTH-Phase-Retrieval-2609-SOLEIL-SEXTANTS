@@ -195,6 +195,26 @@ def roi_to_slices(roi: Sequence[int]) -> tuple[slice, slice]:
     return slice(r0, r1), slice(c0, c1)
 
 
+def rescale_roi(
+    roi: Sequence[int], source_shape: Sequence[int], target_shape: Sequence[int]
+) -> np.ndarray:
+    """Map an ROI to another image shape while preserving relative coverage."""
+    values = np.asarray(roi, dtype=float)
+    source = np.asarray(source_shape, dtype=float)
+    target = np.asarray(target_shape, dtype=int)
+    if values.shape != (4,) or source.shape != (2,) or target.shape != (2,):
+        raise ValueError("roi must have 4 values and image shapes must have 2")
+    if np.any(source <= 0) or np.any(target <= 0):
+        raise ValueError("source_shape and target_shape must be positive")
+    scale = target / source
+    scaled = np.rint(values * [scale[0], scale[0], scale[1], scale[1]]).astype(int)
+    scaled[[0, 1]] = np.clip(scaled[[0, 1]], 0, target[0])
+    scaled[[2, 3]] = np.clip(scaled[[2, 3]], 0, target[1])
+    if scaled[1] <= scaled[0] or scaled[3] <= scaled[2]:
+        raise ValueError(f"ROI {roi} becomes empty in target shape {tuple(target)}")
+    return scaled
+
+
 def spatial_roi(array: Any, region: tuple[slice, slice]) -> np.ndarray:
     return np.asarray(array)[(...,) + tuple(region)]
 
