@@ -41,6 +41,22 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn('state["mask_pixel_raw"] = mask_store.load(', source)
         self.assertIn("mask_multiplier = (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)", source)
 
+    def test_support_preview_uses_float_smoothed_pixel_mask(self):
+        root = Path(__file__).parents[1]
+        with (root / "03_define_supportmask.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn("mask_pixel.astype(float)", source)
+        self.assertIn("mask_pixel_fth = wf.smooth_binary_mask(", source)
+        self.assertIn(
+            "holo_for_support = sum_c * (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)",
+            source,
+        )
+        self.assertIn("supportmask = (supportmask > 0).astype(np.uint8)", source)
+
     def test_unified_phase_retrieval_accepts_modes_crop_and_scalar_settings(self):
         shape = (8, 8)
         result = unified_pr.phase_retrieval_algorithm(
