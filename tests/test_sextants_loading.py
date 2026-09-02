@@ -40,11 +40,11 @@ class SextantsLoadingTests(unittest.TestCase):
             )
         self.assertIn("DARK_IDS =", source)
         self.assertIn("dark = np.asarray(loader.load(dark_id).image, dtype=float)", source)
-        self.assertIn("corrected_images.append(image - dark)", source)
-        self.assertIn("dark_stack = np.stack(dark_images)", source)
-        self.assertIn("name='dark images'", source)
+        self.assertIn("corrected = image - dark", source)
+        self.assertIn("corrected_images.append(corrected)", source)
         self.assertIn("name='dark-corrected images'", source)
         self.assertIn("image_stack = np.stack(corrected_images)", source)
+        self.assertNotIn("name='raw images'", source)
 
     def test_notebook_image_and_scan_ids_use_uppercase_configuration_variables(self):
         root = Path(__file__).parents[1]
