@@ -41,6 +41,7 @@ from numpy.typing import ArrayLike
 import matplotlib.pyplot as plt
 
 from scipy import stats
+from scipy.ndimage import affine_transform
 
 try:
     from . import phase_retrieval_gradient as gradient
@@ -135,12 +136,18 @@ def default_phase_retrieval_recipe():
         # the standard single-mode phase retrieval. Nmodes>1 uses a modal
         # intensity sum for the Fourier constraint.
         "Nmodes": 1,
-        # Public mode labels. Their count selects Nmodes; [1] is single-mode.
-        # Nmodes remains available for backward compatibility.
+        # Legacy harmonic-mode support expansion factors. For a 2-D support,
+        # modes=[1, 2] uses the original and a 2x spatially enlarged support.
+        # A supplied 3-D modal support bypasses automatic enlargement.
         "modes": None,
         # Remove this many pixels from every edge of returned spatial arrays.
         "crop": 0,
         "normalize_startimage_between_holograms": True,
+        # Legacy initialization subtracted the fitted amplitude intercept
+        # before dividing by the slope. Keep it opt-in because subtracting a
+        # real scalar from a complex Fourier field changes both amplitude and
+        # phase near weak pixels.
+        "subtract_startimage_fit_intercept": False,
         "return_format": "auto",
 
         "hologram_intensity_cutoff_vmin": -1,
@@ -262,6 +269,56 @@ def _as_modes(arr, Nmodes, shape_2d, name, dtype=None):
     return out
 
 
+def _expand_support_about_center(support, factor):
+    """Enlarge a 2-D support spatially about the array center."""
+    support = np.asarray(support)
+    if support.ndim != 2:
+        raise ValueError("support must be 2D")
+    if isinstance(factor, bool) or not isinstance(factor, (int, float, np.number)):
+        raise TypeError("mode support expansion factors must be numeric")
+    factor = float(factor)
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("mode support expansion factors must be finite and > 0")
+    if factor == 1:
+        return support.copy()
+
+    inverse_scale = np.eye(2) / factor
+    center = (np.asarray(support.shape, dtype=float) - 1) / 2
+    offset = center - inverse_scale @ center
+    expanded = affine_transform(
+        support.astype(float),
+        inverse_scale,
+        offset=offset,
+        output_shape=support.shape,
+        order=0,
+        mode="constant",
+        cval=0,
+        prefilter=False,
+    )
+    if np.issubdtype(support.dtype, np.bool_) or np.array_equal(
+        support, support.astype(bool)
+    ):
+        return (expanded > 0.5).astype(support.dtype)
+    return expanded.astype(support.dtype, copy=False)
+
+
+def _mode_supports(supportmask, mode_factors, shape_2d):
+    """Build modal supports from legacy spatial expansion factors."""
+    supportmask = np.asarray(supportmask)
+    nmodes = len(mode_factors)
+    if supportmask.ndim == 2:
+        return np.stack(
+            [_expand_support_about_center(supportmask, factor) for factor in mode_factors]
+        )
+    return _as_modes(
+        supportmask,
+        nmodes,
+        shape_2d,
+        "supportmask",
+        dtype=supportmask.dtype,
+    )
+
+
 def _maybe_squeeze_modes(arr, Nmodes):
     """Return 2D output for ``Nmodes == 1`` and 3D output otherwise."""
     if arr is None:
@@ -284,6 +341,23 @@ def _modal_intensity_numpy(arr):
 def _modal_amplitude_numpy(arr):
     """Return sqrt(total modal intensity) for a 2D or 3D complex field."""
     return np.sqrt(_modal_intensity_numpy(arr))
+
+
+def _normalize_startimage_amplitude(
+    startimage, measured_amplitude, start_amplitude, *, subtract_intercept=False
+):
+    """Apply the fitted legacy amplitude normalization to a start field."""
+    x = np.asarray(measured_amplitude).ravel()
+    y = np.asarray(start_amplitude).ravel()
+    if x.size < 2 or np.ptp(x) <= 0 or np.ptp(y) <= 0:
+        return startimage
+    fit = stats.linregress(x, y)
+    if abs(fit.slope) <= 1e-12:
+        return startimage
+    normalized = np.asarray(startimage)
+    if subtract_intercept:
+        normalized = normalized - fit.intercept
+    return normalized / fit.slope
 
 
 def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
@@ -511,6 +585,9 @@ def _verify_valid_phase_retrieval_recipe(recipe):
     if not isinstance(recipe["normalize_startimage_between_holograms"], bool):
         raise ValueError("normalize_startimage_between_holograms must be bool.")
 
+    if not isinstance(recipe["subtract_startimage_fit_intercept"], bool):
+        raise ValueError("subtract_startimage_fit_intercept must be bool.")
+
     if recipe["return_format"] not in {"auto", "legacy", "dict"}:
         raise ValueError("return_format must be 'auto', 'legacy', or 'dict'.")
 
@@ -733,7 +810,10 @@ def phase_retrieval_algorithm(
         )
 
     ``recipe["helicity"]`` lists the dictionary keys to reconstruct in order.
-    ``recipe["Startimage"]`` and ``recipe["Startgamma"]`` may refer to any
+    ``recipe["modes"]`` contains legacy spatial support-expansion factors. With
+    a 2-D support, ``[1, 2]`` assigns the original support to the first mode
+    and a 2x enlarged support to the second. An explicit 3-D support is used
+    directly. ``recipe["Startimage"]`` and ``recipe["Startgamma"]`` may refer to any
     previous key. If ``normalize_startimage_between_holograms`` is true, a
     masked linear intensity scaling is applied when a start image is reused
     across different labels. Set it to false to copy the complex field exactly.
@@ -782,11 +862,18 @@ def phase_retrieval_algorithm(
     if mode_labels is not None:
         if not isinstance(mode_labels, (list, tuple)) or not mode_labels:
             raise ValueError("recipe['modes'] must be a non-empty list or tuple.")
-        if len(set(mode_labels)) != len(mode_labels):
-            raise ValueError("recipe['modes'] entries must be unique.")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float, np.number))
+            or not np.isfinite(value)
+            or value <= 0
+            for value in mode_labels
+        ):
+            raise ValueError("recipe['modes'] entries must be finite numbers > 0.")
         Nmodes = len(mode_labels)
     else:
         Nmodes = recipe["Nmodes"]
+        mode_labels = [1] * int(Nmodes)
     if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
         raise ValueError("recipe['Nmodes'] must be a positive integer.")
     Nmodes = int(Nmodes)
@@ -858,13 +945,8 @@ def phase_retrieval_algorithm(
             "bsmask": bsmask,
         }
 
-    support_modes = _as_modes(
-        supportmask,
-        Nmodes,
-        shape_2d,
-        "supportmask",
-        dtype=np.asarray(supportmask).dtype,
-    )
+    support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+    retrieval_support = support_modes if Nmodes > 1 else support_modes[0]
 
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
@@ -918,10 +1000,12 @@ def phase_retrieval_algorithm(
     if np.any(valid_pix):
         x = data[first_label]["amp"][valid_pix].ravel()
         y = _modal_amplitude_numpy(Startimage)[valid_pix].ravel()
-        if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
-            res = stats.linregress(x, y)
-            if abs(res.slope) > 1e-12:
-                Startimage = Startimage / res.slope
+        Startimage = _normalize_startimage_amplitude(
+            Startimage,
+            x,
+            y,
+            subtract_intercept=recipe["subtract_startimage_fit_intercept"],
+        )
 
     retrieved = {label: None for label in labels}
     retrieved_fc = {label: None for label in labels}
@@ -997,7 +1081,7 @@ def phase_retrieval_algorithm(
                 refined = gradient.refine_field_gradient(
                     Phase,
                     diffract,
-                    supportmask=supportmask,
+                    supportmask=retrieval_support,
                     mask_pixel=bsmask,
                     n_steps=Nit,
                     learning_rate=make_beta_schedule(
@@ -1024,7 +1108,7 @@ def phase_retrieval_algorithm(
                 result, Error_diff, Error_supp, Error_loss = _refine_modes_gradient(
                     Phase,
                     diffract,
-                    supportmask,
+                    retrieval_support,
                     bsmask,
                     nmodes=Nmodes,
                     image_shape=shape_2d,
@@ -1046,7 +1130,7 @@ def phase_retrieval_algorithm(
             Error_loss = None
             result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
                 diffract=diffract,
-                mask=supportmask,
+                mask=retrieval_support,
                 mode=mode,
                 Nit=Nit,
                 beta_zero=recipe["beta_zero"][i],

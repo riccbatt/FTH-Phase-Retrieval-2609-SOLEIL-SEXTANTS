@@ -17,6 +17,28 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_mode_values_expand_a_shared_support_spatially(self):
+        support = np.zeros((9, 9), dtype=np.uint8)
+        support[3:6, 3:6] = 1
+        modal = unified_pr._mode_supports(support, [1, 2], support.shape)
+        self.assertEqual(modal.shape, (2, 9, 9))
+        np.testing.assert_array_equal(modal[0], support)
+        self.assertGreater(modal[1].sum(), modal[0].sum())
+        self.assertEqual(modal[1][4, 4], 1)
+
+    def test_startimage_intercept_correction_is_optional(self):
+        field = np.array([[5 + 2j, 9 + 2j]])
+        measured = np.array([1.0, 3.0])
+        amplitude_fit = np.array([5.0, 9.0])  # slope=2, intercept=3
+        slope_only = unified_pr._normalize_startimage_amplitude(
+            field, measured, amplitude_fit, subtract_intercept=False
+        )
+        legacy = unified_pr._normalize_startimage_amplitude(
+            field, measured, amplitude_fit, subtract_intercept=True
+        )
+        np.testing.assert_allclose(slope_only, field / 2)
+        np.testing.assert_allclose(legacy, (field - 3) / 2)
+
     def test_load_average_accepts_one_id_or_a_list(self):
         class FakeLoader:
             def load(self, image_id):
