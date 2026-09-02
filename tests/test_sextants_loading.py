@@ -30,6 +30,19 @@ class SextantsLoadingTests(unittest.TestCase):
             self.assertIn("COMET_20260902_Cocoons_Laser_raw", source, name)
             self.assertIn("sextants_loader.experimental_setup(", source, name)
 
+    def test_napari_mask_notebook_supports_per_image_dark_subtraction(self):
+        root = Path(__file__).parents[1]
+        with (root / "00a_define_mask_pixel_napari.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn("DARK_IMAGE_IDS =", source)
+        self.assertIn("dark = np.asarray(loader.load(dark_id).image, dtype=float)", source)
+        self.assertIn("image -= dark", source)
+        self.assertIn("image_stack = np.stack(corrected_images)", source)
+
     def test_image_channels_and_geometry_are_read_from_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "scanx_0095.nxs"
