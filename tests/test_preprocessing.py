@@ -7,7 +7,7 @@ import numpy as np
 
 from library.beamstop_stitching import stitch_exposures
 from library.data_loading import Frame, NexusLoader, SextantsNexusLoader
-from library.mask_store import MaskStore
+from library.mask_store import MaskStore, load_red_mask_png
 
 
 class PreprocessingTests(unittest.TestCase):
@@ -50,6 +50,20 @@ class PreprocessingTests(unittest.TestCase):
             store = MaskStore(folder)
             store.save(42, np.array([[0, 2]], dtype=float))
             np.testing.assert_array_equal(store.load(42, (1, 2)), [[0, 1]])
+            self.assertEqual(store.path_for(42).name, "mask_pixel_42.png")
+
+    def test_red_png_ignores_non_red_pixels(self):
+        with tempfile.TemporaryDirectory() as folder:
+            from PIL import Image
+
+            path = Path(folder) / "painted.png"
+            rgb = np.array(
+                [[[255, 0, 0], [255, 255, 255], [180, 0, 0]]], dtype=np.uint8
+            )
+            Image.fromarray(rgb).save(path)
+            np.testing.assert_array_equal(
+                load_red_mask_png(path, (1, 3)), [[1, 0, 0]]
+            )
 
     def test_nexus_loader_accepts_top_level_entry(self):
         with tempfile.TemporaryDirectory() as folder:

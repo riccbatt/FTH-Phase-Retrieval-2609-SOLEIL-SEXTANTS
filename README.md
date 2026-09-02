@@ -2,12 +2,16 @@
 
 This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The numbered reconstruction notebooks share one HDF5 data dictionary in `processed/Logs/`.
 
+FTH and phase-retrieval result figures are written directly to `processed/`.
+Paintable detector masks live in `processed/mask_pixels/`, and support masks
+live in `processed/supportmask/`.
+
 ## Quick Start
 
 1. Optionally run `00a_define_mask_pixel_napari.ipynb` first. It can load several image IDs as a Napari stack and saves one raw-coordinate detector/beamstop mask per ID; existing masks from compatible IDs can be reused as templates.
 2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures.
 3. Open `01_FTH.ipynb`.
-4. Set `USER`, the raw image IDs and polarization labels. For each input, `mask_id` selects a saved `mask_pixel_<image-id>.npy`; `mask_id=None` uses no precise mask. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
+4. Set `USER`, the raw image IDs and polarization labels. For each input, `mask_id` selects a painted `mask_pixel_<image-id>.png` (or legacy `.npy`); `mask_id=None` uses no precise mask. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
 5. Run the notebook through the final save cell.
 6. Open `03_define_supportmask.ipynb` and define the support mask.
 7. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
@@ -16,7 +20,7 @@ This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS
 
 `library/data_loading.py` defines a common `Frame` result and loader registry. `SextantsNexusLoader` supports SOLEIL filenames such as `scanx_0589.nxs`, discovers the detector dataset from its NeXus image metadata (the numbered `data_21`/`data_22` key varies by detector and scan), reads `scan_data/integration_times`, and records energy, polarization, and detector provenance. `NexusLoader` remains available for configurable HDF5/NeXus layouts, while `SpeLoader` adapts the existing SPE reader by dependency injection.
 
-`library/mask_store.py` associates a raw-coordinate binary `mask_pixel` with an image ID. In every mask, `1` means unusable. It is deliberately centered only inside notebook 01, so changing the center does not invalidate the saved mask. `library/beamstop_stitching.py` normalizes by exposure, optionally registers and fits each input to the longest-exposure data, averages overlapping valid pixels at equal exposure, then fills gaps from progressively shorter exposures. Its output records the contributing count and exposure at every pixel.
+`library/mask_store.py` associates a raw-coordinate binary `mask_pixel` with an image ID. In every mask, `1` means unusable. It reads bright-red mask pixels from PNG and falls back to legacy NPY masks. It is deliberately centered only inside notebook 01, so changing the center does not invalidate the saved mask. `library/beamstop_stitching.py` normalizes by exposure, optionally registers and fits each input to the longest-exposure data, averages overlapping valid pixels at equal exposure, then fills gaps from progressively shorter exposures. Its output records the contributing count and exposure at every pixel.
 
 The current notebooks are configured for:
 
@@ -72,7 +76,7 @@ Use `00a_define_mask_pixel_napari.ipynb` before FTH to define precise bad-pixel 
 - `INITIAL_MASK_ID` can load another compatible image's mask as the starting template.
 - Run the notebook repeatedly when different frames use different beamstops.
 
-The output is `processed/masks/mask_pixel_<image-id>.npy`. Notebook 01 selects it with `mask_id`, centers it using the current center, and saves the centered mask into the reconstruction HDF5 file. Masked pixels are excluded from the FTH image and measured Fourier constraints during retrieval.
+The canonical output is `processed/mask_pixels/mask_pixel_<image-id>.png`. Notebook 01 selects it with `mask_id`, centers it using the current center, and saves the centered mask into the reconstruction HDF5 file. Masked pixels are excluded from the FTH image and measured Fourier constraints during retrieval. See [PAINT_MASKS.md](PAINT_MASKS.md) for the Paint workflow and exact filenames.
 
 ## Notebook 03: Support Mask
 
@@ -83,6 +87,8 @@ Important steps:
 - Build the support-mask preview reconstruction from the FTH result.
 - Define `supportmask` by PNG painting, the circle widget, or manual/loading options.
 - Save the support mask into the shared HDF5 file.
+
+Painted support masks are stored as `processed/supportmask/supportmask_<image-id>.png`; see [PAINT_MASKS.md](PAINT_MASKS.md).
 
 Notebook 03 does not create `focus_cdi`. Notebook 04 uses `focus_cdi["roi"]` only if it already exists from a previous phase-retrieval save; otherwise `roi_cdi` defaults to the HDF5 FTH focus ROI, `focus["roi"]`.
 
