@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 import h5py
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import binary_dilation, gaussian_filter, zoom
 
 
 def normalize_image(image: Any) -> np.ndarray:
@@ -74,6 +74,31 @@ def butterworth_disk_mask(shape: Sequence[int], radius: float, order: float) -> 
     yy, xx = np.ogrid[:rows, :columns]
     distance = np.hypot(yy - rows / 2, xx - columns / 2)
     return 1.0 / (1.0 + (distance / float(radius)) ** (2 * float(order)))
+
+
+def smooth_binary_mask(
+    mask: Any, dilation_pixels: int = 3, sigma: float | None = None
+) -> np.ndarray:
+    """Dilate a binary bad-pixel mask, then soften its edge for FTH only."""
+    binary = np.asarray(mask) != 0
+    if binary.ndim != 2:
+        raise ValueError("smooth_binary_mask expects a 2-D mask")
+    if isinstance(dilation_pixels, bool) or not isinstance(
+        dilation_pixels, (int, np.integer)
+    ):
+        raise ValueError("dilation_pixels must be a non-negative integer")
+    dilation_pixels = int(dilation_pixels)
+    if dilation_pixels < 0:
+        raise ValueError("dilation_pixels must be a non-negative integer")
+    if sigma is None:
+        sigma = float(dilation_pixels)
+    sigma = float(sigma)
+    if sigma < 0:
+        raise ValueError("sigma must be non-negative")
+    dilated = binary_dilation(binary, iterations=dilation_pixels) if dilation_pixels else binary
+    if not sigma:
+        return dilated.astype(float)
+    return np.clip(gaussian_filter(dilated.astype(float), sigma=sigma), 0.0, 1.0)
 
 
 def fth_reconstruct(

@@ -17,6 +17,17 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_fth_pixel_mask_is_dilated_and_gaussian_smoothed(self):
+        binary = np.zeros((31, 31), dtype=np.uint8)
+        binary[15, 15] = 1
+        original = binary.copy()
+        smooth = fth_phase_workflow.smooth_binary_mask(binary, 3, 3)
+        self.assertEqual(smooth.shape, binary.shape)
+        self.assertTrue(np.issubdtype(smooth.dtype, np.floating))
+        self.assertGreater(smooth[15, 18], 0)
+        self.assertTrue(np.all((smooth >= 0) & (smooth <= 1)))
+        np.testing.assert_array_equal(binary, original)
+
     def test_unified_phase_retrieval_accepts_modes_crop_and_scalar_settings(self):
         shape = (8, 8)
         result = unified_pr.phase_retrieval_algorithm(
