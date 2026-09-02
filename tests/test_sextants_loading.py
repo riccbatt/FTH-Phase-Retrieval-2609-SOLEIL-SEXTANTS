@@ -38,10 +38,30 @@ class SextantsLoadingTests(unittest.TestCase):
                 for cell in json.load(handle)["cells"]
                 for line in cell.get("source", [])
             )
-        self.assertIn("DARK_IMAGE_IDS =", source)
+        self.assertIn("DARK_IDS =", source)
         self.assertIn("dark = np.asarray(loader.load(dark_id).image, dtype=float)", source)
-        self.assertIn("image -= dark", source)
+        self.assertIn("corrected_images.append(image - dark)", source)
+        self.assertIn("dark_stack = np.stack(dark_images)", source)
+        self.assertIn("name='dark images'", source)
+        self.assertIn("name='dark-corrected images'", source)
         self.assertIn("image_stack = np.stack(corrected_images)", source)
+
+    def test_notebook_image_and_scan_ids_use_uppercase_configuration_variables(self):
+        root = Path(__file__).parents[1]
+        expected = {
+            "00a_define_mask_pixel_napari.ipynb": ("IMAGE_IDS =", "DARK_IDS ="),
+            "FTH_CDI.ipynb": ("IMAGE_ID =", "REFERENCE_ID ="),
+            "FTH_CDI_Basic.ipynb": ("IMAGE_ID =", "REFERENCE_ID =", "IMAGE_DARK_ID ="),
+            "FTH_CDI_Stitching.ipynb": ("IMAGE_IDS =", "REFERENCE_IDS =", "IMAGE_DARK_IDS ="),
+            "FTH_CDI_Topo.ipynb": ("IMAGE_ID =", "DARK_ID ="),
+            "SAXS_Basic.ipynb": ("IMAGE_IDS =", "DARK_IDS ="),
+            "Diode_Scans.ipynb": ("SCAN_IDS =",),
+            "Reconstruction_Scheme.ipynb": ("IMAGE_IDS =",),
+        }
+        for name, variables in expected.items():
+            source = (root / name).read_text(encoding="utf-8")
+            for variable in variables:
+                self.assertIn(variable, source, name)
 
     def test_image_channels_and_geometry_are_read_from_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
