@@ -45,6 +45,7 @@ class SextantsLoadingTests(unittest.TestCase):
         self.assertIn("corrected = image_rate - dark_rate", source)
         self.assertIn("corrected_images.append(corrected)", source)
         self.assertIn("name='exposure-normalized, dark-corrected images'", source)
+        self.assertIn("np.nanpercentile(image_stack, (0.1, 99.9))", source)
         self.assertIn("image_stack = np.stack(corrected_images)", source)
         self.assertNotIn("name='raw images'", source)
 
