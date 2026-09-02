@@ -8,8 +8,12 @@ recipes therefore remain compatible with the definitive universal library.
 
 from functools import partial
 
-from . import phase_retrieval_core_jit as jit_core
-from . import phase_retrieval_universal as universal
+try:
+    from . import phase_retrieval_core_jit as jit_core
+    from . import phase_retrieval_universal as universal
+except ImportError:  # Notebooks add library/ directly to sys.path.
+    import phase_retrieval_core_jit as jit_core
+    import phase_retrieval_universal as universal
 
 
 cuda_jit_status = jit_core.cuda_jit_status
@@ -71,4 +75,3 @@ def general_phase_retrieval_algorithm_jit(*args, fallback=True, **kwargs):
         phase_retrieval_kernel=_configured_kernel(fallback),
         **kwargs,
     )
-

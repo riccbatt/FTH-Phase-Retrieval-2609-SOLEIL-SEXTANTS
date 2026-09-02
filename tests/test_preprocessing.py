@@ -9,10 +9,127 @@ import numpy as np
 from library.beamstop_stitching import stitch_exposures
 from library.data_loading import Frame, NexusLoader, SextantsNexusLoader
 from library.mask_store import MaskStore, load_red_mask_png
+from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inventory
+from library import fth_phase_workflow
+from library import fthcore
 from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_data_dict_round_trip_supports_path_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "data.hdf5"
+            png = Path(folder) / "supportmask.png"
+            fth_phase_workflow.save_data_dict(
+                {"supportmask_png": png}, output, overwrite=True
+            )
+            loaded = fth_phase_workflow.load_data_dict(output)
+            self.assertEqual(loaded["supportmask_png"], str(png))
+
+    def test_saved_fth_uses_widget_micrometres_and_subpixel_shift(self):
+        class FakeFth:
+            propagated_distance = None
+            shift = None
+
+            @classmethod
+            def propagate(cls, image, distance, setup):
+                cls.propagated_distance = distance
+                return image
+
+            @staticmethod
+            def global_phase_shift(image, phase):
+                return image
+
+            @staticmethod
+            def reconstruct(image):
+                return image
+
+            @classmethod
+            def sub_pixel_centering(cls, image, dx, dy):
+                cls.shift = (dx, dy)
+                return image
+
+        fth_phase_workflow.fth_reconstruct(
+            np.ones((2, 2)), {}, FakeFth,
+            prop_dist=-10.27, phase=-0.73, dx=0, dy=0.03,
+        )
+        self.assertAlmostEqual(FakeFth.propagated_distance, -10.27e-6)
+        self.assertEqual(FakeFth.shift, (0, 0.03))
+
+        root = Path(__file__).parents[1]
+        with (root / "01_FTH_series.ipynb").open(encoding="utf-8") as handle:
+            series_source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn('prop_dist_unit = focus_fth.get("prop_dist_unit", "um")', series_source)
+        self.assertIn("REFERENCE_IMAGE_ID = 13", series_source)
+        self.assertIn("data_recon_ImId_{REFERENCE_IMAGE_ID:04d}", series_source)
+        self.assertIn("CENTER_OVERRIDE = None", series_source)
+        self.assertIn("ROI_OVERRIDE = None", series_source)
+        self.assertIn("PLUS_IMAGE_IDS = [13]", series_source)
+        self.assertIn("MINUS_IMAGE_IDS = [14]", series_source)
+        self.assertIn("SERIES_POINTS = None", series_source)
+        self.assertIn("FTH_series_{USER}.gif", series_source)
+        self.assertIn("save_all=True", series_source)
+        self.assertIn(
+            'series_label = f"im_id={spec[\'+\']},{spec[\'-\']} | {index + 1}/{len(SERIES)}"',
+            series_source,
+        )
+        self.assertIn('ImageDraw.Draw(labeled).text', series_source)
+        self.assertIn("CLOSE_ALL_EVERY = 5", series_source)
+        self.assertIn('plt.close("all")', series_source)
+        self.assertIn(
+            "prop_dist=prop_dist, phase=phase, dx=dx, dy=dy", series_source
+        )
+
+    def test_saved_fth_matches_focus_widget_transform(self):
+        rng = np.random.default_rng(4)
+        hologram = rng.normal(size=(16, 16))
+        setup = {"ccd_dist": 0.5, "energy": 778.831, "px_size": 11e-6}
+        prop_um, phase, dx, dy = -10.27, -0.73, 0.0, 0.03
+        expected = fthcore.reconstructCDI(
+            fthcore.propagate(hologram, prop_um * 1e-6, setup)
+            * np.exp(1j * phase)
+        )
+        expected = fthcore.sub_pixel_centering(expected, dx, dy)
+        actual = fth_phase_workflow.fth_reconstruct(
+            hologram, setup, fthcore,
+            prop_dist=prop_um, phase=phase, dx=dx, dy=dy,
+        )
+        np.testing.assert_allclose(actual, expected)
+
+    def test_fth_setup_is_derived_after_positive_image_definition(self):
+        root = Path(__file__).parents[1]
+        with (root / "01_FTH.ipynb").open(encoding="utf-8") as handle:
+            cells = json.load(handle)["cells"]
+        sources = ["".join(cell.get("source", [])) for cell in cells]
+        folder_cell = next(i for i, source in enumerate(sources) if "RAW_FOLDER =" in source)
+        image_cell = next(i for i, source in enumerate(sources) if "hologram_inputs =" in source)
+        setup_cell = next(i for i, source in enumerate(sources) if "setup_frame =" in source)
+        self.assertLess(folder_cell, image_cell)
+        self.assertLess(image_cell, setup_cell)
+        self.assertIn('im_id = int(hologram_inputs[positive_label]["id"])', sources[setup_cell])
+        self.assertIn("setup_frame = raw_loader.load(im_id)", sources[setup_cell])
+        self.assertIn('"px_size": 11.0e-6', sources[setup_cell])
+
+    def test_nexus_inspection_lists_attributes_without_loading_large_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scanx_0012.nxs"
+            with h5py.File(path, "w") as handle:
+                distance = handle.create_dataset("scan_0012/scan_data/data_03", data=[200.0])
+                distance.attrs["long_name"] = "ccd-ts/position"
+                distance.attrs["units"] = "mm"
+                handle.create_dataset("scan_0012/scan_data/image", data=np.ones((1, 8, 9)))
+            rows = inspect_nexus(path)
+            distance_rows = search_inventory(rows, "ccd-ts")
+            self.assertEqual(len(distance_rows), 1)
+            self.assertEqual(distance_rows[0]["value"], [200.0])
+            image_row = next(row for row in rows if row["path"].endswith("/image"))
+            self.assertEqual(image_row["value"], None)
+            self.assertEqual(scalar_metadata(path)["/scan_0012/scan_data/data_03"], [200.0])
+
     def test_diode_scan_discovers_channels_and_saves_hdf5_and_png(self):
         with tempfile.TemporaryDirectory() as folder:
             raw_path = Path(folder) / "scanx_0007.nxs"
@@ -175,6 +292,9 @@ class PreprocessingTests(unittest.TestCase):
                 detector.attrs["interpretation"] = "image"
                 detector.attrs["long_name"] = "dhyana95/image"
                 scan_data["integration_times"] = [20.0]
+                distance = scan_data.create_dataset("data_03", data=[200.0])
+                distance.attrs["long_name"] = "i14-m-cx2/ex-fth/ccd-ts/position"
+                distance.attrs["units"] = "mm"
                 entry["SEXTANTS/mono/energy"] = [702.8]
                 entry["SEXTANTS/hu80.2_energy/polarisation"] = [3]
             frame = SextantsNexusLoader(folder).load(24)
@@ -182,6 +302,8 @@ class PreprocessingTests(unittest.TestCase):
             self.assertEqual(frame.exposure, 20.0)
             self.assertEqual(frame.metadata["energy_eV"], 702.8)
             self.assertEqual(frame.metadata["polarization_code"], 3)
+            self.assertEqual(frame.metadata["ccd_dist_m"], 0.5)
+            self.assertTrue(frame.metadata["ccd_dist_path"].endswith("data_03"))
             self.assertTrue(frame.metadata["image_path"].endswith("data_21"))
 
 

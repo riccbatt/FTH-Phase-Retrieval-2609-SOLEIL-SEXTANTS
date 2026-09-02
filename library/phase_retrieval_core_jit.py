@@ -14,7 +14,10 @@ import logging
 
 import numpy as np
 
-from . import phase_retrieval_universal as universal
+try:
+    from . import phase_retrieval_universal as universal
+except ImportError:  # Notebooks add library/ directly to sys.path.
+    import phase_retrieval_universal as universal
 
 
 log = logging.getLogger(__name__)
@@ -401,4 +404,3 @@ def warm_up_jit(shape=(256, 256), modes=None):
             0.5,
         )
     cp.cuda.Stream.null.synchronize()
-

@@ -139,6 +139,30 @@ class SextantsNexusLoader(NexusLoader):
     ENERGY_PATHS = ("SEXTANTS/mono/energy", "SEXTANTS/hu80.2_energy/energy")
     POLARIZATION_PATHS = ("SEXTANTS/hu80.2_energy/polarisation",)
 
+    @staticmethod
+    def _ccd_distance(scan_data: h5py.Group) -> tuple[str, float] | None:
+        """Derive sample-to-CCD distance from the ``ccd-ts`` position in mm."""
+        # At SEXTANTS the CCD translation stage is stored in data_03. Prefer
+        # that stable beamtime location; retain the metadata search as fallback.
+        candidates = []
+        if "data_03" in scan_data:
+            candidates.append(scan_data["data_03"])
+        candidates.extend(
+            dataset for key, dataset in scan_data.items() if key != "data_03"
+        )
+        for dataset in candidates:
+            if not isinstance(dataset, h5py.Dataset):
+                continue
+            long_name = _text(dataset.attrs.get("long_name", "")).lower()
+            if dataset.name.rsplit("/", 1)[-1] != "data_03" and "ccd-ts" not in long_name:
+                continue
+            values = np.asarray(dataset[()]).squeeze()
+            if values.size != 1:
+                raise ValueError(f"CCD distance dataset {dataset.name} is not scalar")
+            ccd_ts_mm = float(values)
+            return dataset.name.lstrip("/"), (700.0 - ccd_ts_mm) / 1000.0
+        return None
+
     def __init__(self, raw_folder: str | Path, frame_reduction: str = "mean") -> None:
         super().__init__(
             raw_folder,
@@ -180,6 +204,11 @@ class SextantsNexusLoader(NexusLoader):
                 "exposure_path": exposure_path,
                 "detector": detector,
             }
+            distance = self._ccd_distance(handle[f"{entry}/scan_data"])
+            if distance is not None:
+                distance_path, distance_m = distance
+                metadata["ccd_dist_m"] = distance_m
+                metadata["ccd_dist_path"] = distance_path
             for name, paths in (
                 ("energy_eV", self.ENERGY_PATHS),
                 ("polarization_code", self.POLARIZATION_PATHS),

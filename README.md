@@ -7,6 +7,7 @@ All notebooks use the directory in which they are currently running as
 
 ```python
 RAW_FOLDER = "/home/experiences/sextants/com-sextants/ruche/sextants-soleil/com-sextants/COMET_20260902_Cocoons_Laser/"
+RAW_FOLDER = "../COMET_20260902_Cocoons_Laser_raw/"
 ```
 
 Every generated result is written below `BASEFOLDER/processed/`.
@@ -23,13 +24,58 @@ order, and saves both the numerical HDF5 result and plotted PNG under
 
 ## Quick Start
 
+Use `00_inspect_nexus_metadata.ipynb` whenever you need to browse the complete
+NeXus tree, search dataset paths and attributes, or compare scalar metadata
+across scans. It avoids loading large detector arrays unless explicitly enabled.
+
 1. Optionally define raw-coordinate detector masks before FTH using either `00_define_mask_pixel_paint.ipynb` (PNG/Paint) or `00a_define_mask_pixel_napari.ipynb` (interactive Napari). Create one mask per raw image used directly or in stitching.
 2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures. Its output mask is the intersection of the aligned input masks, so only pixels covered in every input remain masked.
 3. Open `01_FTH.ipynb`.
-4. Set `USER`, the raw image IDs and polarization labels. For each input, `mask_id` selects a painted `mask_pixel_<image-id>.png` (or legacy `.npy`); `mask_id=None` uses no precise mask. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
+4. Set `USER`, the raw image IDs, and the `+`/`-` acquisition modes. For each input, `mask_id` selects a painted `mask_pixel_<image-id>.png` (or legacy `.npy`); `mask_id=None` uses no precise mask. Likewise, `dark_id=None` disables dark subtraction. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
 5. Run the notebook through the final save cell.
 6. Open `03_define_supportmask.ipynb` and define the support using one of three alternatives: Paint, Napari, or `(y, x, radius)` support coordinates.
 7. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
+
+### Image series and hysteresis loops
+
+After calibrating one representative `+`/`-` pair with the original notebooks,
+use `01_FTH_series.ipynb` to process parallel `PLUS_IMAGE_IDS` and
+`MINUS_IMAGE_IDS` lists, with an optional `SERIES_POINTS` list for field or time
+values. It reuses the calibrated center, pixel and smooth masks, Ewald setting, FTH focus, and ROI,
+and checkpoints after every pair to
+`processed/Logs/data_recon_series_<user>.hdf5`.
+
+The current hysteresis calibration uses the center `[1005, 1035]`, measured
+from image `13`, and the ROI `[597, 785, 526, 719]`. Rerun the original FTH and
+support-mask notebooks after changing either value so all saved masks use the
+same coordinate system.
+
+The detector pixel size is `11.0e-6 m`. The sample-to-detector distance is not
+hard-coded: `SextantsNexusLoader` reads the `ccd-ts` stage position from
+`scan_data/data_03` in millimetres and calculates
+`ccd_dist = (700 - data_03) / 1000`. Images 13 and 14 contain `data_03 = 200 mm`,
+which gives `ccd_dist = 0.500 m`.
+
+Then run `04_phase_retrieval_series.ipynb` to reuse the support mask,
+phase-retrieval recipe, and CDI focus/ROI for every point. Its checkpoint is
+`processed/Logs/data_phase_retrieval_series_<user>.hdf5`. Both notebooks save
+one indexed PNG per series point. The FTH series reuses the calibration factor
+and offset by default; set `REUSE_CALIBRATION_SCALING = False` to refit them for
+each pair when detector intensity drifts.
+
+Choose the calibration explicitly with `REFERENCE_IMAGE_ID` in
+`01_FTH_series.ipynb`. The notebook loads the matching
+`data_recon_ImId_####_<user>.hdf5` and uses its saved center, ROI, focus, masks,
+and experimental setup. `CENTER_OVERRIDE` and `ROI_OVERRIDE` are available when
+an intentional manual override is needed.
+
+At the end of the FTH series, the notebook writes
+`processed/FTH_series_<user>.gif`. Every frame uses the same intensity limits
+across the full reconstruction stack; `GIF_FRAME_DURATION_MS` controls playback
+speed. Plot and GIF labels show the paired IDs and progress, for example
+`im_id=14,15 | 1/25`, instead of generic `point 0` labels.
+Both series notebooks call `plt.close("all")` every `CLOSE_ALL_EVERY` pairs
+(five by default) and once after their final overview to limit figure memory.
 
 ## Raw data library and optional preprocessing
 
@@ -41,7 +87,7 @@ The current notebooks are configured for:
 
 ```python
 USER = "rb"
-DATA_H5 = "processed/Logs/data_recon_ImId_1269_rb.hdf5"
+DATA_H5 = "processed/Logs/data_recon_ImId_0013_rb.hdf5"
 ```
 
 Change these near the top of each notebook when switching to a new dataset.
@@ -53,7 +99,7 @@ The HDF5 file is the handoff between notebooks. Notebook 01 creates it; later no
 Important groups/keys:
 
 - `experimental_setup`: geometry and detector metadata used by FTH/CDI propagation.
-- `holo`: raw and processed holograms, keyed by labels such as `LH` and `LV`.
+- `holo`: raw and processed holograms, keyed by the `+` and `-` acquisition modes.
 - `center`: selected detector center.
 - `mask_pixel`: centered detector mask for bad/saturated pixels and beamstop-like exclusions.
 - `mask_pixel_smooth_recipe`: Butterworth smooth mask settings from notebook 01.
@@ -73,7 +119,7 @@ Main edits:
 
 - `USER`: user suffix in output filenames.
 - `RAW_DATA_KIND`: `"existing"` for the previous raw-data workflow or `"sextants_nexus"` for SOLEIL files.
-- `hologram_inputs`: maps labels such as `LH`, `LV`, `CL`, `CR` to raw image IDs and dark/topography inputs.
+- `hologram_inputs`: maps the `+` and `-` modes to raw image IDs and optional dark/mask inputs.
 - `positive_label` and `reference_label`: labels used for the FTH difference hologram.
 - `mask_pixel_smooth_recipe`: smooth Butterworth disk mask parameters.
 
@@ -85,6 +131,11 @@ Main outputs:
 
 The final save cell writes both the HDF5 file and PNG, so rerunning it always
 keeps the numerical and viewable results together.
+
+FTH and CDI focus propagation values are stored in micrometres, matching the
+`focusCDI` slider label. The workflow converts micrometres to metres only when
+calling the propagation kernel. Saved reconstructions also apply the selected
+`dx` and `dy` sub-pixel shifts.
 
 ## Notebook 00/00a: Raw Pixel Mask
 
@@ -148,14 +199,14 @@ For example, with:
 ```python
 "algorithm_list": ["HAPRE", "ER", "ER"],
 "number_iterations": [700, 50, 50],
-"helicity": ["LH", "LH", "LV"],
+"helicity": ["+", "+", "-"],
 ```
 
 the retrieval runs:
 
-1. `HAPRE` on `LH` for 700 iterations.
-2. `ER` on `LH` for 50 iterations.
-3. `ER` on `LV` for 50 iterations.
+1. `HAPRE` on `+` for 700 iterations.
+2. `ER` on `+` for 50 iterations.
+3. `ER` on `-` for 50 iterations.
 
 Many scalar values can be written once, and the code expands them internally to all steps. For clarity, step-specific values are usually written as lists.
 
@@ -165,7 +216,7 @@ Many scalar values can be written once, and the code expands them internally to 
 | --- | --- |
 | `algorithm_list` | Algorithm for each stage. Allowed values include `ER`, `HAPRE`, `RAAR`, `HIO`, `HIOs`, `OSS`, `CHIO`, `HPR`, `SF`, and `gradient_descent`. |
 | `number_iterations` | Number of iterations for each stage. Must be positive integers. |
-| `helicity` | Hologram label to reconstruct at each stage. These must match keys in `data["holo"]`, such as `LH` and `LV`. |
+| `helicity` | Hologram label to reconstruct at each stage. These must match keys in `data["holo"]`, here `+` and `-`. |
 | `beta_zero` | Base beta parameter for projection algorithms. |
 | `beta_mode` | Beta schedule. Common values are `const` and `arctan`. |
 | `alpha_zero` | TV descent strength. `0.0` disables TV regularization. |
@@ -199,16 +250,16 @@ Partial-coherence stages update `gamma`, the coherence kernel. Later stages can 
 `Startimage` controls where each stage starts:
 
 - `None`: start from a new/randomized initial field.
-- `"LH"` or `"LV"`: reuse the latest retrieved field for that label.
+- `"+"` or `"-"`: reuse the latest retrieved field for that mode.
 - array: use the array directly.
 
 `Startgamma` works similarly for the partial-coherence kernel:
 
 - `None`: use the default initial gamma.
-- `"LH"` or `"LV"`: reuse the latest gamma for that label.
+- `"+"` or `"-"`: reuse the latest gamma for that mode.
 - array: use the array directly.
 
-When `normalize_startimage_between_holograms` is `True`, the code rescales a reused start field when it moves from one label to another. This is useful when `LH` and `LV` have different intensity levels.
+When `normalize_startimage_between_holograms` is `True`, the code rescales a reused start field when it moves from one mode to another. This is useful when `+` and `-` have different intensity levels.
 
 ### Modes
 
@@ -302,8 +353,8 @@ Run the plot/save cell in notebook 04 before the final HDF5 save cell. The expec
 
 ## File Naming Convention
 
-For a dataset with image ID `1269` and `USER = "rb"`:
+For the starting dataset with positive image ID `13` and `USER = "rb"`:
 
-- HDF5 data: `processed/Logs/data_recon_ImId_1269_rb.hdf5`
-- FTH PNG: `processed/FTH_recon_ImId_1269_rb.png`
-- Phase retrieval PNG: `processed/PhR_recon_ImId_1269_rb.png`
+- HDF5 data: `processed/Logs/data_recon_ImId_0013_rb.hdf5`
+- FTH PNG: `processed/FTH_recon_ImId_0013_rb.png`
+- Phase retrieval PNG: `processed/PhR_recon_ImId_0013_rb.png`
