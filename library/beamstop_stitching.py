@@ -161,7 +161,14 @@ def stitch_exposures(
         source_count[fill] = group_count[fill]
         source_exposure[fill] = frames[group[0]].exposure
 
+    # A stitched pixel remains masked only when it was unavailable in every
+    # aligned input: the logical intersection (AND) of all input masks.
+    # ``PreparedFrame.valid`` also excludes non-finite and registration-edge
+    # pixels, which cannot contribute usable detector data.
+    missing_mask = np.logical_and.reduce([~item.valid for item in prepared])
+    result[missing_mask] = np.nan
+
     return StitchResult(
-        result, ~np.isfinite(result), source_count, source_exposure,
+        result, missing_mask, source_count, source_exposure,
         reference_exposure, tuple(frames[i].image_id for i in order), tuple(prepared)
     )

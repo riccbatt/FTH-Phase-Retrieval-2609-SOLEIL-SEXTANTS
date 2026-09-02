@@ -6,14 +6,20 @@ FTH and phase-retrieval result figures are written directly to `processed/`.
 Paintable detector masks live in `processed/mask_pixels/`, and support masks
 live in `processed/supportmask/`.
 
+`Diode_Scans.ipynb` handles one or several diode scans, including energy
+and magnetic-field scans. It discovers NeXus channels by name or metadata,
+supports matrix-shaped continuous field traces by flattening them in acquisition
+order, and saves both the numerical HDF5 result and plotted PNG under
+`processed/diode_scans/`.
+
 ## Quick Start
 
-1. Optionally run `00a_define_mask_pixel_napari.ipynb` first. It can load several image IDs as a Napari stack and saves one raw-coordinate detector/beamstop mask per ID; existing masks from compatible IDs can be reused as templates.
-2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures.
+1. Optionally define raw-coordinate detector masks before FTH using either `00_define_mask_pixel_paint.ipynb` (PNG/Paint) or `00a_define_mask_pixel_napari.ipynb` (interactive Napari). Create one mask per raw image used directly or in stitching.
+2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures. Its output mask is the intersection of the aligned input masks, so only pixels covered in every input remain masked.
 3. Open `01_FTH.ipynb`.
 4. Set `USER`, the raw image IDs and polarization labels. For each input, `mask_id` selects a painted `mask_pixel_<image-id>.png` (or legacy `.npy`); `mask_id=None` uses no precise mask. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
 5. Run the notebook through the final save cell.
-6. Open `03_define_supportmask.ipynb` and define the support mask.
+6. Open `03_define_supportmask.ipynb` and define the support using one of three alternatives: Paint, Napari, or `(y, x, radius)` support coordinates.
 7. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
 
 ## Raw data library and optional preprocessing
@@ -68,13 +74,19 @@ Main outputs:
 - `processed/FTH_recon_ImId_####_USER.png`
 - HDF5 keys for raw holograms, center, FTH reconstruction, `roi`, and `focus`.
 
-## Notebook 00a: Raw Pixel Mask
+The final save cell writes both the HDF5 file and PNG, so rerunning it always
+keeps the numerical and viewable results together.
 
-Use `00a_define_mask_pixel_napari.ipynb` before FTH to define precise bad-pixel and beamstop masks in raw detector coordinates.
+## Notebook 00/00a: Raw Pixel Mask
 
-- `IMAGE_ID` is the ID associated with the mask being saved.
-- `INITIAL_MASK_ID` can load another compatible image's mask as the starting template.
-- Run the notebook repeatedly when different frames use different beamstops.
+Before FTH, use either `00_define_mask_pixel_paint.ipynb` or
+`00a_define_mask_pixel_napari.ipynb` to define precise bad-pixel and beamstop
+masks in raw detector coordinates. They are alternative interfaces that produce
+the same per-image PNG masks.
+
+- `IMAGE_IDS` lists every raw image whose mask should be created.
+- The Napari option supports `INITIAL_MASK_IDS` for loading compatible masks as templates.
+- Create a separate mask for every frame that uses a different beamstop.
 
 The canonical output is `processed/mask_pixels/mask_pixel_<image-id>.png`. Notebook 01 selects it with `mask_id`, centers it using the current center, and saves the centered mask into the reconstruction HDF5 file. Masked pixels are excluded from the FTH image and measured Fourier constraints during retrieval. See [PAINT_MASKS.md](PAINT_MASKS.md) for the Paint workflow and exact filenames.
 
@@ -85,7 +97,7 @@ Use `03_define_supportmask.ipynb` to create the real-space support for phase ret
 Important steps:
 
 - Build the support-mask preview reconstruction from the FTH result.
-- Define `supportmask` by PNG painting, the circle widget, or manual/loading options.
+- Define `supportmask` by exactly one method: PNG/Paint, Napari labels, or `(y, x, radius)` support coordinates with the optional circle widget.
 - Save the support mask into the shared HDF5 file.
 
 Painted support masks are stored as `processed/supportmask/supportmask_<image-id>.png`; see [PAINT_MASKS.md](PAINT_MASKS.md).
@@ -114,6 +126,9 @@ Main outputs:
 - `data["phase_retrieval_errors"]`
 - `data["focus_cdi"]`
 - `data["recon_cdi"]`
+
+The final phase-retrieval save cell writes both the updated HDF5 file and the
+PNG reconstruction.
 
 ## Phase Retrieval Recipe
 

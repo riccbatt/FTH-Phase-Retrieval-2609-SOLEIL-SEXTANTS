@@ -7,21 +7,29 @@ save as JPEG.
 
 ## Detector pixel mask
 
-1. Run the **Paint mask with PNG** export cell in
-   `02_define_mask_pixel.ipynb`.
+1. Before FTH, run the export cell in `00_define_mask_pixel_paint.ipynb`.
 2. Open this generated reference image in Paint:
    `processed/mask_pixels/mask_pixel_<image-id>_reference.png`.
 3. Paint every unusable detector pixel pure bright red (RGB `255, 0, 0`).
 4. Use **Save as > PNG** and save the edited image as:
    `processed/mask_pixels/mask_pixel_<image-id>.png`.
-5. Run the following import and save cells in notebook 02.
+5. Run the final import/validation cell in the same notebook.
 
 Notebook 01 also loads this same painted file when the corresponding
 `mask_id` is selected in `hologram_inputs`. A value of 1 in the resulting
 `mask_pixel` array means that the detector pixel is excluded. Existing legacy
 `mask_pixel_<image-id>.npy` files are still accepted if no PNG exists.
 
+If several images are stitched, define a mask for every input first. The
+stitched mask is their intersection: a pixel stays masked only when it was
+covered in every aligned input image.
+
 ## Support mask
+
+Paint is one of three equivalent ways to produce the support mask in notebook
+03. You may instead paint a Napari labels layer, or define circular supports as
+`(y, x, radius)` coordinates. Run only the section for the method you choose,
+then continue with the common ROI and save sections.
 
 1. Run notebook 03 through the support-preview and **Paint support mask with
    PNG** export cells.
