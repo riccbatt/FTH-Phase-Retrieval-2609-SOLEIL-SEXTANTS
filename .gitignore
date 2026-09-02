@@ -1,0 +1,12 @@
+# Local beamtime data and reference checkout (68 GB; includes large NeXus files).
+SOLEIL_2507/
+
+# Generated workflow outputs.
+processed/
+raw/
+
+# Python and notebook caches.
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store

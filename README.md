@@ -1,15 +1,22 @@
 # FTH and Phase Retrieval Notebook Workflow
 
-This folder contains the notebook sequence for going from raw BESSY/P04 holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The notebooks share one HDF5 data dictionary in `processed/Logs/`, so the usual workflow is to run them in order.
+This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The numbered reconstruction notebooks share one HDF5 data dictionary in `processed/Logs/`.
 
 ## Quick Start
 
-1. Open `01_FTH.ipynb`.
-2. Set `USER`, the raw image IDs, and the polarization labels.
-3. Run the notebook through the final save cell.
-4. Open `02_define_mask_pixel.ipynb` or `02_define_mask_pixel_napari_fresh.ipynb` and define detector/bad-pixel masks.
-5. Open `03_define_supportmask.ipynb` and define the support mask.
-6. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
+1. Optionally run `00a_define_mask_pixel_napari.ipynb` first. It can load several image IDs as a Napari stack and saves one raw-coordinate detector/beamstop mask per ID; existing masks from compatible IDs can be reused as templates.
+2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures.
+3. Open `01_FTH.ipynb`.
+4. Set `USER`, the raw image IDs and polarization labels. For each input, `mask_id` selects a saved `mask_pixel_<image-id>.npy`; `mask_id=None` uses no precise mask. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
+5. Run the notebook through the final save cell.
+6. Open `03_define_supportmask.ipynb` and define the support mask.
+7. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
+
+## Raw data library and optional preprocessing
+
+`library/data_loading.py` defines a common `Frame` result and loader registry. `SextantsNexusLoader` supports SOLEIL filenames such as `scanx_0589.nxs`, discovers the detector dataset from its NeXus image metadata (the numbered `data_21`/`data_22` key varies by detector and scan), reads `scan_data/integration_times`, and records energy, polarization, and detector provenance. `NexusLoader` remains available for configurable HDF5/NeXus layouts, while `SpeLoader` adapts the existing SPE reader by dependency injection.
+
+`library/mask_store.py` associates a raw-coordinate binary `mask_pixel` with an image ID. In every mask, `1` means unusable. It is deliberately centered only inside notebook 01, so changing the center does not invalidate the saved mask. `library/beamstop_stitching.py` normalizes by exposure, optionally registers and fits each input to the longest-exposure data, averages overlapping valid pixels at equal exposure, then fills gaps from progressively shorter exposures. Its output records the contributing count and exposure at every pixel.
 
 The current notebooks are configured for:
 
@@ -46,6 +53,7 @@ Use `01_FTH.ipynb` to define paths, raw scan IDs, polarization labels, detector 
 Main edits:
 
 - `USER`: user suffix in output filenames.
+- `RAW_DATA_KIND`: `"existing"` for the previous raw-data workflow or `"sextants_nexus"` for SOLEIL files.
 - `hologram_inputs`: maps labels such as `LH`, `LV`, `CL`, `CR` to raw image IDs and dark/topography inputs.
 - `positive_label` and `reference_label`: labels used for the FTH difference hologram.
 - `mask_pixel_smooth_recipe`: smooth Butterworth disk mask parameters.
@@ -56,14 +64,15 @@ Main outputs:
 - `processed/FTH_recon_ImId_####_USER.png`
 - HDF5 keys for raw holograms, center, FTH reconstruction, `roi`, and `focus`.
 
-## Notebook 02: Pixel Mask
+## Notebook 00a: Raw Pixel Mask
 
-Use one of the notebook 02 variants to define precise bad-pixel masks.
+Use `00a_define_mask_pixel_napari.ipynb` before FTH to define precise bad-pixel and beamstop masks in raw detector coordinates.
 
-- `02_define_mask_pixel.ipynb`: paint a PNG, draw polygons in notebook widgets, and optionally add thresholded saturated pixels.
-- `02_define_mask_pixel_napari_fresh.ipynb`: paint the mask interactively in Napari.
+- `IMAGE_ID` is the ID associated with the mask being saved.
+- `INITIAL_MASK_ID` can load another compatible image's mask as the starting template.
+- Run the notebook repeatedly when different frames use different beamstops.
 
-The output is `mask_pixel`, saved into the same HDF5 file. Masked pixels are excluded from measured Fourier constraints during retrieval.
+The output is `processed/masks/mask_pixel_<image-id>.npy`. Notebook 01 selects it with `mask_id`, centers it using the current center, and saves the centered mask into the reconstruction HDF5 file. Masked pixels are excluded from the FTH image and measured Fourier constraints during retrieval.
 
 ## Notebook 03: Support Mask
 
