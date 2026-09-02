@@ -28,6 +28,19 @@ class PreprocessingTests(unittest.TestCase):
         self.assertTrue(np.all((smooth >= 0) & (smooth <= 1)))
         np.testing.assert_array_equal(binary, original)
 
+    def test_fth_notebook_automatically_uses_saved_user_masks(self):
+        root = Path(__file__).parents[1]
+        with (root / "01_FTH.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn('mask_store.exists(state["id"])', source)
+        self.assertIn('mask_id = state["id"]', source)
+        self.assertIn('state["mask_pixel_raw"] = mask_store.load(', source)
+        self.assertIn("mask_multiplier = (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)", source)
+
     def test_unified_phase_retrieval_accepts_modes_crop_and_scalar_settings(self):
         shape = (8, 8)
         result = unified_pr.phase_retrieval_algorithm(
