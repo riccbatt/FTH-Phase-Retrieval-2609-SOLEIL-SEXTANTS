@@ -130,6 +130,15 @@ class PreprocessingTests(unittest.TestCase):
             self.assertEqual(image_row["value"], None)
             self.assertEqual(scalar_metadata(path)["/scan_0012/scan_data/data_03"], [200.0])
 
+    def test_phase_retrieval_uses_configurable_image_id(self):
+        root = Path(__file__).parents[1]
+        with (root / "04_phase_retrieval.ipynb").open(encoding="utf-8") as handle:
+            cells = json.load(handle)["cells"]
+        source = "".join(line for cell in cells for line in cell.get("source", []))
+        self.assertRegex(source, r"(?m)^im_id = \d+")
+        self.assertIn("data_recon_ImId_{im_id:04d}", source)
+        self.assertNotIn("data_recon_ImId_0095", source)
+
     def test_diode_scan_discovers_channels_and_saves_hdf5_and_png(self):
         with tempfile.TemporaryDirectory() as folder:
             raw_path = Path(folder) / "scanx_0007.nxs"
