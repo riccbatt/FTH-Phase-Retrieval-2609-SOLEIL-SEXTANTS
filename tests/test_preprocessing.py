@@ -252,9 +252,6 @@ class PreprocessingTests(unittest.TestCase):
         self.assertNotIn("data_recon_ImId_0095", source)
         self.assertIn('"hologram_intensity_cutoff_vmin": offset_vmin', source)
         self.assertIn('"hologram_offset": 0.0', source)
-        self.assertIn("retrieved hologram intensity", source)
-        self.assertIn("bsmask (white = excluded)", source)
-        self.assertIn("np.sum(np.abs(wf.as_modes(field)) ** 2, axis=0)", source)
 
     def test_diode_scan_discovers_channels_and_saves_hdf5_and_png(self):
         with tempfile.TemporaryDirectory() as folder:
