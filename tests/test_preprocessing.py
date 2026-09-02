@@ -12,10 +12,44 @@ from library.mask_store import MaskStore, load_red_mask_png
 from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inventory
 from library import fth_phase_workflow
 from library import fthcore
+from library import phase_retrieval_core_unified as unified_pr
 from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_unified_phase_retrieval_accepts_modes_crop_and_scalar_settings(self):
+        shape = (8, 8)
+        result = unified_pr.phase_retrieval_algorithm(
+            {"+": np.ones(shape)},
+            np.zeros(shape, dtype=np.uint8),
+            np.ones(shape, dtype=np.uint8),
+            {
+                "algorithm_list": ["ER"],
+                "number_iterations": [1],
+                "helicity": ["+"],
+                "beta_zero": 0.5,
+                "beta_mode": "const",
+                "alpha_zero": 0.0,
+                "alpha_mode": "const",
+                "RL_its": 0,
+                "RL_freqs": 1e9,
+                "TV_freqs": 1e9,
+                "plot_every": 1,
+                "average_img": 1,
+                "Fourier_last": True,
+                "Startimage": [None],
+                "Startgamma": [None],
+                "output": True,
+                "modes": [1],
+                "crop": 1,
+                "return_format": "dict",
+            },
+        )
+        self.assertEqual(result["full_coherence"]["+"].shape, (6, 6))
+        self.assertEqual(result["bsmasks"]["+"].shape, (6, 6))
+        self.assertEqual(result["gamma"]["+"].shape, (6, 6))
+        self.assertEqual(result["recipe"]["modes"], [1])
+
     def test_data_dict_round_trip_supports_path_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / "data.hdf5"

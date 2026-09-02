@@ -135,6 +135,11 @@ def default_phase_retrieval_recipe():
         # the standard single-mode phase retrieval. Nmodes>1 uses a modal
         # intensity sum for the Fourier constraint.
         "Nmodes": 1,
+        # Public mode labels. Their count selects Nmodes; [1] is single-mode.
+        # Nmodes remains available for backward compatibility.
+        "modes": None,
+        # Remove this many pixels from every edge of returned spatial arrays.
+        "crop": 0,
         "normalize_startimage_between_holograms": True,
         "return_format": "auto",
 
@@ -154,6 +159,30 @@ def _default_output_flags(labels):
                 flags[index] = True
                 break
     return flags
+
+
+def _broadcast_recipe_scalars(recipe):
+    """Expand scalar per-step settings to the number of algorithm stages."""
+    stage_count = len(recipe["algorithm_list"])
+    scalar_keys = (
+        "beta_zero",
+        "beta_mode",
+        "alpha_zero",
+        "alpha_mode",
+        "RL_its",
+        "RL_freqs",
+        "TV_freqs",
+        "plot_every",
+        "average_img",
+        "Fourier_last",
+        "output",
+    )
+    for key in scalar_keys:
+        value = recipe[key]
+        if isinstance(value, tuple):
+            recipe[key] = list(value)
+        elif not isinstance(value, list):
+            recipe[key] = [value] * stage_count
 
 
 def _resolve_start_field(start_spec, default_field, latest, name):
@@ -735,6 +764,7 @@ def phase_retrieval_algorithm(
         recipe.update(phase_retrieval_recipe)
     if not user_supplied_output:
         recipe["output"] = _default_output_flags(recipe["helicity"])
+    _broadcast_recipe_scalars(recipe)
     _verify_valid_phase_retrieval_recipe(recipe)
 
     labels = list(holograms.keys())
@@ -745,12 +775,26 @@ def phase_retrieval_algorithm(
             f"Recipe requests hologram label(s) absent from input: {missing}"
         )
 
-    Nmodes = recipe["Nmodes"]
+    mode_labels = recipe["modes"]
+    if mode_labels is not None:
+        if not isinstance(mode_labels, (list, tuple)) or not mode_labels:
+            raise ValueError("recipe['modes'] must be a non-empty list or tuple.")
+        if len(set(mode_labels)) != len(mode_labels):
+            raise ValueError("recipe['modes'] entries must be unique.")
+        Nmodes = len(mode_labels)
+    else:
+        Nmodes = recipe["Nmodes"]
     if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
         raise ValueError("recipe['Nmodes'] must be a positive integer.")
     Nmodes = int(Nmodes)
     if Nmodes <= 0:
         raise ValueError("recipe['Nmodes'] must be a positive integer.")
+    crop = recipe["crop"]
+    if isinstance(crop, bool) or not isinstance(crop, (int, np.integer)):
+        raise ValueError("recipe['crop'] must be a non-negative integer.")
+    crop = int(crop)
+    if crop < 0:
+        raise ValueError("recipe['crop'] must be a non-negative integer.")
 
     inputs = {label: np.asarray(value).copy() for label, value in holograms.items()}
     first_shape = next(iter(inputs.values())).shape
@@ -1052,6 +1096,25 @@ def phase_retrieval_algorithm(
 
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
+
+    if crop:
+        if 2 * crop >= min(shape_2d):
+            raise ValueError("recipe['crop'] removes the complete reconstruction.")
+
+        def crop_spatial(value):
+            if value is None:
+                return None
+            return np.asarray(value)[..., crop:-crop, crop:-crop]
+
+        for collection in (retrieved_fc, retrieved_pc, retrieved_gradient, gamma):
+            for label, value in collection.items():
+                collection[label] = crop_spatial(value)
+        for label in labels:
+            data[label]["bsmask"] = crop_spatial(data[label]["bsmask"])
+        for step in error["steps"]:
+            step["field_after"] = crop_spatial(step["field_after"])
+        for output_info in error["outputs"]:
+            output_info["field"] = crop_spatial(output_info["field"])
 
     result = {
         "full_coherence": retrieved_fc,
