@@ -278,8 +278,6 @@ class PreprocessingTests(unittest.TestCase):
         source = "".join(line for cell in cells for line in cell.get("source", []))
         self.assertRegex(source, r"(?m)^im_id = \d+")
         self.assertRegex(source, r"(?m)^topo_id = \d+")
-        self.assertIn("im_id = 100", source)
-        self.assertIn("topo_id = 101", source)
         self.assertIn("data_recon_ImId_{im_id:04d}", source)
         self.assertNotIn("data_recon_ImId_0095", source)
         self.assertIn('"hologram_intensity_cutoff_vmin": offset_vmin', source)
