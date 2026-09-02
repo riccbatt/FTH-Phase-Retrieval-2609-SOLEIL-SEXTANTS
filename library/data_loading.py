@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import h5py
 import numpy as np
@@ -29,6 +29,50 @@ class Frame:
 
 class RawLoader(Protocol):
     def load(self, image_id: int | str) -> Frame: ...
+
+
+def image_ids(value: int | str | Sequence[int | str]) -> list[int | str]:
+    """Return one or more acquisition IDs as a non-empty list.
+
+    Strings are scalar IDs, not sequences. This helper lets notebook settings
+    accept either ``95`` or ``[95, 97, 99]`` without special-casing both forms.
+    """
+    if isinstance(value, (str, bytes)) or np.isscalar(value):
+        result = [value]
+    else:
+        result = list(value)
+    if not result:
+        raise ValueError("At least one image ID is required")
+    return result
+
+
+def load_average(
+    loader: RawLoader, ids: int | str | Sequence[int | str]
+) -> Frame:
+    """Load acquisition IDs and return their pixel-by-pixel arithmetic mean."""
+    requested_ids = image_ids(ids)
+    frames = [loader.load(image_id) for image_id in requested_ids]
+    shapes = {frame.image.shape for frame in frames}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"Cannot average detector frames with different shapes: {sorted(shapes)}"
+        )
+    metadata = dict(frames[0].metadata)
+    metadata.update(
+        {
+            "image_ids": [frame.image_id for frame in frames],
+            "sources": [str(frame.source) for frame in frames],
+            "exposures": [float(frame.exposure) for frame in frames],
+            "average_count": len(frames),
+        }
+    )
+    return Frame(
+        image_id=",".join(frame.image_id for frame in frames),
+        image=np.mean([frame.image for frame in frames], axis=0),
+        exposure=float(np.mean([frame.exposure for frame in frames])),
+        source=frames[0].source,
+        metadata=metadata,
+    )
 
 
 def _first_dataset(handle: h5py.File, candidates: tuple[str, ...]) -> tuple[str, Any]:

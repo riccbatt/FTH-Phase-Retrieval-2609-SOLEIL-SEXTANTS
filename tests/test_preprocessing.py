@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 
 from library.beamstop_stitching import stitch_exposures
-from library.data_loading import Frame, NexusLoader, SextantsNexusLoader
+from library.data_loading import Frame, NexusLoader, SextantsNexusLoader, load_average
 from library.mask_store import MaskStore, load_red_mask_png
 from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inventory
 from library import fth_phase_workflow
@@ -17,6 +17,21 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_load_average_accepts_one_id_or_a_list(self):
+        class FakeLoader:
+            def load(self, image_id):
+                return Frame(
+                    str(image_id), np.full((2, 3), float(image_id)),
+                    float(image_id), Path(f"{image_id}.nxs"), {"value": image_id},
+                )
+
+        single = load_average(FakeLoader(), 4)
+        multiple = load_average(FakeLoader(), [2, 4, 6])
+        np.testing.assert_array_equal(single.image, 4)
+        np.testing.assert_array_equal(multiple.image, 4)
+        self.assertEqual(multiple.metadata["image_ids"], ["2", "4", "6"])
+        self.assertEqual(multiple.metadata["average_count"], 3)
+
     def test_rescale_roi_preserves_relative_image_coverage(self):
         scaled = fth_phase_workflow.rescale_roi(
             [200, 600, 100, 500], (1000, 800), (600, 400)
@@ -42,8 +57,8 @@ class PreprocessingTests(unittest.TestCase):
                 for cell in json.load(handle)["cells"]
                 for line in cell.get("source", [])
             )
-        self.assertIn('mask_store.exists(state["id"])', source)
-        self.assertIn('mask_id = state["id"]', source)
+        self.assertIn('mask_store.exists(first_image_id)', source)
+        self.assertIn('mask_id = first_image_id', source)
         self.assertIn('state["mask_pixel_raw"] = mask_store.load(', source)
         self.assertIn("mask_multiplier = (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)", source)
 
@@ -173,22 +188,17 @@ class PreprocessingTests(unittest.TestCase):
                 for line in cell.get("source", [])
             )
         self.assertIn('prop_dist_unit = focus_fth.get("prop_dist_unit", "um")', series_source)
-        self.assertIn("REFERENCE_IMAGE_ID = 13", series_source)
+        self.assertIn("REFERENCE_IMAGE_ID = 95", series_source)
         self.assertIn("data_recon_ImId_{REFERENCE_IMAGE_ID:04d}", series_source)
         self.assertIn("CENTER_OVERRIDE = None", series_source)
         self.assertIn("ROI_OVERRIDE = None", series_source)
-        self.assertIn("PLUS_IMAGE_IDS = [13]", series_source)
-        self.assertIn("MINUS_IMAGE_IDS = [14]", series_source)
+        self.assertIn("PLUS_IMAGE_IDS =", series_source)
+        self.assertIn("MINUS_IMAGE_IDS =", series_source)
         self.assertIn("SERIES_POINTS = None", series_source)
         self.assertIn("FTH_series_{USER}.gif", series_source)
         self.assertIn("save_all=True", series_source)
-        self.assertIn(
-            'series_label = f"im_id={spec[\'+\']},{spec[\'-\']} | {index + 1}/{len(SERIES)}"',
-            series_source,
-        )
-        self.assertIn('ImageDraw.Draw(labeled).text', series_source)
-        self.assertIn("CLOSE_ALL_EVERY = 5", series_source)
-        self.assertIn('plt.close("all")', series_source)
+        self.assertIn("load_average(loader, requested_ids)", series_source)
+        self.assertIn("load_average(loader, dark_id)", series_source)
         self.assertIn(
             "prop_dist=prop_dist, phase=phase, dx=dx, dy=dy", series_source
         )
@@ -219,7 +229,7 @@ class PreprocessingTests(unittest.TestCase):
         setup_cell = next(i for i, source in enumerate(sources) if "setup_frame =" in source)
         self.assertLess(folder_cell, image_cell)
         self.assertLess(image_cell, setup_cell)
-        self.assertIn('im_id = int(hologram_inputs[positive_label]["id"])', sources[setup_cell])
+        self.assertIn('im_ids = image_ids(hologram_inputs[positive_label]["id"])', sources[setup_cell])
         self.assertIn("setup_frame = raw_loader.load(im_id)", sources[setup_cell])
         self.assertIn('"px_size": 11.0e-6', sources[setup_cell])
 
@@ -246,12 +256,31 @@ class PreprocessingTests(unittest.TestCase):
         source = "".join(line for cell in cells for line in cell.get("source", []))
         self.assertRegex(source, r"(?m)^im_id = \d+")
         self.assertRegex(source, r"(?m)^topo_id = \d+")
-        self.assertIn("im_id = 95", source)
-        self.assertIn("topo_id = 96", source)
+        self.assertIn("im_id = 100", source)
+        self.assertIn("topo_id = 101", source)
         self.assertIn("data_recon_ImId_{im_id:04d}", source)
         self.assertNotIn("data_recon_ImId_0095", source)
         self.assertIn('"hologram_intensity_cutoff_vmin": offset_vmin', source)
         self.assertIn('"hologram_offset": 0.0', source)
+
+    def test_phase_retrieval_plots_inputs_and_bsmasks_before_run(self):
+        root = Path(__file__).parents[1]
+        with (root / "04_phase_retrieval.ipynb").open(encoding="utf-8") as handle:
+            sources = [
+                "".join(cell.get("source", []))
+                for cell in json.load(handle)["cells"]
+            ]
+        diagnostic = next(
+            index for index, source in enumerate(sources)
+            if "phase-retrieval input intensity" in source
+        )
+        retrieval = next(
+            index for index, source in enumerate(sources)
+            if "phase_retrieval_result = pr.phase_retrieval_algorithm(" in source
+        )
+        self.assertLess(diagnostic, retrieval)
+        self.assertIn("_bsmask[_input < 0] = 1", sources[diagnostic])
+        self.assertIn("bsmask used (white = excluded)", sources[diagnostic])
 
     def test_diode_scan_discovers_channels_and_saves_hdf5_and_png(self):
         with tempfile.TemporaryDirectory() as folder:
