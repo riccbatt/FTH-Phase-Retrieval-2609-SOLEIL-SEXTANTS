@@ -144,6 +144,9 @@ def default_phase_retrieval_recipe():
         "return_format": "auto",
 
         "hologram_intensity_cutoff_vmin": -1,
+        # Explicit detector-intensity offset subtracted before clipping/sqrt.
+        # Use one scalar for all holograms or a {label: offset} mapping.
+        "hologram_offset": 0.0,
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
@@ -822,9 +825,25 @@ def phase_retrieval_algorithm(
     else:
         raise ValueError("supportmask must be 2D or 3D.")
 
+    offset_spec = recipe["hologram_offset"]
+    if isinstance(offset_spec, dict):
+        unknown_offset_labels = set(offset_spec) - set(inputs)
+        if unknown_offset_labels:
+            raise ValueError(
+                "recipe['hologram_offset'] contains unknown label(s): "
+                f"{sorted(unknown_offset_labels)}"
+            )
+        offsets = {label: float(offset_spec.get(label, 0.0)) for label in inputs}
+    else:
+        offset = float(offset_spec)
+        offsets = {label: offset for label in inputs}
+    if not all(np.isfinite(value) for value in offsets.values()):
+        raise ValueError("recipe['hologram_offset'] values must be finite.")
+
     data = {}
     vmin = recipe["hologram_intensity_cutoff_vmin"]
     for label, intensity in inputs.items():
+        intensity = intensity - offsets[label]
         if vmin >= 0:
             vals = intensity[(intensity != 0) & np.isfinite(intensity)]
             if vals.size:
@@ -1124,6 +1143,7 @@ def phase_retrieval_algorithm(
         "gamma": gamma,
         "error": error,
         "recipe": recipe,
+        "hologram_offsets": offsets,
     }
 
     return_format = recipe["return_format"]

@@ -90,6 +90,35 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(result["gamma"]["+"].shape, (6, 6))
         self.assertEqual(result["recipe"]["modes"], [1])
 
+    def test_unified_phase_retrieval_accepts_per_hologram_offsets(self):
+        shape = (8, 8)
+        result = unified_pr.phase_retrieval_algorithm(
+            {"+": np.full(shape, 5.0), "-": np.full(shape, 2.0)},
+            np.zeros(shape, dtype=np.uint8),
+            np.ones(shape, dtype=np.uint8),
+            {
+                "algorithm_list": ["ER", "ER"],
+                "number_iterations": [1, 1],
+                "helicity": ["+", "-"],
+                "beta_zero": 0.5,
+                "beta_mode": "const",
+                "alpha_zero": 0.0,
+                "alpha_mode": "const",
+                "RL_its": 0,
+                "RL_freqs": 1e9,
+                "TV_freqs": 1e9,
+                "plot_every": 1,
+                "average_img": 1,
+                "Fourier_last": True,
+                "Startimage": [None, "+"],
+                "Startgamma": [None, None],
+                "hologram_offset": {"+": 3.0, "-": 0.5},
+                "output": [True, True],
+                "return_format": "dict",
+            },
+        )
+        self.assertEqual(result["hologram_offsets"], {"+": 3.0, "-": 0.5})
+
     def test_data_dict_round_trip_supports_path_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / "data.hdf5"
