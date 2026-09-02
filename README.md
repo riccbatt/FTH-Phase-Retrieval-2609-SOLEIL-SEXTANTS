@@ -1,6 +1,15 @@
-# FTH and Phase Retrieval Notebook Workflow
+# FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS
 
 This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The numbered reconstruction notebooks share one HDF5 data dictionary in `processed/Logs/`.
+
+All notebooks use the directory in which they are currently running as
+`BASEFOLDER`. Raw SEXTANTS data are loaded from:
+
+```python
+RAW_FOLDER = "/home/experiences/sextants/com-sextants/ruche/sextants-soleil/com-sextants/COMET_20260902_Cocoons_Laser/"
+```
+
+Every generated result is written below `BASEFOLDER/processed/`.
 
 FTH and phase-retrieval result figures are written directly to `processed/`.
 Paintable detector masks live in `processed/mask_pixels/`, and support masks
