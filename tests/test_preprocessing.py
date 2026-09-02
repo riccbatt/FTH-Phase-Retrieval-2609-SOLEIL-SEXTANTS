@@ -136,6 +136,9 @@ class PreprocessingTests(unittest.TestCase):
             cells = json.load(handle)["cells"]
         source = "".join(line for cell in cells for line in cell.get("source", []))
         self.assertRegex(source, r"(?m)^im_id = \d+")
+        self.assertRegex(source, r"(?m)^topo_id = \d+")
+        self.assertIn("im_id = 95", source)
+        self.assertIn("topo_id = 96", source)
         self.assertIn("data_recon_ImId_{im_id:04d}", source)
         self.assertNotIn("data_recon_ImId_0095", source)
 
