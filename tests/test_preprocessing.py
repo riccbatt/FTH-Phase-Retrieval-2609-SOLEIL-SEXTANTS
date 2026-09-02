@@ -244,6 +244,8 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn("topo_id = 96", source)
         self.assertIn("data_recon_ImId_{im_id:04d}", source)
         self.assertNotIn("data_recon_ImId_0095", source)
+        self.assertIn('"hologram_intensity_cutoff_vmin": offset_vmin', source)
+        self.assertIn('"hologram_offset": 0.0', source)
 
     def test_diode_scan_discovers_channels_and_saves_hdf5_and_png(self):
         with tempfile.TemporaryDirectory() as folder:
