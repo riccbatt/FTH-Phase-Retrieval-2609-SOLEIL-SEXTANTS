@@ -30,6 +30,8 @@ class Frame:
 class RawLoader(Protocol):
     def load(self, image_id: int | str) -> Frame: ...
 
+    def load_stack(self, image_id: int | str) -> Frame: ...
+
 
 def image_ids(value: int | str | Sequence[int | str]) -> list[int | str]:
     """Return one or more acquisition IDs as a non-empty list.
@@ -68,11 +70,47 @@ def load_average(
     )
     return Frame(
         image_id=",".join(frame.image_id for frame in frames),
-        image=np.mean([frame.image for frame in frames], axis=0),
+        image=np.mean(
+            [np.asarray(frame.image, dtype=np.float64) for frame in frames], axis=0
+        ),
         exposure=float(np.mean([frame.exposure for frame in frames])),
         source=frames[0].source,
         metadata=metadata,
     )
+
+
+def load_processing(
+    loader: RawLoader, ids: int | str | Sequence[int | str]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load unreduced detector frames and return ``(average, frames)``.
+
+    This restores the historical notebook convention. ``ids`` may be one
+    acquisition ID or a list; for a list, all acquisitions are concatenated
+    along the frame axis before calculating the arithmetic mean.
+    """
+    requested_ids = image_ids(ids)
+    stacks = []
+    detector_shape: tuple[int, int] | None = None
+    for image_id in requested_ids:
+        loaded = loader.load_stack(image_id)
+        # Convert integer detector counts before any averaging or cleaning.
+        stack = np.asarray(loaded.image, dtype=np.float64)
+        if stack.ndim != 3:
+            raise ValueError(
+                f"Expected a 3-D detector stack for ID {image_id}, got {stack.shape}"
+            )
+        if detector_shape is None:
+            detector_shape = stack.shape[-2:]
+        elif stack.shape[-2:] != detector_shape:
+            raise ValueError(
+                "Cannot join detector stacks with different image shapes: "
+                f"{detector_shape} and {stack.shape[-2:]}"
+            )
+        stacks.append(stack)
+
+    frames = np.concatenate(stacks, axis=0)
+    average = np.mean(frames, axis=0, dtype=np.float64)
+    return average, frames
 
 
 def _first_dataset(handle: h5py.File, candidates: tuple[str, ...]) -> tuple[str, Any]:
@@ -200,10 +238,15 @@ class SextantsNexusLoader(NexusLoader):
             long_name = _text(dataset.attrs.get("long_name", "")).lower()
             if dataset.name.rsplit("/", 1)[-1] != "data_03" and "ccd-ts" not in long_name:
                 continue
-            values = np.asarray(dataset[()]).squeeze()
-            if values.size != 1:
-                raise ValueError(f"CCD distance dataset {dataset.name} is not scalar")
-            ccd_ts_mm = float(values)
+            values = np.asarray(dataset[()], dtype=float).reshape(-1)
+            if values.size == 0 or not np.all(np.isfinite(values)):
+                raise ValueError(f"CCD distance dataset {dataset.name} is empty or invalid")
+            if not np.allclose(values, values[0]):
+                raise ValueError(
+                    f"CCD distance changes within {dataset.name}; "
+                    "one distance cannot describe the full detector stack"
+                )
+            ccd_ts_mm = float(values[0])
             return dataset.name.lstrip("/"), (700.0 - ccd_ts_mm) / 1000.0
         return None
 
@@ -233,6 +276,21 @@ class SextantsNexusLoader(NexusLoader):
         return f"{entry}/scan_data/{key}", dataset
 
     def load(self, image_id: int | str) -> Frame:
+        stacked = self.load_stack(image_id)
+        image = np.asarray(stacked.image, dtype=float)
+        exposures = np.asarray(stacked.metadata["frame_exposures"], dtype=float)
+        if self.frame_reduction == "mean":
+            image = image.mean(axis=0)
+            exposure = float(exposures.mean())
+        elif self.frame_reduction == "sum":
+            image = image.sum(axis=0)
+            exposure = float(exposures.sum())
+        else:
+            raise ValueError("frame_reduction must be 'mean' or 'sum'")
+        return Frame(str(image_id), image, _scalar(exposure, "exposure"), stacked.source, stacked.metadata)
+
+    def load_stack(self, image_id: int | str) -> Frame:
+        """Load a SEXTANTS acquisition without reducing its frame axis."""
         source = self.path_for(image_id)
         with h5py.File(source, "r") as handle:
             entries = [key for key in handle if isinstance(handle[key], h5py.Group)]
@@ -264,23 +322,24 @@ class SextantsNexusLoader(NexusLoader):
                 except (KeyError, ValueError):
                     pass
 
-        image = np.asarray(raw_image, dtype=float).squeeze()
+        image = np.asarray(raw_image, dtype=float)
+        while image.ndim > 3 and image.shape[0] == 1:
+            image = image[0]
+        if image.ndim == 2:
+            image = image[None, :, :]
+        if image.ndim != 3:
+            raise ValueError(f"Expected a 3-D detector stack, got shape {image.shape}")
         exposures = np.asarray(raw_exposure, dtype=float).reshape(-1)
-        if image.ndim > 2:
-            if self.frame_reduction == "mean":
-                image = image.mean(axis=0)
-                exposure = float(exposures.mean())
-            elif self.frame_reduction == "sum":
-                image = image.sum(axis=0)
-                exposure = float(exposures.sum())
-            else:
-                raise ValueError("frame_reduction must be 'mean' or 'sum'")
-        else:
-            exposure = _scalar(exposures, "exposure")
-        if image.ndim != 2:
-            raise ValueError(f"Expected a 2-D detector image, got shape {image.shape}")
-        exposure = _scalar(exposure, "exposure")
-        return Frame(str(image_id), image, exposure, source, metadata)
+        if exposures.size == 1:
+            exposures = np.repeat(exposures, image.shape[0])
+        if exposures.size != image.shape[0]:
+            raise ValueError(
+                f"Exposure count {exposures.size} does not match frame count {image.shape[0]}"
+            )
+        if not np.all(np.isfinite(exposures)) or np.any(exposures <= 0):
+            raise ValueError("Frame exposures must be finite and positive")
+        metadata["frame_exposures"] = exposures
+        return Frame(str(image_id), image, float(exposures.mean()), source, metadata)
 
 
 class SpeLoader:

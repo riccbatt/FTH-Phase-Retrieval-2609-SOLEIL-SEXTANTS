@@ -7,7 +7,13 @@ import h5py
 import numpy as np
 
 from library.beamstop_stitching import stitch_exposures
-from library.data_loading import Frame, NexusLoader, SextantsNexusLoader, load_average
+from library.data_loading import (
+    Frame,
+    NexusLoader,
+    SextantsNexusLoader,
+    load_average,
+    load_processing,
+)
 from library.mask_store import MaskStore, load_red_mask_png
 from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inventory
 from library import fth_phase_workflow
@@ -477,6 +483,55 @@ class PreprocessingTests(unittest.TestCase):
             self.assertEqual(frame.metadata["ccd_dist_m"], 0.5)
             self.assertTrue(frame.metadata["ccd_dist_path"].endswith("data_03"))
             self.assertTrue(frame.metadata["image_path"].endswith("data_21"))
+
+    def test_sextants_loader_can_preserve_the_frame_axis(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scanx_0024.nxs"
+            with h5py.File(path, "w") as handle:
+                scan_data = handle.create_group("scan_0024/scan_data")
+                detector = scan_data.create_dataset(
+                    "data_21", data=np.arange(24).reshape(2, 3, 4)
+                )
+                detector.attrs["interpretation"] = "image"
+                scan_data["integration_times"] = [1.0, 2.0]
+            loader = SextantsNexusLoader(folder)
+            stack = loader.load_stack(24)
+            averaged = loader.load(24)
+            self.assertEqual(stack.image.shape, (2, 3, 4))
+            np.testing.assert_array_equal(
+                stack.metadata["frame_exposures"], [1.0, 2.0]
+            )
+            np.testing.assert_allclose(averaged.image, stack.image.mean(axis=0))
+
+    def test_sextants_loader_accepts_constant_per_frame_ccd_distance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scanx_0413.nxs"
+            with h5py.File(path, "w") as handle:
+                scan_data = handle.create_group("scan_0413/scan_data")
+                detector = scan_data.create_dataset(
+                    "data_24", data=np.ones((3, 4, 5), dtype=np.uint32)
+                )
+                detector.attrs["interpretation"] = "image"
+                scan_data["integration_times"] = [0.05, 0.05, 0.05]
+                distance = scan_data.create_dataset("data_03", data=[200.0] * 3)
+                distance.attrs["long_name"] = "ccd-ts/position"
+
+            frame = SextantsNexusLoader(folder).load_stack(413)
+            self.assertEqual(frame.image.shape, (3, 4, 5))
+            self.assertEqual(frame.metadata["ccd_dist_m"], 0.5)
+
+    def test_load_processing_returns_average_and_joined_3d_frames(self):
+        class StackLoader:
+            def load_stack(self, image_id):
+                values = np.full((int(image_id), 2, 3), int(image_id), dtype=np.uint32)
+                return Frame(str(image_id), values, 1.0, Path(f"{image_id}.nxs"))
+
+        average, frames = load_processing(StackLoader(), [1, 2])
+        self.assertEqual(frames.shape, (3, 2, 3))
+        self.assertTrue(np.issubdtype(frames.dtype, np.floating))
+        self.assertTrue(np.issubdtype(average.dtype, np.floating))
+        np.testing.assert_array_equal(frames[:, 0, 0], [1.0, 2.0, 2.0])
+        np.testing.assert_allclose(average, np.full((2, 3), 5.0 / 3.0))
 
 
 if __name__ == "__main__":
