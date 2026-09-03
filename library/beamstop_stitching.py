@@ -21,6 +21,7 @@ class PreparedFrame:
     shift: tuple[float, float]
     coefficients: tuple[float, ...]
     original_index: int
+    fit_input: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -108,17 +109,27 @@ def stitch_images(
     max_shift: float | tuple[float, float] | None = 10.0,
     upsample_factor: int = 10,
     fit_intensity: bool = True,
+    fit_degree: int = 1,
     fit_percentiles: tuple[float, float] = (2.0, 98.0),
     estimation_roi: tuple[slice, slice] | None = None,
+    use_master_where_valid: bool = False,
 ) -> StitchResult:
     """Align and average images of one scattering pattern.
 
-    The first image is the reference. Registration and the optional linear
-    ``reference = factor * moving + offset`` fit use only pixels that are valid
-    in both images. Every calibrated image contributes equally wherever its
-    shifted beamstop mask is open.
+    The first image is the reference. Registration and intensity calibration
+    use only pixels that are valid in both images. ``fit_degree=1`` fits a
+    factor and offset; larger values fit a polynomial. If
+    ``use_master_where_valid`` is true, auxiliary images contribute only where
+    the first image is masked or otherwise invalid.
     """
     shape = _validate(frames, masks)
+    if fit_intensity and (not isinstance(fit_degree, int) or fit_degree < 1):
+        raise ValueError("fit_degree must be an integer of at least 1")
+    identity_coefficients = (
+        tuple([0.0] * (fit_degree - 1) + [1.0, 0.0])
+        if fit_intensity
+        else (1.0, 0.0)
+    )
     reference = np.asarray(frames[0].image, dtype=float)
     reference_valid = (~np.asarray(masks[0], dtype=bool)) & np.isfinite(reference)
     estimation_region = np.ones(shape, dtype=bool)
@@ -134,8 +145,9 @@ def stitch_images(
             reference_valid.copy(),
             float(frames[0].exposure),
             (0.0, 0.0),
-            (1.0, 0.0),
+            identity_coefficients,
             0,
+            reference.copy(),
         )
     ]
 
@@ -143,7 +155,7 @@ def stitch_images(
         image = np.asarray(frames[index].image, dtype=float)
         valid = (~np.asarray(masks[index], dtype=bool)) & np.isfinite(image)
         measured_shift = (0.0, 0.0)
-        coefficients = (1.0, 0.0)
+        coefficients = identity_coefficients
 
         if register:
             image, valid, measured_shift = _register(
@@ -157,10 +169,11 @@ def stitch_images(
             )
             valid &= np.isfinite(image)
 
+        fit_input = image.copy()
         overlap = reference_valid & valid & estimation_region
         if fit_intensity:
             image, coefficients = _fit_intensity(
-                reference, image, overlap, 1, fit_percentiles
+                reference, image, overlap, fit_degree, fit_percentiles
             )
 
         prepared.append(
@@ -172,15 +185,27 @@ def stitch_images(
                 measured_shift,
                 coefficients,
                 index,
+                fit_input,
             )
         )
 
     image_sum = np.zeros(shape, dtype=float)
     source_count = np.zeros(shape, dtype=np.int32)
-    for item in prepared:
-        usable = item.valid & np.isfinite(item.image)
-        image_sum[usable] += item.image[usable]
-        source_count[usable] += 1
+    if use_master_where_valid:
+        master = prepared[0]
+        master_usable = master.valid & np.isfinite(master.image)
+        image_sum[master_usable] = master.image[master_usable]
+        source_count[master_usable] = 1
+        fill_region = ~master_usable
+        for item in prepared[1:]:
+            usable = fill_region & item.valid & np.isfinite(item.image)
+            image_sum[usable] += item.image[usable]
+            source_count[usable] += 1
+    else:
+        for item in prepared:
+            usable = item.valid & np.isfinite(item.image)
+            image_sum[usable] += item.image[usable]
+            source_count[usable] += 1
 
     stitched = np.divide(
         image_sum,

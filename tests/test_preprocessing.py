@@ -505,6 +505,51 @@ class PreprocessingTests(unittest.TestCase):
         np.testing.assert_allclose(result.prepared_frames[1].coefficients, (2.5, 7.0))
         np.testing.assert_array_equal(result.source_count, 2)
 
+    def test_master_pixels_are_kept_and_auxiliary_images_only_fill_its_mask(self):
+        master = np.arange(100.0).reshape(10, 10) + 10
+        auxiliary = (master - 5) / 2
+        master_mask = np.zeros_like(master, dtype=bool)
+        master_mask[:, :3] = True
+        frames = [
+            Frame("master", master, 1.0, Path("master")),
+            Frame("auxiliary", auxiliary, 1.0, Path("auxiliary")),
+        ]
+
+        result = stitch_images(
+            frames,
+            [master_mask, np.zeros_like(master_mask)],
+            register=False,
+            fit_intensity=True,
+            fit_percentiles=(0, 100),
+            use_master_where_valid=True,
+        )
+
+        np.testing.assert_allclose(result.image, master)
+        np.testing.assert_array_equal(result.source_count, 1)
+
+    def test_same_pattern_stitch_supports_nonlinear_intensity_fit(self):
+        moving = np.linspace(1, 20, 400).reshape(20, 20)
+        master = 0.25 * moving**2 + 1.5 * moving + 8
+        frames = [
+            Frame("master", master, 1.0, Path("master")),
+            Frame("auxiliary", moving, 1.0, Path("auxiliary")),
+        ]
+        masks = [np.zeros_like(master), np.zeros_like(master)]
+
+        result = stitch_images(
+            frames,
+            masks,
+            register=False,
+            fit_intensity=True,
+            fit_degree=2,
+            fit_percentiles=(0, 100),
+        )
+
+        np.testing.assert_allclose(
+            result.prepared_frames[1].coefficients, (0.25, 1.5, 8.0), atol=1e-10
+        )
+        np.testing.assert_allclose(result.image, master, atol=1e-10)
+
     def test_mask_store_round_trip(self):
         with tempfile.TemporaryDirectory() as folder:
             store = MaskStore(folder)
