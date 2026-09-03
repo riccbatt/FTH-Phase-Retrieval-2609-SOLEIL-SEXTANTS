@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from library.beamstop_stitching import stitch_exposures
+from library.beamstop_stitching import shift_mask, stitch_exposures, stitch_images
 from library.data_loading import (
     Frame,
     NexusLoader,
@@ -427,6 +427,61 @@ class PreprocessingTests(unittest.TestCase):
             fit_percentiles=(0, 100),
         )
         np.testing.assert_allclose(result.image, base * 10, rtol=1e-10, atol=1e-10)
+
+    def test_same_pattern_stitch_fits_factor_offset_and_averages_valid_pixels(self):
+        reference = np.arange(100.0).reshape(10, 10) + 10
+        moving = (reference - 7.0) / 2.5
+        masks = [np.zeros((10, 10), bool), np.zeros((10, 10), bool)]
+        masks[0][:, :2] = True
+        masks[1][:, -2:] = True
+        frames = [
+            Frame("a", reference, 1.0, Path("a")),
+            Frame("b", moving, 1.0, Path("b")),
+        ]
+
+        result = stitch_images(
+            frames, masks, register=False, fit_intensity=True,
+            fit_percentiles=(0, 100),
+        )
+
+        np.testing.assert_allclose(result.image, reference, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(result.prepared_frames[1].coefficients, (2.5, 7.0))
+        np.testing.assert_array_equal(result.source_count[:, :2], 1)
+        np.testing.assert_array_equal(result.source_count[:, 2:-2], 2)
+        np.testing.assert_array_equal(result.source_count[:, -2:], 1)
+
+    def test_shift_mask_uses_row_column_shift(self):
+        mask = np.zeros((5, 6), dtype=bool)
+        mask[1, 2] = True
+        shifted = shift_mask(mask, (2, -1))
+        expected = np.zeros_like(mask)
+        expected[3, 1] = True
+        np.testing.assert_array_equal(shifted, expected)
+
+    def test_same_pattern_stitch_recovers_image_translation(self):
+        from scipy.ndimage import shift as translate
+
+        rows, columns = np.mgrid[:96, :96]
+        reference = np.exp(-((rows - 35) ** 2 + (columns - 57) ** 2) / 72)
+        reference += 0.7 * np.exp(
+            -((rows - 68) ** 2 + (columns - 25) ** 2) / 162
+        )
+        moving = translate(reference, (2, -3), order=1, mode="constant", cval=0)
+        frames = [
+            Frame("reference", reference, 1.0, Path("reference")),
+            Frame("moving", moving, 1.0, Path("moving")),
+        ]
+        masks = [np.zeros_like(reference), np.zeros_like(reference)]
+
+        result = stitch_images(
+            frames, masks, register=True, max_shift=5, fit_intensity=False
+        )
+
+        np.testing.assert_allclose(result.prepared_frames[1].shift, (-2, 3))
+        overlap = result.prepared_frames[1].valid
+        np.testing.assert_allclose(
+            result.prepared_frames[1].image[overlap], reference[overlap], atol=1e-12
+        )
 
     def test_mask_store_round_trip(self):
         with tempfile.TemporaryDirectory() as folder:

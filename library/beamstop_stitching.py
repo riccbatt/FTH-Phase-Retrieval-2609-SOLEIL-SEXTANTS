@@ -82,6 +82,108 @@ def _fit_intensity(reference, moving, overlap, degree, fit_percentiles):
     return np.polyval(coefficients, moving), tuple(float(v) for v in coefficients)
 
 
+def shift_mask(mask: np.ndarray, shift: tuple[float, float]) -> np.ndarray:
+    """Move a detector mask by ``(row_shift, column_shift)`` pixels."""
+    shifted = ndi_shift(
+        np.asarray(mask, dtype=float), shift, order=0, mode="constant", cval=0
+    )
+    return shifted > 0.5
+
+
+def stitch_images(
+    frames: Sequence[Frame],
+    masks: Sequence[np.ndarray],
+    *,
+    register: bool = True,
+    max_shift: float | tuple[float, float] | None = 10.0,
+    upsample_factor: int = 10,
+    fit_intensity: bool = True,
+    fit_percentiles: tuple[float, float] = (2.0, 98.0),
+) -> StitchResult:
+    """Align and average images of one scattering pattern.
+
+    The first image is the reference. Registration and the optional linear
+    ``reference = factor * moving + offset`` fit use only pixels that are valid
+    in both images. Every calibrated image contributes equally wherever its
+    shifted beamstop mask is open.
+    """
+    shape = _validate(frames, masks)
+    reference = np.asarray(frames[0].image, dtype=float)
+    reference_valid = (~np.asarray(masks[0], dtype=bool)) & np.isfinite(reference)
+    prepared = [
+        PreparedFrame(
+            frames[0].image_id,
+            reference.copy(),
+            reference_valid.copy(),
+            float(frames[0].exposure),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            0,
+        )
+    ]
+
+    for index in range(1, len(frames)):
+        image = np.asarray(frames[index].image, dtype=float)
+        valid = (~np.asarray(masks[index], dtype=bool)) & np.isfinite(image)
+        measured_shift = (0.0, 0.0)
+        coefficients = (1.0, 0.0)
+
+        if register:
+            image, valid, measured_shift = _register(
+                reference,
+                image,
+                reference_valid,
+                valid,
+                upsample_factor,
+                max_shift,
+            )
+            valid &= np.isfinite(image)
+
+        overlap = reference_valid & valid
+        if fit_intensity:
+            image, coefficients = _fit_intensity(
+                reference, image, overlap, 1, fit_percentiles
+            )
+
+        prepared.append(
+            PreparedFrame(
+                frames[index].image_id,
+                image,
+                valid,
+                float(frames[index].exposure),
+                measured_shift,
+                coefficients,
+                index,
+            )
+        )
+
+    image_sum = np.zeros(shape, dtype=float)
+    source_count = np.zeros(shape, dtype=np.int32)
+    for item in prepared:
+        usable = item.valid & np.isfinite(item.image)
+        image_sum[usable] += item.image[usable]
+        source_count[usable] += 1
+
+    stitched = np.divide(
+        image_sum,
+        source_count,
+        out=np.full(shape, np.nan, dtype=float),
+        where=source_count > 0,
+    )
+    missing_mask = source_count == 0
+    source_exposure = np.full(shape, np.nan, dtype=float)
+    source_exposure[~missing_mask] = 1.0
+    return StitchResult(
+        stitched,
+        missing_mask,
+        source_count,
+        source_exposure,
+        1.0,
+        tuple(frame.image_id for frame in frames),
+        tuple(prepared),
+    )
+
+
 def stitch_exposures(
     frames: Sequence[Frame],
     masks: Sequence[np.ndarray],
