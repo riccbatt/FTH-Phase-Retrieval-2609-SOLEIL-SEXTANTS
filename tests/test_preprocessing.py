@@ -483,6 +483,28 @@ class PreprocessingTests(unittest.TestCase):
             result.prepared_frames[1].image[overlap], reference[overlap], atol=1e-12
         )
 
+    def test_stitch_estimation_roi_limits_fit_but_not_final_coverage(self):
+        reference = np.arange(100.0).reshape(10, 10) + 10
+        moving = (reference - 7.0) / 2.5
+        moving[:2] = 10000  # Deliberately corrupt pixels outside the fit ROI.
+        frames = [
+            Frame("reference", reference, 1.0, Path("reference")),
+            Frame("moving", moving, 1.0, Path("moving")),
+        ]
+        masks = [np.zeros_like(reference), np.zeros_like(reference)]
+
+        result = stitch_images(
+            frames,
+            masks,
+            register=False,
+            fit_intensity=True,
+            fit_percentiles=(0, 100),
+            estimation_roi=np.s_[2:8, 2:8],
+        )
+
+        np.testing.assert_allclose(result.prepared_frames[1].coefficients, (2.5, 7.0))
+        np.testing.assert_array_equal(result.source_count, 2)
+
     def test_mask_store_round_trip(self):
         with tempfile.TemporaryDirectory() as folder:
             store = MaskStore(folder)

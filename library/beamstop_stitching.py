@@ -48,8 +48,18 @@ def _validate(frames: Sequence[Frame], masks: Sequence[np.ndarray]) -> tuple[int
     return shape
 
 
-def _register(reference, moving, reference_valid, moving_valid, upsample_factor, max_shift):
+def _register(
+    reference,
+    moving,
+    reference_valid,
+    moving_valid,
+    upsample_factor,
+    max_shift,
+    estimation_region=None,
+):
     overlap = reference_valid & moving_valid
+    if estimation_region is not None:
+        overlap &= estimation_region
     if overlap.sum() < 16:
         raise ValueError("At least 16 common valid pixels are required for registration")
     ref_work = np.where(overlap, reference, np.nanmedian(reference[overlap]))
@@ -99,6 +109,7 @@ def stitch_images(
     upsample_factor: int = 10,
     fit_intensity: bool = True,
     fit_percentiles: tuple[float, float] = (2.0, 98.0),
+    estimation_roi: tuple[slice, slice] | None = None,
 ) -> StitchResult:
     """Align and average images of one scattering pattern.
 
@@ -110,6 +121,12 @@ def stitch_images(
     shape = _validate(frames, masks)
     reference = np.asarray(frames[0].image, dtype=float)
     reference_valid = (~np.asarray(masks[0], dtype=bool)) & np.isfinite(reference)
+    estimation_region = np.ones(shape, dtype=bool)
+    if estimation_roi is not None:
+        estimation_region[:] = False
+        estimation_region[estimation_roi] = True
+        if estimation_region.sum() < 16:
+            raise ValueError("estimation_roi must contain at least 16 pixels")
     prepared = [
         PreparedFrame(
             frames[0].image_id,
@@ -136,10 +153,11 @@ def stitch_images(
                 valid,
                 upsample_factor,
                 max_shift,
+                estimation_region,
             )
             valid &= np.isfinite(image)
 
-        overlap = reference_valid & valid
+        overlap = reference_valid & valid & estimation_region
         if fit_intensity:
             image, coefficients = _fit_intensity(
                 reference, image, overlap, 1, fit_percentiles
