@@ -15,6 +15,11 @@ from library.data_loading import (
     load_processing,
 )
 from library.mask_store import MaskStore, load_red_mask_png
+from library.image_preprocessing import (
+    fit_dark_frame,
+    fit_horizontal_band,
+    load_detector_masks,
+)
 from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inventory
 from library import fth_phase_workflow
 from library import fthcore
@@ -23,6 +28,62 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_detector_and_beamstop_masks_form_clipped_union(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            detector = np.zeros((3, 4, 3), dtype=np.uint8)
+            beamstop = np.zeros((3, 4, 3), dtype=np.uint8)
+            detector[0, 0] = (255, 0, 0)
+            detector[1, 1] = (255, 0, 0)
+            beamstop[1, 1] = (255, 0, 0)
+            beamstop[2, 3] = (255, 0, 0)
+            Image.fromarray(detector).save(folder / "mask_detector.png")
+            Image.fromarray(beamstop).save(folder / "mask_beamstop_7.png")
+            fixed, moving, combined = load_detector_masks(folder, 7, (3, 4))
+            self.assertEqual(int(fixed.sum()), 2)
+            self.assertEqual(int(moving.sum()), 2)
+            self.assertEqual(int(combined.sum()), 3)
+            np.testing.assert_array_equal(combined, np.clip(fixed + moving, 0, 1))
+
+    def test_dark_fit_ignores_masked_pixels(self):
+        dark = np.arange(16, dtype=float).reshape(4, 4)
+        frame = 2.5 * dark + 7.0
+        frame[0, 0] = 10000
+        mask = np.zeros_like(dark, dtype=np.uint8)
+        mask[0, 0] = 1
+        corrected, scale, offset, _, used = fit_dark_frame(
+            frame, dark, slice(None), slice(None), mask=mask
+        )
+        self.assertEqual(used.sum(), 15)
+        self.assertAlmostEqual(scale, 2.5)
+        self.assertAlmostEqual(offset, 7.0)
+        np.testing.assert_allclose(corrected[mask == 0], 0, atol=1e-10)
+
+    def test_horizontal_band_fit_supports_arbitrary_polynomial_order(self):
+        row_count, column_count = 120, 40
+        rows = np.arange(row_count, dtype=float)
+        centered = rows - row_count / 2
+        polynomial = 20 + 0.03 * centered + 0.002 * centered**2
+        band = -8 * (
+            (rows >= 50) & (rows <= 70)
+        ).astype(float)
+        pattern = np.repeat((polynomial + band)[:, None], column_count, axis=1)
+        result = fit_horizontal_band(
+            pattern,
+            edge_columns=10,
+            polynomial_order=2,
+            band_center=60,
+            band_width=20,
+            band_edge=1,
+            band_amplitude=8,
+        )
+        self.assertEqual(result.polynomial_coefficients.shape, (3,))
+        self.assertEqual(result.band_image.shape, pattern.shape)
+        self.assertLess(result.band_profile.min(), -6)
+        self.assertAlmostEqual(result.band_center, 60, delta=2)
+
     def test_mode_values_expand_a_shared_support_spatially(self):
         support = np.zeros((9, 9), dtype=np.uint8)
         support[3:6, 3:6] = 1
@@ -77,7 +138,7 @@ class PreprocessingTests(unittest.TestCase):
         self.assertTrue(np.all((smooth >= 0) & (smooth <= 1)))
         np.testing.assert_array_equal(binary, original)
 
-    def test_fth_notebook_automatically_uses_saved_user_masks(self):
+    def test_fth_notebook_uses_explicit_detector_and_beamstop_masks(self):
         root = Path(__file__).parents[1]
         with (root / "01_FTH.ipynb").open(encoding="utf-8") as handle:
             source = "".join(
@@ -85,10 +146,17 @@ class PreprocessingTests(unittest.TestCase):
                 for cell in json.load(handle)["cells"]
                 for line in cell.get("source", [])
             )
-        self.assertIn('mask_store.exists(first_image_id)', source)
-        self.assertIn('mask_id = first_image_id', source)
-        self.assertIn('state["mask_pixel_raw"] = mask_store.load(', source)
-        self.assertIn("mask_multiplier = (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)", source)
+        self.assertIn('MASK_DETECTOR_FILE = MASK_FOLDER / "mask_detector.png"', source)
+        self.assertIn('PLUS_BEAMSTOP_MASK_FILE', source)
+        self.assertIn('load_detector_masks(', source)
+        self.assertIn('fit_dark_frame(', source)
+        self.assertIn('mask=mask_detector', source)
+        self.assertIn('state["mask_detector_c"] + state["mask_beamstop_c"]', source)
+        self.assertIn("MASK_PIXEL_DILATION =", source)
+        self.assertIn("MASK_PIXEL_BLUR_SIGMA =", source)
+        self.assertIn("BUTTERWORTH_RADIUS =", source)
+        self.assertIn("BUTTERWORTH_ORDER =", source)
+        self.assertIn("mask_multiplier = (1 - mask_pixel_fth) * (1 - mask_beamstop_smooth)", source)
 
     def test_support_preview_uses_float_smoothed_pixel_mask(self):
         root = Path(__file__).parents[1]
@@ -101,9 +169,10 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn("mask_pixel.astype(float)", source)
         self.assertIn("mask_pixel_fth = wf.smooth_binary_mask(", source)
         self.assertIn(
-            "holo_for_support = sum_c * (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)",
+            "holo = holo_unmasked * (1 - mask_beamstop_smooth) * (1 - mask_pixel_fth)",
             source,
         )
+        self.assertIn("recon = wf.fth_reconstruct(", source)
         self.assertIn("supportmask = (supportmask > 0).astype(np.uint8)", source)
 
     def test_unified_phase_retrieval_accepts_modes_crop_and_scalar_settings(self):
@@ -358,16 +427,13 @@ class PreprocessingTests(unittest.TestCase):
             self.assertEqual(len(final_save_cells), 1, notebook)
             self.assertIn("fig.savefig(png_name", final_save_cells[0], notebook)
 
-    def test_napari_preview_does_not_overwrite_mask_png(self):
+    def test_retired_mask_notebooks_are_archived(self):
         root = Path(__file__).parents[1]
-        with (root / "00a_define_mask_pixel_napari.ipynb").open(
-            encoding="utf-8"
-        ) as handle:
-            source = "\n".join(
-                "".join(cell.get("source", [])) for cell in json.load(handle)["cells"]
-            )
-        self.assertIn("saved_path.stem + '_preview.png'", source)
-        self.assertNotIn("preview_path = saved_path.with_suffix('.png')", source)
+        self.assertFalse((root / "00a_define_mask_pixel_napari.ipynb").exists())
+        self.assertFalse((root / "00_define_mask_pixel_paint.ipynb").exists())
+        self.assertTrue(
+            (root / "legacy/mask_creation_notebooks/00a_define_mask_pixel_napari.ipynb").exists()
+        )
 
     def test_support_notebook_offers_all_three_mask_methods(self):
         root = Path(__file__).parents[1]

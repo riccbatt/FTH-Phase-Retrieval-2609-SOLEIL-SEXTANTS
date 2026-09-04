@@ -6,22 +6,15 @@ All notebooks use the directory in which they are currently running as
 `BASEFOLDER`. Raw SEXTANTS data are loaded from:
 
 ```python
-RAW_FOLDER = Path("/nfs/ruche/sextants-soleil/com-sextants/COMET_20260902_Cocoons_Laser/")
+RAW_FOLDER = "/home/experiences/sextants/com-sextants/ruche/sextants-soleil/com-sextants/COMET_20260902_Cocoons_Laser/"
+RAW_FOLDER = "../COMET_20260902_Cocoons_Laser_raw/"
 ```
 
 Every generated result is written below `BASEFOLDER/processed/`.
 
 FTH and phase-retrieval result figures are written directly to `processed/`.
-Manually prepared detector masks live in `processed/mask_pixels/`, and support masks
+Paintable detector masks live in `processed/mask_pixels/`, and support masks
 live in `processed/supportmask/`.
-
-For the 3-D preprocessing workflow, the two raw-coordinate PNG inputs are
-`mask_detector.png` (fixed camera defects) and
-`mask_beamstop_<image-id>.png` (the beamstop for that acquisition). A value of
-one means unusable in both files. Notebook `01a` combines them as
-`mask_pixel = np.clip(mask_detector + mask_beamstop, 0, 1)`, saves the result
-beside the cleaned image, and notebook
-`01b` reloads that exact combined mask.
 
 `Diode_Scans.ipynb` handles one or several diode scans, including energy
 and magnetic-field scans. It discovers NeXus channels by name or metadata,
@@ -35,15 +28,13 @@ Use `00_inspect_nexus_metadata.ipynb` whenever you need to browse the complete
 NeXus tree, search dataset paths and attributes, or compare scalar metadata
 across scans. It avoids loading large detector arrays unless explicitly enabled.
 
-1. Manually prepare the red PNG masks described below.
-2. Choose one acquisition path:
-   - Direct raw workflow: open `01_FTH.ipynb`.
-   - Single-photon workflow: run `01a_preprocess_3d_holograms.ipynb`, then
-     `01b_FTH_from_cleaned_averages.ipynb`.
-3. Optionally run `00b_stitch_beamstops.ipynb` before FTH to compare and combine
-   images acquired with different beamstop positions.
-4. Open `03_define_supportmask.ipynb` to define the real-space support.
-5. Open `04_phase_retrieval.ipynb` to run phase retrieval and save the CDI result.
+1. Optionally define raw-coordinate detector masks before FTH using either `00_define_mask_pixel_paint.ipynb` (PNG/Paint) or `00a_define_mask_pixel_napari.ipynb` (interactive Napari). Create one mask per raw image used directly or in stitching.
+2. Optionally run `00b_stitch_beamstops.ipynb` to combine images acquired with different beamstops/exposures. Its output mask is the intersection of the aligned input masks, so only pixels covered in every input remain masked.
+3. Open `01_FTH.ipynb`.
+4. Set `USER`, the raw image IDs, and the `+`/`-` acquisition modes. For each input, `mask_id` selects a painted `mask_pixel_<image-id>.png` (or legacy `.npy`); `mask_id=None` uses no precise mask. Likewise, `dark_id=None` disables dark subtraction. Set `stitched_file` to a `00b` output to load a stitched image instead of the raw image.
+5. Run the notebook through the final save cell.
+6. Open `03_define_supportmask.ipynb` and define the support using one of three alternatives: Paint, Napari, or `(y, x, radius)` support coordinates.
+7. Open `04_phase_retrieval.ipynb`, adjust the phase retrieval recipe if needed, run phase retrieval, focus the CDI reconstruction, and save.
 
 ### Image series and hysteresis loops
 
@@ -90,48 +81,7 @@ Both series notebooks call `plt.close("all")` every `CLOSE_ALL_EVERY` pairs
 
 `library/data_loading.py` defines a common `Frame` result and loader registry. `SextantsNexusLoader` supports SOLEIL filenames such as `scanx_0589.nxs`, discovers the detector dataset from its NeXus image metadata (the numbered `data_21`/`data_22` key varies by detector and scan), reads `scan_data/integration_times`, and records energy, polarization, and detector provenance. `NexusLoader` remains available for configurable HDF5/NeXus layouts, while `SpeLoader` adapts the existing SPE reader by dependency injection.
 
-`01a_preprocess_3d_holograms.ipynb` uses the same loader notation and always
-receives `(blind_average, frame_stack)` from `load_processing`. Its optional
-horizontal-band correction fits the left/right detector-edge profile with an
-order-`N` polynomial plus a negative smoothed box. All fit parameters and the
-diagnostic plot are next to that operation. The polynomial background can be
-retained (default) or subtracted explicitly.
-
-The same optional band-fit block is present in direct `01_FTH.ipynb` and in
-`00b_stitch_beamstops.ipynb`, so raw images can be corrected even when the
-single-photon preprocessing route is not used.
-
-Both FTH notebooks construct the reconstruction mask in the same visible
-sequence: binary `mask_pixel`, dilation by `MASK_PIXEL_DILATION`, Gaussian edge
-blurring by `MASK_PIXEL_BLUR_SIGMA`, and a separate Butterworth exclusion set by
-`BUTTERWORTH_RADIUS` and `BUTTERWORTH_ORDER`. The notebook displays these two
-smooth exclusion masks and their final combined transmission before FTH.
-
-In `00b_stitch_beamstops.ipynb`, each `IMAGE_ID_GROUPS` entry is one stitching
-input and may be a single acquisition ID or a list to average. Parallel entries
-in `DARK_ID_GROUPS` may likewise be single IDs or lists, allowing every input
-group to use a different fitted dark. Set `INPUT_KIND="raw"` for that path or
-`INPUT_KIND="preprocessed"` to valid-pixel-average the files saved by notebook
-`01a`. Band fitting is performed independently for every averaged input group.
-
-Every active acquisition notebook loads the same two bright-red PNG mask types.
-`mask_detector.png` is fixed for the camera and is never shifted.
-`mask_beamstop_<id>.png` describes a beamstop and may be shifted in the stitching
-notebook. Their clipped sum is always called `mask_pixel`; one means unusable.
-Dark scaling and offset are fitted in a user-visible corner outside
-`mask_detector`. Polarization and stitching normalization use only pixels
-outside the complete `mask_pixel`.
-
-Detector files are converted to NumPy floating-point arrays immediately after
-loading and before subtraction, fitting, averaging, or reconstruction. Masks
-are NumPy `uint8` arrays containing only zero and one. PNG/Pillow objects are
-confined to the mask-loading boundary and are not passed into processing code.
-
-For interactive work, both FTH paths expose the same short NumPy names:
-`pos_raw`, `neg_raw`, `pos`, `neg`, `mask_pixel`, `holo`, and `recon`.
-Stitching similarly exposes `pos_reference`, `neg_reference`, `pos`, and `neg`.
-The nested dictionary is treated as a persistence/compatibility format rather
-than the interface a user needs for plotting or parameter adjustment.
+`library/mask_store.py` associates a raw-coordinate binary `mask_pixel` with an image ID. In every mask, `1` means unusable. It reads bright-red mask pixels from PNG and falls back to legacy NPY masks. It is deliberately centered only inside notebook 01, so changing the center does not invalidate the saved mask. `library/beamstop_stitching.py` normalizes by exposure, optionally registers and fits each input to the longest-exposure data, averages overlapping valid pixels at equal exposure, then fills gaps from progressively shorter exposures. Its output records the contributing count and exposure at every pixel.
 
 The current notebooks are configured for:
 
@@ -168,11 +118,9 @@ Use `01_FTH.ipynb` to define paths, raw scan IDs, polarization labels, detector 
 Main edits:
 
 - `USER`: user suffix in output filenames.
-- `PLUS_IMAGE_IDS`, `MINUS_IMAGE_IDS`: one ID or a list per polarization.
-- `PLUS_DARK_IDS`, `MINUS_DARK_IDS`: dark acquisitions used for fitted subtraction.
-- `PLUS_BEAMSTOP_MASK_ID`, `MINUS_BEAMSTOP_MASK_ID`: select the two visible
-  `mask_beamstop_<id>.png` filenames.
-- `POSITIVE_LABEL`, `REFERENCE_LABEL`: labels used for the FTH difference.
+- `RAW_DATA_KIND`: `"existing"` for the previous raw-data workflow or `"sextants_nexus"` for SOLEIL files.
+- `hologram_inputs`: maps the `+` and `-` modes to raw image IDs and optional dark/mask inputs.
+- `positive_label` and `reference_label`: labels used for the FTH difference hologram.
 - `mask_pixel_smooth_recipe`: smooth Butterworth disk mask parameters.
 
 Main outputs:
@@ -189,18 +137,18 @@ FTH and CDI focus propagation values are stored in micrometres, matching the
 calling the propagation kernel. Saved reconstructions also apply the selected
 `dx` and `dy` sub-pixel shifts.
 
-## Manually prepared detector masks
+## Notebook 00/00a: Raw Pixel Mask
 
-The active workflow no longer contains mask-drawing notebooks. Create these
-raw-coordinate PNGs manually, at the exact detector dimensions, with unusable
-pixels painted bright red (`255, 0, 0`):
+Before FTH, use either `00_define_mask_pixel_paint.ipynb` or
+`00a_define_mask_pixel_napari.ipynb` to define precise bad-pixel and beamstop
+masks in raw detector coordinates. They are alternative interfaces that produce
+the same per-image PNG masks.
 
-- `processed/mask_pixels/mask_detector.png` — fixed camera defects.
-- `processed/mask_pixels/mask_beamstop_<id>.png` — one reusable beamstop mask.
+- `IMAGE_IDS` lists every raw image whose mask should be created.
+- The Napari option supports `INITIAL_MASK_IDS` for loading compatible masks as templates.
+- Create a separate mask for every frame that uses a different beamstop.
 
-The `<id>` is a mask identifier selected explicitly in each notebook; it need
-not equal the acquisition ID. The archived Paint and Napari notebooks are in
-`legacy/mask_creation_notebooks/` for reference only.
+The canonical output is `processed/mask_pixels/mask_pixel_<image-id>.png`. Notebook 01 selects it with `mask_id`, centers it using the current center, and saves the centered mask into the reconstruction HDF5 file. Masked pixels are excluded from the FTH image and measured Fourier constraints during retrieval. See [PAINT_MASKS.md](PAINT_MASKS.md) for the Paint workflow and exact filenames.
 
 ## Notebook 03: Support Mask
 
@@ -212,9 +160,7 @@ Important steps:
 - Define `supportmask` by exactly one method: PNG/Paint, Napari labels, or `(y, x, radius)` support coordinates with the optional circle widget.
 - Save the support mask into the shared HDF5 file.
 
-Painted support masks are stored as `processed/supportmask/supportmask_<image-id>.png`;
-the older detailed instructions remain in
-[`legacy/mask_creation_notebooks/PAINT_MASKS.md`](legacy/mask_creation_notebooks/PAINT_MASKS.md).
+Painted support masks are stored as `processed/supportmask/supportmask_<image-id>.png`; see [PAINT_MASKS.md](PAINT_MASKS.md).
 
 Notebook 03 does not create `focus_cdi`. Notebook 04 uses `focus_cdi["roi"]` only if it already exists from a previous phase-retrieval save; otherwise `roi_cdi` defaults to the HDF5 FTH focus ROI, `focus["roi"]`.
 

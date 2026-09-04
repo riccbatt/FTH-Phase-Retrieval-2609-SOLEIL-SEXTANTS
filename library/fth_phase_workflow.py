@@ -17,7 +17,7 @@ from scipy.ndimage import binary_dilation, gaussian_filter, zoom
 
 def normalize_image(image: Any) -> np.ndarray:
     """Scale finite values to [0, 1], preserving the input shape."""
-    array = np.asarray(image)
+    array = np.asarray(image, dtype=float)
     finite = np.isfinite(array)
     if not finite.any():
         return np.zeros(array.shape, dtype=float)
@@ -324,11 +324,11 @@ def load_processing(folder: str | Path, image_id: int | str, crop: int | None = 
     if isinstance(loaded, np.lib.npyio.NpzFile):
         try:
             key = "image" if "image" in loaded.files else loaded.files[0]
-            image = np.asarray(loaded[key])
+            image = np.asarray(loaded[key], dtype=float)
         finally:
             loaded.close()
     else:
-        image = np.asarray(loaded)
+        image = np.asarray(loaded, dtype=float)
     if crop:
         image = image[crop:-crop, crop:-crop]
     return image, str(path)
