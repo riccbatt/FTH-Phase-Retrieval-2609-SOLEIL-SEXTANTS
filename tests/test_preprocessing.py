@@ -804,6 +804,10 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn('if input_kind == "raw"', source)
         self.assertIn('elif input_kind == "preprocessed"', source)
         self.assertNotIn('if INPUT_KIND == "raw"', source)
+        self.assertIn("def average_preprocessed_files(image_ids, beamstop_id)", source)
+        self.assertIn('if "mask_detector" in saved.files', source)
+        self.assertIn('elif "mask_pixel" in saved.files', source)
+        self.assertIn("load_detector_masks(", source)
 
     def test_stitched_output_saves_final_intersection_and_all_masks(self):
         root = Path(__file__).parents[1]
