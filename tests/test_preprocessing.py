@@ -136,6 +136,14 @@ class PreprocessingTests(unittest.TestCase):
                 notebook_path.name,
             )
 
+    def test_active_notebooks_use_simple_string_paths(self):
+        root = Path(__file__).parents[1]
+        for notebook_path in sorted(root.glob("*.ipynb")):
+            source = notebook_path.read_text(encoding="utf-8")
+            self.assertNotIn("from pathlib import Path", source, notebook_path.name)
+            self.assertNotIn("Path.cwd()", source, notebook_path.name)
+            self.assertNotIn("Path(\"/nfs/", source, notebook_path.name)
+
     def test_every_active_notebook_setup_cell_imports(self):
         """Run each active notebook's first import cell exactly as Jupyter does."""
         root = Path(__file__).parents[1]
@@ -317,7 +325,7 @@ class PreprocessingTests(unittest.TestCase):
                 for cell in json.load(handle)["cells"]
                 for line in cell.get("source", [])
             )
-        self.assertIn('MASK_DETECTOR_FILE = MASK_FOLDER / "mask_detector.png"', source)
+        self.assertIn('MASK_DETECTOR_FILE = join(MASK_FOLDER, "mask_detector.png")', source)
         self.assertIn('PLUS_BEAMSTOP_MASK_FILE', source)
         self.assertIn('load_detector_masks(', source)
         self.assertIn('fit_dark_frame(', source)
