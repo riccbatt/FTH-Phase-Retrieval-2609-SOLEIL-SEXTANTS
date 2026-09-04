@@ -5,8 +5,7 @@ from matplotlib.path import Path
 import scipy as sp
 from scipy.ndimage.filters import gaussian_filter
 
-# dipy
-from dipy.segment.mask import median_otsu
+# Dipy is optional and is imported only when the Otsu method is selected.
 
 # skimage
 import skimage.morphology
@@ -360,6 +359,12 @@ def automated_beamstop_center(image, threshold, radius, expand, method = "intens
         mask = image < threshold
 
     elif method == "otsu":
+        try:
+            from dipy.segment.mask import median_otsu
+        except ImportError as exc:
+            raise ImportError(
+                "method='otsu' requires the optional dipy package"
+            ) from exc
         # Some image preprocessing
         image[image<0]=0
         image = image +1 

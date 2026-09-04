@@ -27,12 +27,9 @@ from matplotlib.patches import Ellipse
 import ipywidgets
 import ipywidgets as widgets
 
-import pyFAI
-from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
-from pyFAI.detectors import Detector
-
 import skimage.morphology
-from dipy.segment.mask import median_otsu
+# PyFAI was imported here historically but is not used by this module.
+# Dipy is optional and is imported only when the Otsu method is selected.
 
 
 #########################################
@@ -732,6 +729,12 @@ class InteractiveAutoBeamstop:
             # Postprocessing
             hologram_mask = self.mask_postprocessing(hologram_mask, radius, expand)
         elif self.method == "otsu":
+            try:
+                from dipy.segment.mask import median_otsu
+            except ImportError as exc:
+                raise ImportError(
+                    "method='otsu' requires the optional dipy package"
+                ) from exc
             # Some image preprocessing
             hologram[hologram<0]=0
             hologram = hologram +1 

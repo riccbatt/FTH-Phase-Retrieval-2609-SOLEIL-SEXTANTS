@@ -30,6 +30,22 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_optional_dipy_is_not_required_during_library_import(self):
+        root = Path(__file__).parents[1]
+        modules = ["CCI_core", "interactive", "mask_lib"]
+        for module in modules:
+            source = (root / "library" / f"{module}.py").read_text(encoding="utf-8")
+            top_level = source.split("def ", 1)[0]
+            self.assertNotIn("from dipy", top_level, module)
+
+    def test_phase_retrieval_does_not_use_xp_errstate(self):
+        root = Path(__file__).parents[1]
+        phase_files = sorted(root.glob("library/phase_retrieval*.py"))
+        self.assertTrue(phase_files)
+        for path in phase_files:
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("xp.errstate", source, path.name)
+
     def test_plotting_notebooks_use_matplotlib_qt(self):
         root = Path(__file__).parents[1]
         plotting_notebooks = [

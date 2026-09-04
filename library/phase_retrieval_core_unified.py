@@ -30,6 +30,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 """
 
 import logging
+from contextlib import nullcontext
 log = logging.getLogger(__name__)
 
 from functools import partial
@@ -2176,6 +2177,7 @@ def Error_diffract_cp(guess, diffract):
     Num=xp.abs(diffract-guess)**2
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
-    with xp.errstate(divide="ignore", invalid="ignore"):
+    # CuPy does not consistently expose numpy.errstate across versions.
+    with np.errstate(divide="ignore", invalid="ignore") if xp is np else nullcontext():
         Error=10*xp.log10(Error)
     return to_numpy(Error, xp)

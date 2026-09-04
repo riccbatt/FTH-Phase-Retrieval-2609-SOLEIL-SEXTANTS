@@ -14,6 +14,7 @@ Riccardo Battistelli, Daniel Metternich, Michael Schneider, Lisa-Marie Kern, Kai
 """
 
 import logging
+from contextlib import nullcontext
 log = logging.getLogger(__name__)
 
 from functools import partial
@@ -1328,7 +1329,8 @@ def Error_diffract_cp(guess, diffract):
     Den=xp.abs(diffract)**2
     Error = Num.sum()/Den.sum()
     try:
-        with xp.errstate(divide="ignore", invalid="ignore"):
+        # CuPy does not consistently expose numpy.errstate across versions.
+        with np.errstate(divide="ignore", invalid="ignore") if xp is np else nullcontext():
             Error=10*xp.log10(Error)
     except FloatingPointError:
         Error = xp.inf

@@ -26,8 +26,7 @@ from scipy.ndimage.filters import gaussian_filter
 
 #Image registration
 from skimage.registration import phase_cross_correlation
-from dipy.align.transforms import AffineTransform2D, TranslationTransform2D
-from dipy.align.imaffine import MutualInformationMetric, AffineRegistration
+# Optional Dipy imports are intentionally deferred until method="dipy" is used.
 
 #Progress bar
 from tqdm.auto import tqdm
@@ -207,6 +206,13 @@ def image_registration(image_unproccessed,image_background, method= "phase_cross
             shift, error, diffphase = phase_cross_correlation(image_background[roi[2]:roi[3], image_unproccessed[roi[2]:roi[3], roi[0]:roi[1]], roi[0]:roi[1]], upsample_factor=100)
         
     elif method == "dipy":
+        try:
+            from dipy.align.transforms import TranslationTransform2D
+            from dipy.align.imaffine import MutualInformationMetric, AffineRegistration
+        except ImportError as exc:
+            raise ImportError(
+                "method='dipy' requires the optional dipy package"
+            ) from exc
         # Define your metric
         nbins = 32
         sampling_prop = None  # all pixels
