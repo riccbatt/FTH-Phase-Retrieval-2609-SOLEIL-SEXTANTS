@@ -170,8 +170,28 @@ def shift_image(image,shift,interpolation = True,out_dtype = 'numpy'):
 ###########################################
 
 
-def cimshow(im, title = None, **kwargs):
-    """Simple 2d image plot with adjustable contrast.
+def _cimshow_contrast_limits(im, vmin=None, vmax=None):
+    """Return the initial contrast and slider bounds used by :func:`cimshow`."""
+    cmin, cmax, data_min, data_max = np.nanpercentile(
+        im, [.1, 99.9, .0001, 99.9999]
+    )
+    slider_min = data_min if vmin is None else float(vmin)
+    slider_max = data_max if vmax is None else float(vmax)
+    if slider_max <= slider_min:
+        raise ValueError("cimshow requires vmax to be greater than vmin")
+    initial_min = cmin if vmin is None else slider_min
+    initial_max = cmax if vmax is None else slider_max
+    initial_min = float(np.clip(initial_min, slider_min, slider_max))
+    initial_max = float(np.clip(initial_max, slider_min, slider_max))
+    return initial_min, initial_max, slider_min, slider_max
+
+
+def cimshow(im, title=None, vmin=None, vmax=None, **kwargs):
+    """Simple 2-D image plot with adjustable contrast.
+
+    When ``vmin`` and ``vmax`` are supplied, they set both the initial image
+    contrast and the minimum/maximum slider bounds. When omitted, the original
+    percentile-based contrast and slider ranges are used.
     
     Returns matplotlib figure and axis created.
     """
@@ -183,12 +203,19 @@ def cimshow(im, title = None, **kwargs):
         ax.set_title(title0)
     
     im0 = im[0] if len(im.shape) == 3 else im
-    mm = ax.imshow(im0, **kwargs)
+    imshow_kwargs = dict(kwargs)
+    if vmin is not None:
+        imshow_kwargs["vmin"] = vmin
+    if vmax is not None:
+        imshow_kwargs["vmax"] = vmax
+    mm = ax.imshow(im0, **imshow_kwargs)
 
-    cmin, cmax, vmin, vmax = np.nanpercentile(im, [.1, 99.9, .0001, 99.9999])
-    # vmin, vmax = np.nanmin(im), np.nanmax(im)
+    cmin, cmax, slider_min, slider_max = _cimshow_contrast_limits(
+        im, vmin=vmin, vmax=vmax
+    )
     sl_contrast = FloatRangeSlider(
-        value=(cmin, cmax), min=vmin, max=vmax, step=(vmax - vmin) / 500,
+        value=(cmin, cmax), min=slider_min, max=slider_max,
+        step=(slider_max - slider_min) / 500,
         layout=ipywidgets.Layout(width='500px'),
     )
 

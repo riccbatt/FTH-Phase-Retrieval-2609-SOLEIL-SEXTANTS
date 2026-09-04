@@ -26,10 +26,26 @@ from library.nexus_inspection import inspect_nexus, scalar_metadata, search_inve
 from library import fth_phase_workflow
 from library import fthcore
 from library import phase_retrieval_core_unified as unified_pr
+from library.interactive import _cimshow_contrast_limits
 from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_cimshow_explicit_limits_define_slider_bounds(self):
+        image = np.arange(100, dtype=float).reshape(10, 10)
+        self.assertEqual(
+            _cimshow_contrast_limits(image, vmin=10, vmax=80),
+            (10.0, 80.0, 10.0, 80.0),
+        )
+
+    def test_cimshow_without_limits_keeps_percentile_behavior(self):
+        image = np.arange(100, dtype=float).reshape(10, 10)
+        cmin, cmax, slider_min, slider_max = _cimshow_contrast_limits(image)
+        expected = np.nanpercentile(image, [.1, 99.9, .0001, 99.9999])
+        np.testing.assert_allclose(
+            (cmin, cmax, slider_min, slider_max), expected
+        )
+
     def test_optional_dipy_is_not_required_during_library_import(self):
         root = Path(__file__).parents[1]
         modules = ["CCI_core", "interactive", "mask_lib"]
@@ -63,6 +79,16 @@ class PreprocessingTests(unittest.TestCase):
             source = (root / filename).read_text(encoding="utf-8")
             self.assertIn("%matplotlib qt", source, filename)
             self.assertNotIn("%matplotlib widget", source, filename)
+
+    def test_every_active_notebook_imports_cimshow_directly(self):
+        root = Path(__file__).parents[1]
+        for notebook_path in sorted(root.glob("*.ipynb")):
+            source = notebook_path.read_text(encoding="utf-8")
+            self.assertTrue(
+                "from interactive import cimshow" in source
+                or "from library.interactive import cimshow" in source,
+                notebook_path.name,
+            )
 
     def test_every_active_notebook_setup_cell_imports(self):
         """Run each active notebook's first import cell exactly as Jupyter does."""
@@ -669,6 +695,45 @@ class PreprocessingTests(unittest.TestCase):
 
         np.testing.assert_allclose(result.prepared_frames[1].coefficients, (2.5, 7.0))
         np.testing.assert_array_equal(result.source_count, 2)
+
+    def test_stitch_accepts_a_separate_masked_fit_roi_for_each_image(self):
+        reference = np.arange(144.0).reshape(12, 12) + 10
+        moving_one = (reference - 7.0) / 2.5
+        moving_two = (reference + 4.0) / 0.5
+        moving_one[:4] = 10000
+        moving_two[8:] = -10000
+        frames = [
+            Frame("reference", reference, 1.0, Path("reference")),
+            Frame("one", moving_one, 1.0, Path("one")),
+            Frame("two", moving_two, 1.0, Path("two")),
+        ]
+        masks = [np.zeros_like(reference, dtype=bool) for _ in frames]
+        masks[1][5, 5] = True
+        masks[2][6, 6] = True
+
+        result = stitch_images(
+            frames,
+            masks,
+            register=False,
+            fit_intensity=True,
+            fit_percentiles=(0, 100),
+            estimation_rois=[np.s_[:, :], np.s_[4:8, 2:10], np.s_[4:8, 2:10]],
+        )
+
+        np.testing.assert_allclose(result.prepared_frames[1].coefficients, (2.5, 7.0))
+        np.testing.assert_allclose(result.prepared_frames[2].coefficients, (0.5, -4.0))
+        self.assertFalse(result.prepared_frames[1].valid[5, 5])
+        self.assertFalse(result.prepared_frames[2].valid[6, 6])
+
+    def test_stitch_notebook_has_one_at_a_time_mask_and_fit_widgets(self):
+        root = Path(__file__).parents[1]
+        source = (root / "00b_stitch_beamstops.ipynb").read_text(encoding="utf-8")
+        self.assertIn("class MaskShiftWidget", source)
+        self.assertIn("class StitchFitWidget", source)
+        self.assertIn("unshifted_mask_beamstops", source)
+        self.assertIn("FIT_ROIS[index] = roi", source)
+        self.assertIn("reference.valid & item.valid & roi_mask", source)
+        self.assertIn("estimation_rois=selected_fit_rois", source)
 
     def test_master_pixels_are_kept_and_auxiliary_images_only_fill_its_mask(self):
         master = np.arange(100.0).reshape(10, 10) + 10

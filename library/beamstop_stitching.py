@@ -115,13 +115,16 @@ def stitch_images(
     fit_degree: int = 1,
     fit_percentiles: tuple[float, float] = (2.0, 98.0),
     estimation_roi: tuple[slice, slice] | None = None,
+    estimation_rois: Sequence[tuple[slice, slice] | None] | None = None,
     use_master_where_valid: bool = False,
 ) -> StitchResult:
     """Align and average images of one scattering pattern.
 
     The first image is the reference. Registration and intensity calibration
-    use only pixels that are valid in both images. ``fit_degree=1`` fits a
-    factor and offset; larger values fit a polynomial. If
+    use only pixels that are valid in both images. ``estimation_rois`` may
+    provide a separate ROI for every input; it takes precedence over the
+    shared ``estimation_roi``. Masked pixels are excluded in either case.
+    ``fit_degree=1`` fits a factor and offset; larger values fit a polynomial. If
     ``use_master_where_valid`` is true, auxiliary images contribute only where
     the first image is masked or otherwise invalid.
     """
@@ -135,12 +138,18 @@ def stitch_images(
     )
     reference = np.asarray(frames[0].image, dtype=float)
     reference_valid = (~np.asarray(masks[0], dtype=bool)) & np.isfinite(reference)
-    estimation_region = np.ones(shape, dtype=bool)
-    if estimation_roi is not None:
-        estimation_region[:] = False
-        estimation_region[estimation_roi] = True
-        if estimation_region.sum() < 16:
-            raise ValueError("estimation_roi must contain at least 16 pixels")
+    if estimation_rois is not None and len(estimation_rois) != len(frames):
+        raise ValueError("estimation_rois must have one entry per frame")
+
+    def estimation_region_for(index):
+        roi = estimation_rois[index] if estimation_rois is not None else estimation_roi
+        region = np.ones(shape, dtype=bool)
+        if roi is not None:
+            region[:] = False
+            region[roi] = True
+            if region.sum() < 16:
+                raise ValueError("Each estimation ROI must contain at least 16 pixels")
+        return region
     prepared = [
         PreparedFrame(
             frames[0].image_id,
@@ -155,6 +164,7 @@ def stitch_images(
     ]
 
     for index in range(1, len(frames)):
+        estimation_region = estimation_region_for(index)
         image = np.asarray(frames[index].image, dtype=float)
         valid = (~np.asarray(masks[index], dtype=bool)) & np.isfinite(image)
         measured_shift = (0.0, 0.0)
