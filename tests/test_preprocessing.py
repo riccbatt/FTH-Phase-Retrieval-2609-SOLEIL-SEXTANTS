@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,10 +28,39 @@ from library import fth_phase_workflow
 from library import fthcore
 from library import phase_retrieval_core_unified as unified_pr
 from library.interactive import _cimshow_contrast_limits
+from library import notebook_setup
 from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_qt_setup_prefers_pyqt5_before_other_bindings(self):
+        calls = []
+
+        class FakeShell:
+            def run_line_magic(self, name, value):
+                calls.append((name, value))
+
+        original_get_ipython = notebook_setup.get_ipython
+        original_available = notebook_setup._available
+        original_loaded = notebook_setup._already_loaded_qt_api
+        original_qt_api = os.environ.get("QT_API")
+        try:
+            notebook_setup.get_ipython = lambda: FakeShell()
+            notebook_setup._available = lambda module: module == "PyQt5.QtCore"
+            notebook_setup._already_loaded_qt_api = lambda: None
+            selected = notebook_setup.configure_matplotlib_qt()
+        finally:
+            notebook_setup.get_ipython = original_get_ipython
+            notebook_setup._available = original_available
+            notebook_setup._already_loaded_qt_api = original_loaded
+            if original_qt_api is None:
+                os.environ.pop("QT_API", None)
+            else:
+                os.environ["QT_API"] = original_qt_api
+
+        self.assertEqual(selected, "qt5 (pyqt5)")
+        self.assertEqual(calls, [("matplotlib", "qt5")])
+
     def test_cimshow_explicit_limits_define_slider_bounds(self):
         image = np.arange(100, dtype=float).reshape(10, 10)
         self.assertEqual(
@@ -62,7 +92,7 @@ class PreprocessingTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             self.assertNotIn("xp.errstate", source, path.name)
 
-    def test_plotting_notebooks_use_matplotlib_qt(self):
+    def test_notebooks_configure_qt_before_importing_pyplot(self):
         root = Path(__file__).parents[1]
         plotting_notebooks = [
             "00b_stitch_beamstops.ipynb",
@@ -77,8 +107,24 @@ class PreprocessingTests(unittest.TestCase):
         ]
         for filename in plotting_notebooks:
             source = (root / filename).read_text(encoding="utf-8")
-            self.assertIn("%matplotlib qt", source, filename)
+            self.assertIn("configure_matplotlib_qt()", source, filename)
             self.assertNotIn("%matplotlib widget", source, filename)
+            gui_imports = [
+                marker
+                for marker in (
+                    "import matplotlib.pyplot as plt",
+                    "from interactive import cimshow",
+                    "from library.interactive import cimshow",
+                    "from library.scan_workflow import",
+                )
+                if marker in source
+            ]
+            self.assertTrue(gui_imports, filename)
+            self.assertLess(
+                source.index("configure_matplotlib_qt()"),
+                min(source.index(marker) for marker in gui_imports),
+                filename,
+            )
 
     def test_every_active_notebook_imports_cimshow_directly(self):
         root = Path(__file__).parents[1]

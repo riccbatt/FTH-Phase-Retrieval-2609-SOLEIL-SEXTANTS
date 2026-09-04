@@ -31,6 +31,15 @@ order, and saves both the numerical HDF5 result and plotted PNG under
 
 ## Quick Start
 
+### Matplotlib Qt setup
+
+Every active notebook configures Matplotlib before importing `pyplot` or other
+GUI-aware libraries. Run the first cell before importing PyQt, PySide, Napari,
+or Matplotlib manually. The setup prefers PyQt5 and prints the selected backend.
+If a different Qt binding was already imported, restart the kernel and rerun
+the notebook from its first cell; Qt bindings cannot be safely switched inside
+an existing Python process.
+
 Use `00_inspect_nexus_metadata.ipynb` whenever you need to browse the complete
 NeXus tree, search dataset paths and attributes, or compare scalar metadata
 across scans. It avoids loading large detector arrays unless explicitly enabled.
