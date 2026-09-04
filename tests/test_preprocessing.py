@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import h5py
@@ -28,6 +30,24 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_beamstop_stitching_supports_notebook_style_import(self):
+        root = Path(__file__).parents[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    f"sys.path.insert(0, {str(root / 'library')!r}); "
+                    "from beamstop_stitching import shift_mask, stitch_images"
+                ),
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_detector_and_beamstop_masks_form_clipped_union(self):
         from PIL import Image
 

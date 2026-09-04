@@ -9,7 +9,10 @@ import numpy as np
 from scipy.ndimage import shift as ndi_shift
 from skimage.registration import phase_cross_correlation
 
-from .data_loading import Frame
+try:
+    from .data_loading import Frame
+except ImportError:  # Notebook imports when ``library`` itself is on sys.path.
+    from data_loading import Frame
 
 
 @dataclass(frozen=True)
