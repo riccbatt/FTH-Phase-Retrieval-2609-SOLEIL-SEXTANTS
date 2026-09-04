@@ -734,6 +734,8 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn("FIT_ROIS[index] = roi", source)
         self.assertIn("reference.valid & item.valid & roi_mask", source)
         self.assertIn("estimation_rois=selected_fit_rois", source)
+        self.assertIn("mask_shifts=mask_shifts", source)
+        self.assertIn("fit_roi_bounds=fit_roi_bounds", source)
 
     def test_master_pixels_are_kept_and_auxiliary_images_only_fill_its_mask(self):
         master = np.arange(100.0).reshape(10, 10) + 10
