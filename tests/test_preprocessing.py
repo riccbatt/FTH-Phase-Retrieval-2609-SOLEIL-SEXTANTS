@@ -810,6 +810,19 @@ class PreprocessingTests(unittest.TestCase):
         self.assertNotIn('saved["mask_detector"]', source)
         self.assertNotIn('saved["mask_beamstop"]', source)
 
+    def test_stitch_notebook_has_per_input_beamstop_dilation(self):
+        root = Path(__file__).parents[1]
+        with (root / "00b_stitch_beamstops.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn("BEAMSTOP_MASK_DILATIONS = [3] * len(IMAGE_ID_GROUPS)", source)
+        self.assertIn("iterations=beamstop_dilation", source)
+        self.assertIn("if beamstop_dilation > 0", source)
+        self.assertIn("beamstop_mask_dilations=np.asarray(", source)
+
     def test_stitched_output_saves_final_intersection_and_all_masks(self):
         root = Path(__file__).parents[1]
         with (root / "00b_stitch_beamstops.ipynb").open(encoding="utf-8") as handle:
