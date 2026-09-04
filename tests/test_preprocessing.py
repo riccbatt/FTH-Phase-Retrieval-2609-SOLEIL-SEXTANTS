@@ -805,6 +805,38 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn('elif input_kind == "preprocessed"', source)
         self.assertNotIn('if INPUT_KIND == "raw"', source)
 
+    def test_stitched_output_saves_final_intersection_and_all_masks(self):
+        root = Path(__file__).parents[1]
+        with (root / "00b_stitch_beamstops.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn("np.logical_and.reduce", source)
+        self.assertIn("mask_detector + mask_stitched_intersection", source)
+        for name in (
+            "mask_pixel_stitched",
+            "mask_stitched_intersection",
+            "input_mask_detectors",
+            "input_mask_beamstops_unshifted",
+            "input_mask_beamstops_shifted",
+            "input_mask_pixels",
+            "aligned_input_mask_pixels",
+        ):
+            self.assertIn(f"{name}={name}", source)
+
+    def test_fth_preserves_stitching_mask_archive_for_phase_retrieval(self):
+        root = Path(__file__).parents[1]
+        with (root / "01_FTH.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn('"mask_pixel_stitched" if "mask_pixel_stitched"', source)
+        self.assertIn('state["stitching_masks"]', source)
+
     def test_master_pixels_are_kept_and_auxiliary_images_only_fill_its_mask(self):
         master = np.arange(100.0).reshape(10, 10) + 10
         auxiliary = (master - 5) / 2
