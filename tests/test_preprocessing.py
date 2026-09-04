@@ -30,6 +30,51 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_every_active_notebook_setup_cell_imports(self):
+        """Run each active notebook's first import cell exactly as Jupyter does."""
+        root = Path(__file__).parents[1]
+        notebooks = sorted(root.glob("*.ipynb"))
+        self.assertTrue(notebooks)
+
+        for notebook_path in notebooks:
+            notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+            setup_source = None
+            for cell in notebook["cells"]:
+                if cell.get("cell_type") != "code":
+                    continue
+                source = "".join(cell.get("source", []))
+                if any(
+                    line.lstrip().startswith(("import ", "from "))
+                    for line in source.splitlines()
+                ):
+                    setup_source = source
+                    break
+
+            if setup_source is None:
+                continue
+
+            # Plain Python cannot parse IPython magics. Replacing a magic with
+            # an indented pass preserves surrounding try/except blocks.
+            python_lines = []
+            for line in setup_source.splitlines():
+                if line.lstrip().startswith("%"):
+                    indentation = line[: len(line) - len(line.lstrip())]
+                    python_lines.append(f"{indentation}pass  # IPython magic")
+                else:
+                    python_lines.append(line)
+
+            result = subprocess.run(
+                [sys.executable, "-c", "\n".join(python_lines)],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f"{notebook_path.name} setup/import cell failed:\n{result.stderr}",
+            )
+
     def test_beamstop_stitching_supports_notebook_style_import(self):
         root = Path(__file__).parents[1]
         result = subprocess.run(
