@@ -791,6 +791,20 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIn("mask_shifts=mask_shifts", source)
         self.assertIn("fit_roi_bounds=fit_roi_bounds", source)
 
+    def test_stitch_notebook_selects_raw_or_preprocessed_per_input(self):
+        root = Path(__file__).parents[1]
+        with (root / "00b_stitch_beamstops.ipynb").open(encoding="utf-8") as handle:
+            source = "".join(
+                line
+                for cell in json.load(handle)["cells"]
+                for line in cell.get("source", [])
+            )
+        self.assertIn('INPUT_KINDS = ["raw"] * len(IMAGE_ID_GROUPS)', source)
+        self.assertIn("IMAGE_ID_GROUPS, INPUT_KINDS, DARK_ID_GROUPS", source)
+        self.assertIn('if input_kind == "raw"', source)
+        self.assertIn('elif input_kind == "preprocessed"', source)
+        self.assertNotIn('if INPUT_KIND == "raw"', source)
+
     def test_master_pixels_are_kept_and_auxiliary_images_only_fill_its_mask(self):
         master = np.arange(100.0).reshape(10, 10) + 10
         auxiliary = (master - 5) / 2

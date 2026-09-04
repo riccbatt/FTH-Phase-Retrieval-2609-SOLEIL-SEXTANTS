@@ -119,9 +119,10 @@ smooth exclusion masks and their final combined transmission before FTH.
 In `00b_stitch_beamstops.ipynb`, each `IMAGE_ID_GROUPS` entry is one stitching
 input and may be a single acquisition ID or a list to average. Parallel entries
 in `DARK_ID_GROUPS` may likewise be single IDs or lists, allowing every input
-group to use a different fitted dark. Set `INPUT_KIND="raw"` for that path or
-`INPUT_KIND="preprocessed"` to valid-pixel-average the files saved by notebook
-`01a`. Band fitting is performed independently for every averaged input group.
+group to use a different fitted dark. `INPUT_KINDS` has one `"raw"` or
+`"preprocessed"` entry per image group, so both input types can be mixed in one
+stitching run. Preprocessed entries valid-pixel-average the files saved by
+notebook `01a`. Band fitting is performed independently for every averaged input group.
 
 Every active acquisition notebook loads the same two bright-red PNG mask types.
 `mask_detector.png` is fixed for the camera and is never shifted.
