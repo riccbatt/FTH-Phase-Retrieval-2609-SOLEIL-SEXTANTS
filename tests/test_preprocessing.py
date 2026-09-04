@@ -30,6 +30,24 @@ from library.scan_workflow import load_scan_channel, save_diode_scans
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_plotting_notebooks_use_matplotlib_qt(self):
+        root = Path(__file__).parents[1]
+        plotting_notebooks = [
+            "00b_stitch_beamstops.ipynb",
+            "01_FTH.ipynb",
+            "01_FTH_series.ipynb",
+            "01a_preprocess_3d_holograms.ipynb",
+            "01b_FTH_from_cleaned_averages.ipynb",
+            "03_define_supportmask.ipynb",
+            "04_phase_retrieval.ipynb",
+            "04_phase_retrieval_series.ipynb",
+            "Diode_Scans.ipynb",
+        ]
+        for filename in plotting_notebooks:
+            source = (root / filename).read_text(encoding="utf-8")
+            self.assertIn("%matplotlib qt", source, filename)
+            self.assertNotIn("%matplotlib widget", source, filename)
+
     def test_every_active_notebook_setup_cell_imports(self):
         """Run each active notebook's first import cell exactly as Jupyter does."""
         root = Path(__file__).parents[1]
