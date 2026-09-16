@@ -298,8 +298,12 @@ def dyn_factor(image,image_ref,method = 'scalarproduct', crop=0 ,plot = False, v
         
     elif method == 'correlation':
         #Create y, x data
-        xdata = np.concatenate(image_ref[crop_s])
-        ydata = np.concatenate(image[crop_s])
+        if image_ref.ndim==2:
+            xdata = np.concatenate(image_ref[crop_s])
+            ydata = np.concatenate(image[crop_s])
+        else:
+            xdata = image_ref[crop_s].copy()
+            ydata = image[crop_s].copy()
         
         #Ignore all x,y = 0 values, e.g., if a mask is used
         ignore = np.logical_or((xdata==0),(ydata==0))

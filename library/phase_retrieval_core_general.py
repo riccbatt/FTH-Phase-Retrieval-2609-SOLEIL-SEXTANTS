@@ -14,6 +14,11 @@ measurement geometry uniquely separates beam and material components.
 import time
 
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
 from scipy import stats
 
 try:
@@ -55,6 +60,9 @@ def default_general_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
+        "binning": 1,
+        "crop": 0,
+        "roi": None,
         # General log-object projection settings.
         "projection_model": "physical_factorized",
         "projection_every": 1,
@@ -915,6 +923,11 @@ def _run_update_schedule(
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         iterations = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
+            raise ValueError(
+                "This observation schedule does not support partial-coherence "
+                "RL updates because no coherence kernel is supplied."
+            )
         field, error, support_error, _ = PhaseRtrv_core(
             diffract=amplitude,
             mask=supportmask,
@@ -963,7 +976,7 @@ def _initialize_fields(
 ):
     """Create and approximately normalize one initial field per observation."""
     n_observations = amplitudes.shape[0]
-    start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+    start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     fields = np.repeat(start[None], n_observations, axis=0).astype(
         np.complex128
     )
@@ -1038,6 +1051,9 @@ def general_phase_retrieval_algorithm(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = core._as_energy_stack(holograms, name="holograms")
     n_observations, nx, ny = holograms.shape
     metadata = _normalize_metadata(
@@ -1239,4 +1255,4 @@ def general_phase_retrieval_algorithm(
         components["final_fourier_constraint_applied"] = False
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return fields, fieldswarmup, components, bsmasks, errors
+    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)

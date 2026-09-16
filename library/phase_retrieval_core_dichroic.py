@@ -40,6 +40,11 @@ ranges set to ``None``, the reconstruction remains exclusively data driven.
 import time
 
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
 from scipy import stats
 
 try:
@@ -80,6 +85,9 @@ def default_dichroic_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
+        "binning": 1,
+        "crop": 0,
+        "roi": None,
         # 'shared_charge' fits complex M_s maps. 'saturated_reference'
         # estimates their common complex response from saturated states and
         # constrains the remaining factors to real mz maps.
@@ -918,6 +926,11 @@ def _run_update_schedule(
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This observation schedule does not support partial-coherence "
+                "RL updates because no coherence kernel is supplied."
+            )
         field, err_d, err_s, _ = PhaseRtrv_core(
             diffract=amplitude,
             mask=supportmask,
@@ -1018,6 +1031,9 @@ def dichroic_phase_retrieval_algorithm(
         if not projection_model_explicit:
             recipe["projection_model"] = "saturated_reference"
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = core._as_energy_stack(holograms, name="holograms")
     n_observations, nx, ny = holograms.shape
     labels, signs, state_names, _ = _normalize_state_metadata(
@@ -1060,7 +1076,7 @@ def dichroic_phase_retrieval_algorithm(
     )
 
     if start_fields is None:
-        start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+        start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
         fields = np.repeat(
             start[None],
             n_observations,
@@ -1218,4 +1234,4 @@ def dichroic_phase_retrieval_algorithm(
     components["state_labels"] = labels.copy()
     components["polarization_signs"] = signs.copy()
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return fields, fieldswarmup, components, bsmasks, errors
+    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)

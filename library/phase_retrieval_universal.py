@@ -36,6 +36,11 @@ from functools import partial
 import os
 import time
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
 from numpy.typing import ArrayLike
 
 import matplotlib.pyplot as plt
@@ -507,12 +512,12 @@ def phase_retrieval_algorithm(
     pos_input = np.where(np.isnan(pos_input), 0, pos_input)
     neg_input = np.where(np.isnan(neg_input), 0, neg_input)
 
-    # Full-coherence beamstop masks inherit the external mask and mark negative
-    # corrected intensities as unconstrained. Zero intensity remains constrained.
+    # Full-coherence masks inherit the external mask and mark nonpositive
+    # corrected intensities as unconstrained.
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
-    bsmask_p[pos_input < 0] = 1
-    bsmask_n[neg_input < 0] = 1
+    bsmask_p[pos_input <= 0] = 1
+    bsmask_n[neg_input <= 0] = 1
 
 
     # clip positive intensities to zero to avoid NaNs in the square root.
@@ -526,9 +531,7 @@ def phase_retrieval_algorithm(
     # convention of the original implementation.
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
-        Startimage = np.fft.fftshift(
-            np.fft.ifft2(np.fft.ifftshift(supportmask))
-        )
+        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     elif isinstance(first_startimage, np.ndarray):
         Startimage = np.asarray(first_startimage).copy()
     else:
@@ -587,6 +590,7 @@ def phase_retrieval_algorithm(
     retrieved_pc = {"pos": None, "neg": None}
     retrieved_gradient = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+    pc_diffract = {}
 
 
     default_start_image = Startimage.copy()
@@ -608,15 +612,17 @@ def phase_retrieval_algorithm(
         # RL-enabled steps use the beamstop-filled intensity estimate and no
         # Fourier-domain beamstop mask, matching the old partial-coherence logic.
         if use_RL:
-            if retrieved[h] is not None:
-                pc_input = (
-                    np.abs(retrieved[h]) ** 2 * data[h]["bsmask"]
-                    + data[h]["input"] * (1 - data[h]["bsmask"])
-                )
-            else:
-                pc_input = data[h]["input"]
-
-            diffract = np.sqrt(pc_input)
+            if h not in pc_diffract:
+                source = retrieved_fc[h]
+                if source is None:
+                    pc_input = data[h]["input"]
+                else:
+                    pc_input = (
+                        np.abs(source) ** 2 * data[h]["bsmask"]
+                        + data[h]["input"] * (1 - data[h]["bsmask"])
+                    )
+                pc_diffract[h] = np.sqrt(pc_input)
+            diffract = pc_diffract[h]
             bsmask = np.zeros_like(data[h]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
@@ -719,6 +725,7 @@ def phase_retrieval_algorithm(
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
+            pc_diffract.pop(h, None)
 
 
         if gamma_out is not None:
@@ -2336,6 +2343,9 @@ def default_multi_energy_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
+        "binning": 1,
+        "crop": 0,
+        "roi": None,
 
         # Multi-energy projection settings.
         "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
@@ -2582,12 +2592,12 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This energy schedule does not support partial-coherence RL "
+                "updates because no coherence kernel is supplied."
+            )
         if mode == "gradient_descent":
-            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-                raise ValueError(
-                    "gradient_descent update stages do not support "
-                    "Richardson-Lucy partial-coherence updates."
-                )
             refined = gradient.refine_field_gradient(
                 field,
                 amplitude,
@@ -2925,6 +2935,9 @@ def multi_energy_phase_retrieval_algorithm(
             )
         recipe.update(multi_energy_recipe)
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = _as_energy_stack(holograms)
     supportmask = np.asarray(supportmask)
 
@@ -2950,7 +2963,7 @@ def multi_energy_phase_retrieval_algorithm(
     mask_stack = _as_energy_mask(mask_pixel, nE=nE, image_shape=(nx, ny))
 
     if start_fields is None:
-        start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+        start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
         fields = np.repeat(start[None, :, :], nE, axis=0).astype(np.complex128)
 
         # Rough per-energy amplitude normalization, analogous to the original
@@ -3166,7 +3179,7 @@ def multi_energy_phase_retrieval_algorithm(
         flush=True,
     )
 
-    return fields, fieldswarmup,components, bsmasks, errors
+    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)
 
 
 def default_general_phase_retrieval_recipe():
@@ -3199,6 +3212,9 @@ def default_general_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
+        "binning": 1,
+        "crop": 0,
+        "roi": None,
         # General log-object projection settings.
         "projection_model": "physical_factorized",
         # Number of completed observation updates between projections. None
@@ -4084,12 +4100,12 @@ def _run_update_schedule(
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         iterations = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
+            raise ValueError(
+                "This observation schedule does not support partial-coherence "
+                "RL updates because no coherence kernel is supplied."
+            )
         if stage["mode"] == "gradient_descent":
-            if stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
-                raise ValueError(
-                    "gradient_descent update stages do not support "
-                    "Richardson-Lucy partial-coherence updates."
-                )
             refined = gradient.refine_field_gradient(
                 field,
                 amplitude,
@@ -4168,7 +4184,7 @@ def _initialize_fields(
 ):
     """Create and approximately normalize one initial field per observation."""
     n_observations = amplitudes.shape[0]
-    start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+    start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     fields = np.repeat(start[None], n_observations, axis=0).astype(
         np.complex128
     )
@@ -4242,6 +4258,9 @@ def general_phase_retrieval_algorithm(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = _as_energy_stack(holograms, name="holograms")
     n_observations, nx, ny = holograms.shape
     metadata = _normalize_metadata(
@@ -4501,7 +4520,7 @@ def general_phase_retrieval_algorithm(
         f"{errors['runtime_seconds']:.3f} s",
         flush=True,
     )
-    return fields, fieldswarmup,components, bsmasks, errors
+    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)
 
 
 _PHYSICAL_MODELS = {

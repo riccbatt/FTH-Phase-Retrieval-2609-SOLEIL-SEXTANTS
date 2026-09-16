@@ -21,6 +21,11 @@ the API matches ``phase_retrieval_core_multienergy``.
 import time
 
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
 from scipy import stats
 
 try:
@@ -225,8 +230,8 @@ def _initialize_modal_fields(
     )
     base_modes = np.empty((nmodes, nx, ny), dtype=np.complex128)
     for mode_index in range(nmodes):
-        base_modes[mode_index] = np.fft.fftshift(
-            np.fft.ifft2(np.fft.ifftshift(support_modes[mode_index]))
+        base_modes[mode_index] = np.fft.ifftshift(
+            np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
         )
 
     if nmodes > 1:
@@ -300,12 +305,12 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This energy schedule does not support partial-coherence RL "
+                "updates because no coherence kernel is supplied."
+            )
         if mode == "gradient_descent":
-            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-                raise ValueError(
-                    "gradient_descent update stages do not support "
-                    "Richardson-Lucy partial-coherence updates."
-                )
             result, err_d, err_s, _ = multimode._refine_modes_gradient(
                 field,
                 amplitude,
@@ -429,6 +434,9 @@ def multi_energy_phase_retrieval_algorithm(
             )
         recipe.update(multi_energy_recipe)
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = multi_energy._as_energy_stack(holograms)
     n_energy, nx, ny = holograms.shape
     nmodes = _validate_nmodes(recipe["Nmodes"])
@@ -639,10 +647,8 @@ def multi_energy_phase_retrieval_algorithm(
 
     components["Nmodes"] = nmodes
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return (
+    return input_geometry.finish(
         _maybe_squeeze_energy_modes(fields, nmodes),
         _maybe_squeeze_energy_modes(fieldswarmup, nmodes),
-        components,
-        bsmasks,
-        errors,
+        components, bsmasks, errors,
     )
