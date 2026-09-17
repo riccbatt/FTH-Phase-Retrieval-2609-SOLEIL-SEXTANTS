@@ -143,7 +143,7 @@ def default_phase_retrieval_recipe():
         "modes": None,
         # Remove this many pixels from every edge of returned spatial arrays.
         "crop": 0,
-        # Bin detector intensities before retrieval; center crop object support.
+        # Crop detector intensities first, then bin; center crop object support.
         "binning": 1,
         # Optional [row_start, row_stop, column_start, column_stop] in input coordinates.
         "roi": None,
@@ -844,11 +844,10 @@ def phase_retrieval_algorithm(
     across different labels. Set it to false to copy the complex field exactly.
 
     Dictionary results include ``supportmask_used``, the exact support passed
-    to each kernel stage after binning and mode expansion. ``supportmask`` is
-    that support mapped to the returned Fourier-field grid. When ``crop`` is
-    nonzero, the field is cropped after retrieval, so the two grids differ.
-    ``recipe['roi']`` is in the supplied support's coordinates. Binning moves
-    it into the centered support crop; field cropping then rescales it.
+    to each kernel stage after input cropping, binning, and mode expansion.
+    ``supportmask`` and ``mask_pixel`` use the same grid as the returned field.
+    ``recipe['roi']`` is in the supplied support's coordinates and is shifted
+    into the centered support crop of the final detector grid.
     """
     (
         holograms,
@@ -950,33 +949,48 @@ def phase_retrieval_algorithm(
         raise ValueError("supportmask must be 2D or 3D.")
 
     source_shape = shape_2d
-    if binning > 1:
-        target_shape = tuple(n // binning for n in source_shape)
-        if min(target_shape) < 1:
-            raise ValueError("recipe['binning'] is larger than the hologram.")
-        trimmed_shape = tuple(n * binning for n in target_shape)
-        origin = tuple((n - t) // 2 for n, t in zip(source_shape, trimmed_shape))
-        detector_slice = tuple(slice(o, o + t) for o, t in zip(origin, trimmed_shape))
-        inputs = {
-            label: value[detector_slice].reshape(target_shape[0], binning, target_shape[1], binning).sum(axis=(1, 3))
-            for label, value in inputs.items()
-        }
-        # One excluded source pixel excludes its entire detector bin.
-        mask_pixel = np.any(
-            mask_pixel[detector_slice].reshape(target_shape[0], binning, target_shape[1], binning) != 0,
-            axis=(1, 3),
-        ).astype(np.uint8)
-        # Support lives in the object plane: keep its centered spatial extent.
+    if 2 * crop >= min(source_shape):
+        raise ValueError("recipe['crop'] removes the complete detector image.")
+    cropped_shape = tuple(n - 2 * crop for n in source_shape)
+    target_shape = tuple(n // binning for n in cropped_shape)
+    if min(target_shape) < 1:
+        raise ValueError("recipe['binning'] is larger than the cropped hologram.")
+    trimmed_shape = tuple(n * binning for n in target_shape)
+    trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed_shape))
+    detector_origin = tuple(crop + o for o in trim_origin)
+    detector_slice = tuple(slice(o, o + t) for o, t in zip(detector_origin, trimmed_shape))
+    inputs = {
+        label: value[detector_slice].reshape(target_shape[0], binning,
+                                              target_shape[1], binning).sum(axis=(1, 3))
+        for label, value in inputs.items()
+    }
+    # One excluded source pixel excludes its entire detector bin.
+    mask_pixel = np.any(
+        mask_pixel[detector_slice].reshape(target_shape[0], binning,
+                                            target_shape[1], binning) != 0,
+        axis=(1, 3),
+    ).astype(np.uint8)
+    # Cropping detector pixels changes the object pixel scale. Binning alone
+    # leaves it unchanged because the detector extent in q stays the same.
+    if crop:
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        scale = np.asarray(source_shape, dtype=float) / np.asarray(cropped_shape)
+        offset = source_center - scale * output_center
+        modes = (supportmask[None] if supportmask.ndim == 2 else supportmask)
+        mapped = np.stack([
+            affine_transform(mode.astype(float), np.diag(scale), offset=offset,
+                             output_shape=target_shape, order=0,
+                             mode="constant", cval=0, prefilter=False)
+            for mode in modes
+        ])
+        supportmask = mapped[0] if supportmask.ndim == 2 else mapped
+    else:
         support_origin = tuple((n - t) // 2 for n, t in zip(source_shape, target_shape))
         support_slice = tuple(slice(o, o + t) for o, t in zip(support_origin, target_shape))
         supportmask = supportmask[(...,) + support_slice]
-        shape_2d = target_shape
-    else:
-        support_origin = (0, 0)
+    shape_2d = target_shape
     supportmask = (supportmask != 0).astype(np.uint8)
-    mask_pixel = (mask_pixel != 0).astype(np.uint8)
-    if 2 * crop >= min(shape_2d):
-        raise ValueError("recipe['crop'] removes the complete reconstruction.")
     roi = recipe["roi"]
     if roi is not None:
         roi = np.asarray(roi)
@@ -985,19 +999,13 @@ def phase_retrieval_algorithm(
         roi = roi.astype(int)
         if not (0 <= roi[0] < roi[1] <= source_shape[0] and 0 <= roi[2] < roi[3] <= source_shape[1]):
             raise ValueError("recipe['roi'] must be within the input supportmask.")
-        # Binning center crops the object support; move the ROI into that
-        # support frame before rescaling for the final Fourier-field crop.
-        roi -= np.array([support_origin[0], support_origin[0],
-                         support_origin[1], support_origin[1]])
-        roi[[0, 1]] = np.clip(roi[[0, 1]], 0, shape_2d[0])
-        roi[[2, 3]] = np.clip(roi[[2, 3]], 0, shape_2d[1])
-        final_shape = np.asarray(shape_2d) - 2 * crop
-        roi = np.rint(roi * np.array([
-            final_shape[0] / shape_2d[0], final_shape[0] / shape_2d[0],
-            final_shape[1] / shape_2d[1], final_shape[1] / shape_2d[1],
-        ])).astype(int)
-        roi[[0, 1]] = np.clip(roi[[0, 1]], 0, final_shape[0])
-        roi[[2, 3]] = np.clip(roi[[2, 3]], 0, final_shape[1])
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        object_scale = np.asarray(cropped_shape, dtype=float) / np.asarray(source_shape)
+        for axis, bounds in enumerate(((0, 1), (2, 3))):
+            mapped = (roi[list(bounds)] - source_center[axis]) * object_scale[axis] + output_center[axis]
+            roi[list(bounds)] = np.rint(mapped).astype(int)
+            roi[list(bounds)] = np.clip(roi[list(bounds)], 0, target_shape[axis])
         if roi[1] <= roi[0] or roi[3] <= roi[2]:
             raise ValueError("recipe['roi'] falls outside the retrieved supportmask.")
 
@@ -1293,31 +1301,10 @@ def phase_retrieval_algorithm(
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
 
-    if crop:
-        if 2 * crop >= min(shape_2d):
-            raise ValueError("recipe['crop'] removes the complete reconstruction.")
-
-        def crop_spatial(value):
-            if value is None:
-                return None
-            return np.asarray(value)[..., crop:-crop, crop:-crop]
-
-        for collection in (retrieved_fc, retrieved_pc, retrieved_gradient, gamma):
-            for label, value in collection.items():
-                collection[label] = crop_spatial(value)
-        for label in labels:
-            data[label]["bsmask"] = crop_spatial(data[label]["bsmask"])
-        for step in error["steps"]:
-            step["field_after"] = crop_spatial(step["field_after"])
-        for output_info in error["outputs"]:
-            output_info["field"] = crop_spatial(output_info["field"])
-
     result = {
-        "supportmask": _support_on_output_grid(
-            retrieval_support, np.asarray(shape_2d) - 2 * crop
-        ),
+        "supportmask": retrieval_support.copy(),
         "supportmask_used": retrieval_support.copy(),
-        "mask_pixel": crop_spatial(mask_pixel) if crop else mask_pixel.copy(),
+        "mask_pixel": mask_pixel.copy(),
         "roi": roi,
         "full_coherence": retrieved_fc,
         "partial_coherence": retrieved_pc,

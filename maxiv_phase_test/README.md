@@ -297,7 +297,7 @@ Many scalar values can be written once, and the code expands them internally to 
 | `modes` | Modal support scaling factors. `len(modes)` is the number of incoherent modes. |
 | `normalize_startimage_between_holograms` | If `True`, rescales a reused start image when switching labels. |
 | `return_format` | Usually `auto`. Other supported values are `dict` and `legacy`. |
-| `crop` | Number of pixels removed from every edge before retrieval. |
+| `crop` | Number of original detector pixels removed from every edge before binning and retrieval. |
 | `hologram_intensity_cutoff_vmin` | Low-intensity cutoff used when constructing masked diffraction constraints. |
 
 ### Full vs Partial Coherence
@@ -343,7 +343,7 @@ runs two modes. The first uses the support as-is, and the second uses a scaled m
 "crop": 100
 ```
 
-means the retrieval uses `image[100:-100, 100:-100]`. The pixel mask is cropped the same way. The support mask is resized and binarized to match the cropped hologram shape. Notebook 04 then rescales `roi_cdi` into the cropped coordinate system before reconstructing the CDI image.
+means the retrieval uses `image[100:-100, 100:-100]`. When binning is greater than one, the cropped hologram is binned afterward. The pixel mask is cropped first and a bin is excluded if any source pixel is excluded. The support mask and `roi_cdi` are rescaled for the cropped detector extent and mapped to the resulting object grid.
 
 Use a crop when edge artifacts dominate or when reducing runtime is useful. Do not set it so large that it removes meaningful diffraction information.
 

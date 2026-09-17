@@ -39,10 +39,12 @@ class PhaseRetrievalHandoffTests(unittest.TestCase):
             result = unified.phase_retrieval_algorithm(
                 {"pos": np.ones(shape)}, np.zeros(shape), support, recipe
             )
-        used = unified._mode_supports(support, [1, 2], shape)
+        used = unified._mode_supports(
+            unified._support_on_output_grid(support, (12, 12)), [1, 2], (12, 12)
+        )
         np.testing.assert_array_equal(result["supportmask_used"], used)
         np.testing.assert_array_equal(passed_supports[0], used)
-        expected = unified._support_on_output_grid(used, (12, 12))
+        expected = used
         np.testing.assert_array_equal(result["supportmask"], expected)
         self.assertEqual(result["supportmask"].shape, (2, 12, 12))
         self.assertGreater(result["supportmask"][1].sum(), result["supportmask"][0].sum())
@@ -51,11 +53,11 @@ class PhaseRetrievalHandoffTests(unittest.TestCase):
             listed = unified.phase_retrieval_algorithm(
                 {"pos": np.ones(shape)}, np.zeros(shape), explicit, recipe
             )
-        np.testing.assert_array_equal(listed["supportmask_used"], explicit)
-        np.testing.assert_array_equal(passed_supports[1], explicit)
+        np.testing.assert_array_equal(listed["supportmask_used"], unified._support_on_output_grid(np.asarray(explicit), (12, 12)))
+        np.testing.assert_array_equal(passed_supports[1], unified._support_on_output_grid(np.asarray(explicit), (12, 12)))
         np.testing.assert_array_equal(
             listed["supportmask"],
-            unified._support_on_output_grid(explicit, (12, 12)),
+            unified._support_on_output_grid(np.asarray(explicit), (12, 12)),
         )
 
     def test_unified_binning_masks_and_roi(self):
@@ -86,21 +88,20 @@ class PhaseRetrievalHandoffTests(unittest.TestCase):
             result = unified.phase_retrieval_algorithm(
                 {"pos": image}, detector_mask, support, recipe
             )
-        self.assertEqual(captured[0]["diffract"].shape, (6, 6))
-        self.assertEqual(result["supportmask"].shape, (4, 4))
-        self.assertEqual(result["mask_pixel"].shape, (4, 4))
+        self.assertEqual(captured[0]["diffract"].shape, (5, 5))
+        self.assertEqual(result["supportmask"].shape, (5, 5))
+        self.assertEqual(result["mask_pixel"].shape, (5, 5))
         self.assertEqual(set(np.unique(result["mask_pixel"])), {0, 1})
         self.assertTrue(set(np.unique(result["supportmask"])) <= {0, 1})
         self.assertEqual(result["mask_pixel"][0, 0], 1)
-        # [3:9] is the full centered support crop after binning, so it must
-        # cover the full returned grid even after the Fourier-field crop.
-        np.testing.assert_array_equal(result["roi"], [0, 4, 0, 4])
+        # [3:9] covers the centered 5x5 support used after input crop and binning.
+        np.testing.assert_array_equal(result["roi"], [0, 5, 0, 5])
         shifted_recipe = dict(recipe, roi=[3, 6, 6, 9])
         with patch.object(unified, "PhaseRtrv_core", side_effect=fake_core):
             shifted = unified.phase_retrieval_algorithm(
                 {"pos": image}, detector_mask, support, shifted_recipe
             )
-        np.testing.assert_array_equal(shifted["roi"], [0, 2, 2, 4])
+        np.testing.assert_array_equal(shifted["roi"], [0, 2, 2, 5])
 
     def test_default_startimage_uses_kernel_frame_on_odd_grid(self):
         shape = (9, 11)
