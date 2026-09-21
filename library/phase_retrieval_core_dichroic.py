@@ -98,6 +98,7 @@ def default_dichroic_phase_retrieval_recipe():
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         "projection_relaxation": 1.0,
+        "final_projection_relaxation": 1.0,
         "observation_weights": None,
         "rank_deficient": "error",
         "saturated_states": None,
@@ -841,6 +842,8 @@ def _verify_recipe(recipe, n_observations):
         raise ValueError("final_fourier_constraint must be bool.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
+    if not (0 <= recipe["final_projection_relaxation"] <= 1):
+        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if recipe["projection_model"] not in {
         "shared_charge",
         "saturated_reference",
@@ -1215,15 +1218,18 @@ def dichroic_phase_retrieval_algorithm(
             )
 
     if recipe["projection_model"] != "none":
-        fields, components = _project_fields(
+        projected_fields, components = _project_fields(
             fields,
             labels,
             signs,
             recipe,
-            relaxation=1.0,
+            relaxation=recipe["final_projection_relaxation"],
             magnetization_supportmask=magnetization_supportmask,
             projection_supportmask=projection_supportmask,
         )
+        if recipe["final_projection_relaxation"] > 0:
+            fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
 
     if recipe["final_fourier_constraint"]:
         fields = _apply_measured_amplitudes(fields, amplitudes, bsmasks)

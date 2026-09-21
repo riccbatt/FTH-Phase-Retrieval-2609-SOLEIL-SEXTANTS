@@ -19,6 +19,15 @@ try:
 except ImportError:
     import phase_retrieval_geometry as geometry
 
+
+def _material_projector():
+    """Share optional thickness physics with the universal projector."""
+    try:
+        from . import phase_retrieval_universal as universal
+    except ImportError:
+        import phase_retrieval_universal as universal
+    return universal
+
 from scipy import stats
 
 try:
@@ -68,13 +77,18 @@ def default_general_phase_retrieval_recipe():
         "projection_every": 1,
         "projection_start": 0,
         "projection_relaxation": 1.0,
+        "final_projection_relaxation": 1.0,
         "observation_weights": None,
         "rank_deficient": "error",
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
+        "material_mask": None,
+        "material_thickness": None,
+        "fit_material_thickness": False,
         "saturated_states": None,
         "projection_constraints_inside_support_only": False,
         "zero_magnetization_outside_support": False,
+        "zero_thickness_outside_support": False,
         "physical_constraints_inside_support_only": False,
         "charge_spectral_constraint": "free",
         "magnetic_spectral_constraint": "free",
@@ -414,6 +428,9 @@ def project_log_objects_physical(
     recipe=None,
     magnetization_supportmask=None,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
+    thickness_supportmask=None,
     return_components=False,
 ):
     """
@@ -424,6 +441,26 @@ def project_log_objects_physical(
     be constrained through the same free/KK/known-beta options used by the
     multi-energy library, followed by optional rectangular value bounds.
     """
+    if (material_thickness is not None or fit_material_thickness or
+            thickness_supportmask is not None or
+            (recipe is not None and recipe.get("zero_thickness_outside_support", False))):
+        universal = _material_projector()
+        physical_recipe = universal.default_general_phase_retrieval_recipe()
+        if recipe is not None:
+            physical_recipe.update(recipe)
+        return universal.project_log_objects_physical(
+            log_objects, state_labels, energy_labels,
+            polarization_coefficients, beam_labels,
+            weights=weights, relaxation=relaxation,
+            saturated_states=saturated_states, iterations=iterations,
+            recipe=physical_recipe,
+            magnetization_supportmask=magnetization_supportmask,
+            projection_supportmask=projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=fit_material_thickness,
+            thickness_supportmask=thickness_supportmask,
+            return_components=return_components,
+        )
     log_objects = core._as_energy_stack(log_objects, name="log_objects")
     if not (0 <= relaxation <= 1):
         raise ValueError("relaxation must be between 0 and 1.")
@@ -720,6 +757,9 @@ def project_fourier_fields_general(
     log_floor=1e-12,
     magnetization_supportmask=None,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
+    thickness_supportmask=None,
     return_components=False,
 ):
     """Apply the selected general model to Fourier-domain fields."""
@@ -742,6 +782,9 @@ def project_fourier_fields_general(
             recipe=recipe,
             magnetization_supportmask=magnetization_supportmask,
             projection_supportmask=projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=fit_material_thickness,
+            thickness_supportmask=thickness_supportmask,
             return_components=return_components,
         )
     else:
@@ -847,6 +890,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("final_fourier_constraint must be bool.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
+    if not (0 <= recipe["final_projection_relaxation"] <= 1):
+        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if recipe["projection_model"] not in {
         "physical_factorized",
         "state_energy_beam",
@@ -869,6 +914,10 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("physical_iterations must be a positive integer.")
     if not isinstance(recipe["zero_magnetization_outside_support"], bool):
         raise ValueError("zero_magnetization_outside_support must be bool.")
+    if not isinstance(recipe["zero_thickness_outside_support"], bool):
+        raise ValueError("zero_thickness_outside_support must be bool.")
+    if not isinstance(recipe["fit_material_thickness"], bool):
+        raise ValueError("fit_material_thickness must be bool.")
     if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
         raise ValueError("projection_constraints_inside_support_only must be bool.")
     if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
@@ -1072,6 +1121,26 @@ def general_phase_retrieval_algorithm(
     supportmask = np.asarray(supportmask)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = _material_projector()._recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
+    thickness_supportmask = None
+    if recipe["zero_thickness_outside_support"]:
+        if recipe["projection_model"] != "physical_factorized":
+            raise ValueError(
+                "zero_thickness_outside_support requires projection_model='physical_factorized'."
+            )
+        thickness_supportmask = np.fft.fftshift(supportmask) != 0
+        if material_thickness is None:
+            material_thickness = np.ones((nx, ny), dtype=float)
+        material_thickness = material_thickness * thickness_supportmask
+        if not np.any(material_thickness > 0):
+            raise ValueError("The support contains no material pixels for thickness fitting.")
     # PhaseRtrv_core applies support constraints in the shifted object frame.
     # The log-object projection uses the same frame via fft2(fftshift(field)).
     magnetization_supportmask = (
@@ -1216,6 +1285,9 @@ def general_phase_retrieval_algorithm(
                 log_floor=recipe["log_floor"],
                 magnetization_supportmask=magnetization_supportmask,
                 projection_supportmask=projection_supportmask,
+                material_thickness=material_thickness,
+                fit_material_thickness=recipe["fit_material_thickness"],
+                thickness_supportmask=thickness_supportmask,
                 return_components=True,
             )
             errors["projection_steps"].append({
@@ -1226,16 +1298,16 @@ def general_phase_retrieval_algorithm(
                 "identifiable": components.get("identifiable"),
             })
 
-    # Return components from a final full-strength model decomposition.
+    # Return components from a final model decomposition.
     if recipe["projection_model"] != "none":
-        fields, components = project_fourier_fields_general(
+        projected_fields, components = project_fourier_fields_general(
             fields,
             metadata["states"],
             metadata["energies"],
             metadata["polarizations"],
             metadata["beams"],
             weights=recipe["observation_weights"],
-            relaxation=1.0,
+            relaxation=recipe["final_projection_relaxation"],
             rank_deficient=recipe["rank_deficient"],
             projection_model=recipe["projection_model"],
             saturated_states=recipe["saturated_states"],
@@ -1244,8 +1316,14 @@ def general_phase_retrieval_algorithm(
             log_floor=recipe["log_floor"],
             magnetization_supportmask=magnetization_supportmask,
             projection_supportmask=projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=recipe["fit_material_thickness"],
+            thickness_supportmask=thickness_supportmask,
             return_components=True,
         )
+        if recipe["final_projection_relaxation"] > 0:
+            fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
 
     # Optionally finish exactly on the measured Fourier amplitudes.
     if recipe["final_fourier_constraint"]:

@@ -1,4 +1,6 @@
 import unittest
+import contextlib
+import io
 from unittest.mock import patch
 
 import numpy as np
@@ -12,9 +14,275 @@ from library import phase_retrieval_core_dichroic as dichroic
 from library import phase_retrieval_core_multienergy_multimode as energy_modes
 from library import phase_retrieval_core_unified as unified
 from library import phase_retrieval_universal as universal
+from library import fthcore
 
 
 class PhaseRetrievalHandoffTests(unittest.TestCase):
+    def test_projection_focus_transform_is_reversible_and_zero_is_noop(self):
+        rng = np.random.default_rng(9)
+        fields = rng.normal(size=(2, 10, 10)) + 1j * rng.normal(size=(2, 10, 10))
+        setup = {"ccd_dist": 0.125, "px_size": 11e-6}
+        focused = universal._projection_focus_transform(
+            fields, [780.0, 790.0], 2.05, -0.76, setup,
+        )
+        restored = universal._projection_focus_transform(
+            focused, [780.0, 790.0], 2.05, -0.76, setup, inverse=True,
+        )
+
+        np.testing.assert_allclose(restored, fields, rtol=1e-12, atol=1e-12)
+        focus_setup = {**setup, "energy": 780.0}
+        expected = fthcore.propagate(
+            fields[0], 2.05e-6, focus_setup,
+        ) * np.exp(-0.76j)
+        np.testing.assert_allclose(focused[0], expected, rtol=1e-12, atol=1e-12)
+        np.testing.assert_array_equal(
+            universal._projection_focus_transform(
+                fields, [780.0, 790.0], 0.0, 2.0, None,
+            ),
+            fields,
+        )
+
+    def test_nonphysical_mode_can_be_common_across_states(self):
+        rng = np.random.default_rng(22)
+        fields = (rng.normal(size=(3, 2, 8, 8))
+                  + 1j * rng.normal(size=(3, 2, 8, 8)))
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(
+            constrain_nonphysical_modes_common=True,
+            nonphysical_modes_common_relaxation=1.0,
+        )
+
+        projected, groups = universal._project_nonphysical_modes_common(
+            fields,
+            energy_labels=[780.0, 780.0, 790.0],
+            beam_labels=["beam", "beam", "beam"],
+            recipe=recipe,
+        )
+
+        np.testing.assert_array_equal(projected[:, 0], fields[:, 0])
+        np.testing.assert_allclose(projected[0, 1], projected[1, 1])
+        self.assertFalse(np.allclose(projected[0, 1], projected[2, 1]))
+        self.assertEqual(groups[0]["observations"], [0, 1])
+
+    def test_reference_and_other_warmup_recipes_are_independent(self):
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(
+            warmup_mode=["HAPRE", "ER"], warmup_Nit=[700, 50],
+            warmup_RL_it=[0, 0], warmup_RL_freq=[1e9, 1e9],
+            warmup_reference_mode=["HAPRE", "ER"],
+            warmup_reference_Nit=[700, 50],
+            warmup_other_mode=["ER"], warmup_other_Nit=[50],
+            warmup_other_RL_it=[0], warmup_other_RL_freq=[1e9],
+        )
+
+        reference = universal._build_role_warmup_schedule(recipe, "reference")
+        other = universal._build_role_warmup_schedule(recipe, "other")
+
+        self.assertEqual(
+            [(stage["mode"], stage["Nit"]) for stage in reference],
+            [("HAPRE", 700), ("ER", 50)],
+        )
+        self.assertEqual(
+            [(stage["mode"], stage["Nit"]) for stage in other],
+            [("ER", 50)],
+        )
+
+    def test_workflow_tree_reports_recipes_and_startimage_handoff(self):
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(
+            warmup_reference_observation=0,
+            warmup_start_from_first=True,
+            warmup_reference_mode=["HAPRE", "ER"],
+            warmup_reference_Nit=[700, 50],
+            warmup_other_mode=["ER"], warmup_other_Nit=[50],
+            inner_mode=["ER"], inner_Nit=[20], outer_iterations=3,
+            freeze_saturated_fields=True,
+            saturated_states={"saturated": 1},
+        )
+
+        tree = universal.format_universal_workflow(
+            recipe, state_labels=["saturated", "field_1", "field_2"],
+        )
+
+        self.assertIn("Reference hologram: 'saturated'", tree)
+        self.assertIn("HAPRE × 700", tree)
+        self.assertIn("scaled final field from reference 'saturated'", tree)
+        self.assertIn("Other holograms: 'field_1', 'field_2'", tree)
+        self.assertIn("Joint reconstruction × 3 outer loops", tree)
+        self.assertIn("Saturated observations remain fixed", tree)
+
+    def test_universal_multimode_support_fft_start_matches_unified_start(self):
+        support = np.zeros((2, 8, 8), dtype=np.uint8)
+        support[0, 3:5, 3:5] = 1
+        support[1, 2:6, 2:6] = 1
+        intensities = np.arange(64, dtype=float).reshape(1, 8, 8) + 1
+        amplitudes = np.sqrt(intensities)
+        mask = np.zeros((1, 8, 8), dtype=np.uint8)
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(mode_initialization="support_fft", Nmodes=2)
+
+        actual = universal._initialize_physical_modal_fields(
+            support, amplitudes, intensities, mask, recipe,
+        )
+        expected = np.stack([
+            np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(mode)))
+            for mode in support
+        ])
+        measured = amplitudes[0].ravel()
+        current = np.sqrt(np.sum(np.abs(expected) ** 2, axis=0)).ravel()
+        scale = np.dot(measured, current) / np.dot(measured, measured)
+
+        np.testing.assert_allclose(actual[0], expected / scale)
+
+    def test_two_mode_universal_warmup_matches_unified_full_coherence(self):
+        rng = np.random.default_rng(14)
+        saturated = rng.uniform(0.5, 3.0, (12, 12))
+        loop = 0.9 * saturated + rng.uniform(0.05, 0.2, (12, 12))
+        support = np.zeros((12, 12), dtype=np.uint8)
+        support[4:8, 4:8] = 1
+        mask = np.zeros((12, 12), dtype=np.uint8)
+
+        pair_recipe = unified.default_phase_retrieval_recipe()
+        pair_recipe.update(
+            algorithm_list=["HAPRE", "ER", "ER"],
+            number_iterations=[2, 1, 1],
+            helicity=["saturated", "saturated", "loop"],
+            beta_zero=[0.5] * 3,
+            beta_mode=["arctan", "const", "const"],
+            alpha_zero=[0.0] * 3, alpha_mode=["const"] * 3,
+            RL_its=[0] * 3, RL_freqs=[1e9] * 3,
+            TV_freqs=[1e9] * 3, plot_every=[1e9] * 3,
+            average_img=[1] * 3, Fourier_last=[True] * 3,
+            Startimage=[None, "saturated", "saturated"],
+            Startgamma=[None] * 3, output=[False, True, True],
+            return_format="dict", modes=[1, 2],
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            pair = unified.phase_retrieval_algorithm(
+                {"saturated": saturated, "loop": loop}, mask, support,
+                pair_recipe,
+            )
+
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(
+            modes=[1, 2], mode_initialization="support_fft",
+            constrain_nonphysical_modes_common=True,
+            nonphysical_modes_common_relaxation=1.0,
+            warmup_start_from_first=True, warmup_reference_observation=0,
+            warmup_seed_scale_fit="linear", startimage_scale_fit="through_origin",
+            warmup_mode=["HAPRE", "ER"], warmup_Nit=[2, 1],
+            warmup_reference_mode=["HAPRE", "ER"],
+            warmup_reference_Nit=[2, 1],
+            warmup_other_mode=["ER"], warmup_other_Nit=[1],
+            warmup_beta_mode=["arctan", "const"],
+            warmup_reference_beta_mode=["arctan", "const"],
+            warmup_other_beta_mode=["const"],
+            inner_mode=["ER"], inner_Nit=[1], outer_iterations=1,
+            physical_iterations=1, projection_every=2,
+            saturated_states={"saturated": 1}, shuffle_observations=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            final_fields, warmup, _, _, _ = universal.universal_phase_retrieval_algorithm(
+                np.stack([saturated, loop]), mask, support,
+                ["saturated", "loop"], [783, 783], [1, 1], ["beam", "beam"],
+                universal_recipe=recipe,
+                phase_retrieval_kernel=unified.PhaseRtrv_core,
+            )
+
+        np.testing.assert_allclose(
+            warmup[0], pair["full_coherence"]["saturated"], rtol=1e-7, atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            warmup[1], pair["full_coherence"]["loop"], rtol=1e-7, atol=1e-7,
+        )
+        np.testing.assert_allclose(final_fields[0, 1], final_fields[1, 1])
+
+    def test_partial_coherence_can_use_fixed_kernel(self):
+        shape = (8, 8)
+        gamma = np.zeros(shape)
+        gamma[4, 4] = 1
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(partial_coherence=True, final_fourier_constraint=False,
+                      Nmodes=1, average_img=1, plot_every=100)
+        stage = dict(mode="ER", Nit=4, beta_zero=0.5, beta_mode="const",
+                     alpha_zero=0, alpha_mode="const", TV_freq=100,
+                     RL_it=1, RL_freq=4)
+        field, results, updated_gamma = universal._run_update_schedule(
+            np.ones(shape, dtype=complex), np.ones(shape),
+            np.ones(shape), np.zeros(shape), [stage], recipe,
+            gamma=gamma, return_gamma=True,
+        )
+        self.assertEqual(results[0]["coherence"], "partial")
+        self.assertEqual(field.shape, shape)
+        np.testing.assert_allclose(updated_gamma, gamma, atol=1e-7)
+
+    def test_saturated_first_universal_warmup_matches_unified_pair(self):
+        rng = np.random.default_rng(31)
+        saturated = rng.uniform(0.5, 3.0, (16, 16))
+        loop = 0.8 * saturated + rng.uniform(0.1, 0.4, (16, 16))
+        support = np.zeros((16, 16), dtype=np.uint8)
+        support[5:11, 5:11] = 1
+        mask = np.zeros((16, 16), dtype=np.uint8)
+        mask[8, 8] = 1
+
+        pair_recipe = unified.default_phase_retrieval_recipe()
+        pair_recipe.update(
+            algorithm_list=["HAPRE", "ER", "HAPRE", "HAPRE", "ER", "ER"],
+            number_iterations=[4] * 6,
+            helicity=["saturated", "saturated", "loop", "saturated",
+                      "saturated", "loop"],
+            beta_zero=[0.5] * 6,
+            beta_mode=["arctan", "const", "const", "arctan", "const", "const"],
+            alpha_zero=[0] * 6, alpha_mode=["const"] * 6,
+            RL_its=[0, 0, 0, 1, 1, 1],
+            RL_freqs=[1e9, 1e9, 1e9, 1, 1, 1],
+            TV_freqs=[1e9] * 6, plot_every=[1e9] * 6,
+            average_img=[1] * 6, Fourier_last=[True] * 6,
+            Startimage=[None] + ["saturated"] * 5,
+            Startgamma=[None] * 3 + [None, "saturated", "saturated"],
+            output=[False] * 6, return_format="dict", modes=[1],
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            pair = unified.phase_retrieval_algorithm(
+                {"saturated": saturated, "loop": loop}, mask, support,
+                pair_recipe,
+            )
+
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        recipe.update(
+            modes=[1], partial_coherence=True,
+            coherence_kernel_scope="shared", final_fourier_constraint=False,
+            warmup_mode=["HAPRE", "ER", "HAPRE", "ER"],
+            warmup_Nit=[4] * 4, warmup_beta_mode=["arctan", "const", "arctan", "const"],
+            warmup_RL_it=[0, 0, 1, 1], warmup_RL_freq=[1e9, 1e9, 1, 1],
+            warmup_start_from_first=True, warmup_reference_observation=0,
+            warmup_seed_scale_fit="linear", warmup_seeded_stage_indices=[3],
+            startimage_scale_fit="through_origin", average_img=1,
+            inner_mode=["ER"], inner_Nit=[1], outer_iterations=1,
+            physical_iterations=1, saturated_states={"saturated": 1},
+            projection_every=2, shuffle_observations=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, warmup, _, _, _ = universal.universal_phase_retrieval_algorithm(
+                np.stack([saturated, loop]), mask, support,
+                ["saturated", "loop"], [783, 783], [1, 1], ["beam", "beam"],
+                universal_recipe=recipe,
+                phase_retrieval_kernel=unified.PhaseRtrv_core,
+            )
+        for index, label in enumerate(("saturated", "loop")):
+            if label == "saturated":
+                np.testing.assert_allclose(
+                    warmup[index], pair["partial_coherence"][label],
+                    rtol=1e-6, atol=1e-6,
+                )
+            else:
+                # 01 fills the masked pixels for the loop's PC step using
+                # its earlier coherent loop reconstruction. 02 starts that
+                # step directly from saturated, so its fill is slightly different.
+                relative_error = (np.linalg.norm(warmup[index] - pair["partial_coherence"][label])
+                                  / np.linalg.norm(pair["partial_coherence"][label]))
+                self.assertLess(relative_error, 0.02)
+
     def test_unified_returns_every_effective_modal_support(self):
         shape = (16, 16)
         support = np.zeros(shape, dtype=np.uint8)

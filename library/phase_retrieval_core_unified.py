@@ -45,6 +45,11 @@ from scipy import stats
 from scipy.ndimage import affine_transform
 
 try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
+try:
     from . import phase_retrieval_gradient as gradient
 except ImportError:
     import phase_retrieval_gradient as gradient
@@ -141,6 +146,8 @@ def default_phase_retrieval_recipe():
         # modes=[1, 2] uses the original and a 2x spatially enlarged support.
         # A supplied 3-D modal support bypasses automatic enlargement.
         "modes": None,
+        "recenter_modal_supports": False,
+        "mode_support_center": "image",
         # Remove this many pixels from every edge of returned spatial arrays.
         "crop": 0,
         # Crop detector intensities first, then bin; center crop object support.
@@ -604,6 +611,10 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not isinstance(recipe["normalize_startimage_between_holograms"], bool):
         raise ValueError("normalize_startimage_between_holograms must be bool.")
+    if not isinstance(recipe["recenter_modal_supports"], bool):
+        raise ValueError("recenter_modal_supports must be bool.")
+    if recipe["mode_support_center"] not in {"image", "components"}:
+        raise ValueError("mode_support_center must be 'image' or 'components'.")
 
     if recipe["subtract_startimage_fit_intercept"] is not False:
         raise ValueError("Startimage normalization only supports scaling; set subtract_startimage_fit_intercept=False.")
@@ -1036,7 +1047,13 @@ def phase_retrieval_algorithm(
             "bsmask": bsmask,
         }
 
-    support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+    if recipe["recenter_modal_supports"] and supportmask.ndim == 2:
+        support_modes, mode_support_shifts = geometry.recenter_modal_supports(
+            supportmask, mode_labels, center=recipe["mode_support_center"],
+        )
+    else:
+        support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+        mode_support_shifts = [(0, 0)] * Nmodes
     retrieval_support = support_modes if Nmodes > 1 else support_modes[0]
 
     first_startimage = recipe["Startimage"][0]
@@ -1297,6 +1314,7 @@ def phase_retrieval_algorithm(
     result = {
         "supportmask": retrieval_support.copy(),
         "supportmask_used": retrieval_support.copy(),
+        "mode_support_shifts": mode_support_shifts,
         "mask_pixel": mask_pixel.copy(),
         "roi": roi,
         "full_coherence": retrieved_fc,

@@ -102,6 +102,8 @@ def project_fourier_fields_multi_energy_multimode(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -115,6 +117,8 @@ def project_fourier_fields_multi_energy_multimode(
         phase_stack, name="phase_stack"
     )
     n_energy, nmodes, nx, ny = modal_fields.shape
+    if fit_material_thickness and nmodes > 1:
+        raise ValueError("Fitting one shared thickness across multiple modes is not supported; provide a fixed material map.")
     if projection_supportmask is not None:
         projection_supportmask = np.asarray(projection_supportmask) != 0
         if projection_supportmask.ndim == 2:
@@ -164,6 +168,8 @@ def project_fourier_fields_multi_energy_multimode(
             fit_known_beta_scale=fit_known_beta_scale,
             fit_known_beta_offset=fit_known_beta_offset,
             projection_supportmask=mode_projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=fit_material_thickness,
             return_components=return_components,
         )
         if return_components:
@@ -441,6 +447,16 @@ def multi_energy_phase_retrieval_algorithm(
     n_energy, nx, ny = holograms.shape
     nmodes = _validate_nmodes(recipe["Nmodes"])
     _verify_multi_energy_multimode_recipe(recipe, n_energy)
+    if nmodes > 1 and recipe["fit_material_thickness"]:
+        raise ValueError("Fitting thickness requires Nmodes=1; a fixed material map works for multiple modes.")
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = multi_energy._material_projector()._recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
 
     supportmask = np.asarray(supportmask)
     if supportmask.ndim == 2:
@@ -599,6 +615,8 @@ def multi_energy_phase_retrieval_algorithm(
                     fit_known_beta_scale=recipe["fit_known_beta_scale"],
                     fit_known_beta_offset=recipe["fit_known_beta_offset"],
                     projection_supportmask=projection_supportmask,
+                    material_thickness=material_thickness,
+                    fit_material_thickness=recipe["fit_material_thickness"],
                     return_components=True,
                 )
             )
@@ -615,13 +633,13 @@ def multi_energy_phase_retrieval_algorithm(
                 }
             )
 
-    fields, components = project_fourier_fields_multi_energy_multimode(
+    projected_fields, components = project_fourier_fields_multi_energy_multimode(
         fields,
         projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
-        relaxation=1.0,
+        relaxation=recipe["final_projection_relaxation"],
         log_floor=recipe["log_floor"],
         spectral_constraint=recipe["spectral_constraint"],
         energy_values=recipe["energy_values"],
@@ -635,8 +653,13 @@ def multi_energy_phase_retrieval_algorithm(
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
         projection_supportmask=projection_supportmask,
+        material_thickness=material_thickness,
+        fit_material_thickness=recipe["fit_material_thickness"],
         return_components=True,
     )
+    if recipe["final_projection_relaxation"] > 0:
+        fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
     fields, _ = _as_energy_mode_stack(fields)
 
     if recipe["final_fourier_constraint"]:

@@ -11,6 +11,11 @@ RAW_FOLDER = Path("/nfs/ruche/sextants-soleil/com-sextants/COMET_20260902_Cocoon
 
 Every generated result is written below `BASEFOLDER/processed/`.
 
+The [phase retrieval API and workflow guide](docs/phase_retrieval_workflow.md)
+documents the unified and universal drivers, recipe settings, warmup handoffs,
+partial coherence, multimode retrieval, physical projections, and the recipe
+workflow-tree helper used by the current notebooks.
+
 FTH and phase-retrieval result figures are written directly to `processed/`.
 Manually prepared detector masks live in `processed/mask_pixels/`, and support masks
 live in `processed/supportmask/`.

@@ -3,10 +3,122 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import affine_transform
+from scipy.ndimage import affine_transform, center_of_mass, label, shift as image_shift
 
 
 GEOMETRY_DEFAULTS = {"binning": 1, "crop": 0, "roi": None}
+
+
+def recenter_source_support(support, crop, binning, margin=2):
+    """Translate an object support so the detector crop/bin grid retains it.
+
+    The returned integer source-grid shift can also be applied to any known
+    object-space thickness or material map. Detector masks must stay fixed.
+    """
+    support = np.asarray(support)
+    if support.ndim != 2 or not np.any(support):
+        raise ValueError("support must be a nonempty 2D array")
+    shape = np.asarray(support.shape, dtype=int)
+    crop = _positive_integer(crop, "crop", 0)
+    binning = _positive_integer(binning, "binning", 1)
+    cropped = shape - 2 * crop
+    if np.any(cropped <= 0):
+        raise ValueError("crop removes the complete support grid")
+    used = cropped // binning
+    if np.any(used < 1):
+        raise ValueError("binning is larger than the cropped grid")
+    if crop:
+        source_center = (shape - 1) / 2
+        used_center = (used - 1) / 2
+        scale = shape / cropped
+        visible_low = source_center + (margin - used_center) * scale
+        visible_high = source_center + (used - 1 - margin - used_center) * scale
+    else:
+        origin = (shape - used) // 2
+        visible_low = origin + margin
+        visible_high = origin + used - 1 - margin
+    points = np.argwhere(support != 0)
+    lower = np.ceil(visible_low - points.min(axis=0)).astype(int)
+    upper = np.floor(visible_high - points.max(axis=0)).astype(int)
+    if np.any(lower > upper):
+        raise ValueError(
+            f"Support span cannot fit retrieval grid {tuple(used)} "
+            f"with crop={crop}, binning={binning}."
+        )
+    translation = np.minimum(np.maximum(np.zeros(2, dtype=int), lower), upper)
+    if np.any(translation):
+        shifted = image_shift(support.astype(float), translation, order=0,
+                              mode="constant", cval=0, prefilter=False)
+        if np.count_nonzero(shifted) != np.count_nonzero(support):
+            raise ValueError("Recentering would cut support at the source-grid edge")
+        support = shifted.astype(support.dtype)
+    return support.copy(), tuple(int(v) for v in translation)
+
+
+def recenter_modal_supports(support, factors, center="image", margin=2):
+    """Expand each mode without clipping and move only modes that need it.
+
+    Each modal support gets its own translation. This leaves the factor-1
+    physical support at its calibrated position while fitting factor-2 inside
+    the available object field of view.
+    """
+    support = np.asarray(support)
+    if support.ndim != 2 or not np.any(support):
+        raise ValueError("support must be a nonempty 2D array")
+    if center not in {"image", "components"}:
+        raise ValueError("center must be 'image' or 'components'")
+    shape = np.asarray(support.shape, dtype=int)
+    image_center = (shape - 1) / 2
+    if center == "components":
+        labels, count = label(support != 0, structure=np.ones((3, 3), dtype=int))
+        component_centers = center_of_mass(support != 0, labels, range(1, count + 1))
+    else:
+        labels, count, component_centers = None, 1, [image_center]
+
+    masks, shifts = [], []
+    for factor in factors:
+        factor = float(factor)
+        if not np.isfinite(factor) or factor <= 0:
+            raise ValueError("mode factors must be finite and positive")
+        if factor == 1:
+            masks.append((support != 0).astype(np.uint8))
+            shifts.append((0, 0))
+            continue
+        bounds = []
+        for component in range(1, count + 1):
+            points = np.argwhere((labels == component) if labels is not None
+                                 else (support != 0))
+            center_point = (np.asarray(component_centers[component - 1])
+                            if labels is not None else image_center)
+            bounds.append((center_point + factor * (points.min(axis=0) - center_point),
+                           center_point + factor * (points.max(axis=0) - center_point)))
+        minimum = np.min([pair[0] for pair in bounds], axis=0)
+        maximum = np.max([pair[1] for pair in bounds], axis=0)
+        lower = np.ceil(margin - minimum).astype(int)
+        upper = np.floor(shape - 1 - margin - maximum).astype(int)
+        if np.any(lower > upper):
+            raise ValueError(
+                f"Mode factor {factor:g} support cannot fit retrieval grid "
+                f"{tuple(shape)}; reduce binning/crop or the mode factor."
+            )
+        translation = np.minimum(np.maximum(np.zeros(2, dtype=int), lower), upper)
+        expanded = np.zeros(tuple(shape), dtype=bool)
+        for component in range(1, count + 1):
+            center_point = (np.asarray(component_centers[component - 1])
+                            if labels is not None else image_center)
+            component_mask = ((labels == component) if labels is not None
+                              else (support != 0))
+            inverse = np.eye(2) / factor
+            # Equivalent to center + (output - center - translation)/factor.
+            offset = center_point - inverse @ (center_point + translation)
+            expanded |= affine_transform(
+                component_mask.astype(np.uint8), inverse, offset=offset,
+                output_shape=tuple(shape), order=0, mode="constant", cval=0,
+                prefilter=False,
+            ) != 0
+        masks.append(expanded.astype(np.uint8))
+        shifts.append(tuple(int(v) for v in translation))
+    return np.stack(masks), shifts
 
 
 def _positive_integer(value, name, minimum):
@@ -105,8 +217,8 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     support = np.asarray(supportmask)
     if mask.shape not in {source_shape, images.shape}:
         raise ValueError("mask_pixel must be 2D or match the hologram stack.")
-    if support.ndim not in (2, 3) or support.shape[-2:] != source_shape:
-        raise ValueError("supportmask must be 2D or modal 3D and match the holograms.")
+    if support.ndim not in (2, 3):
+        raise ValueError("supportmask must be 2D or modal 3D.")
     start = None if start_fields is None else np.asarray(start_fields)
     if start is not None and start.shape[-2:] != source_shape:
         raise ValueError("start_fields spatial shape must match the holograms.")
@@ -117,6 +229,10 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     if min(used_shape) < 1:
         raise ValueError("recipe['binning'] is larger than the cropped hologram.")
     final_shape = used_shape
+    if support.shape[-2:] not in {source_shape, used_shape}:
+        raise ValueError(
+            "supportmask must match the source hologram grid or the cropped/binned retrieval grid."
+        )
     trimmed = tuple(n * binning for n in used_shape)
     trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed))
     detector_origin = tuple(crop + o for o in trim_origin)
@@ -152,7 +268,9 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     mask = blockify(mask != 0).any(axis=(-3, -1)).astype(np.uint8)
     if start is not None:
         start = blockify(start).mean(axis=(-3, -1))
-    if crop:
+    if support.shape[-2:] == used_shape:
+        support = support.copy()
+    elif crop:
         support = _resample_spatial(
             support, used_shape, order=0,
             coordinate_scale=np.asarray(source_shape) / np.asarray(cropped_shape),

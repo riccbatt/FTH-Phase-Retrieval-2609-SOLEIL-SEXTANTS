@@ -1,5 +1,10 @@
 # FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS
 
+See the repository-level
+[phase retrieval API and workflow guide](../docs/phase_retrieval_workflow.md)
+for universal recipes, warmup branches, partial coherence, multimode settings,
+physical projections, and the printable workflow tree.
+
 This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The numbered reconstruction notebooks share one HDF5 data dictionary in `processed/Logs/`.
 
 All notebooks use the directory in which they are currently running as
@@ -422,3 +427,52 @@ For the starting dataset with positive image ID `13` and `USER = "rb"`:
 - HDF5 data: `processed/Logs/data_recon_ImId_0013_rb.hdf5`
 - FTH PNG: `processed/FTH_recon_ImId_0013_rb.png`
 - Phase retrieval PNG: `processed/PhR_recon_ImId_0013_rb.png`
+
+# Optional material thickness in joint retrieval
+
+Set `MODES = [1]` or `MODES = [1, 2]` in the hyperspectral notebook. These
+are real-space support expansion factors, as in `04_maxiv_phase_retrieval`:
+mode 1 uses the original support and mode 2 uses a support enlarged 2× about
+the image center. With two incoherent modes, the detector constraint uses
+`I = |Psi_1|² + |Psi_2|²`, and returned fields have shape
+`(observations, 2, rows, columns)`. The shared charge, magnetic, and
+thickness model projects mode 1 only. Mode 2 still receives the detector
+amplitude and real-space support updates. `MODE_INITIALIZATION_SEED` controls
+the initial modal phases. Set `USE_PARTIAL_COHERENCE = True` to fit a
+Richardson–Lucy coherence kernel during the warmup and joint updates. For this
+energy scan, `COHERENCE_KERNEL_SCOPE = "per_observation"` is the default:
+each energy and polarization observation gets its own kernel. Set it to
+`"shared"` only when one detector kernel is justified for the entire series.
+With two modes, each mode has its own kernel. The fitted kernels are saved in
+the output HDF5 file under `components`.
+
+The hyperspectral notebook now defaults to `THICKNESS_APERTURE_MODE = "fixed"`.
+It calls `universal.largest_support_component(supportmask)` on the saved
+object support, then gives the resulting binary mask to the physical recipe.
+This fixes relative thickness at exactly 1 in the largest aperture and 0 in
+the smaller reference apertures and elsewhere. Set the mode to `"support"`
+to keep the same known vacuum pixels while fitting thickness within the
+object aperture. Set it to `"none"` to use the file inputs or the previous
+unconstrained default. The notebook displays the selected aperture before
+retrieval.
+
+The hyperspectral phase-retrieval notebook accepts `MATERIAL_MASK_FILE` (a
+binary PNG or `.npy` array: nonzero material, zero known vacuum) and
+`RELATIVE_THICKNESS_FILE` (a nonnegative `.npy` array). The map may match the
+input object grid or the cropped/binned retrieval grid. It is mapped through
+the same crop/bin geometry as the object support and then applied to both
+charge and magnetic responses. A binary mask sets unit relative thickness in
+material and zero thickness in reference holes. Set
+`THICKNESS_APERTURE_MODE = "none"` and leave both file options `None` to use
+the previous unconstrained model.
+Set `FIT_MATERIAL_THICKNESS = True` to fit a shared nonnegative relative
+thickness field; a supplied material mask still fixes its zeros. The fitted
+scale is normalized and is absorbed into the charge and magnetic spectra.
+Set `ZERO_THICKNESS_OUTSIDE_SUPPORT = True` to force zero thickness outside the
+phase-retrieval support. This can be combined with `MATERIAL_MASK_FILE` to mark
+reference holes inside the support as vacuum too.
+The standalone multienergy library accepts the same recipe keys. Its
+`rank1_spectral` mode can fit thickness; `svd` can enforce known vacuum pixels
+but has no single thickness factor to fit. For multiple incoherent modes, a
+fixed material map applies to every mode; fitting one shared thickness is not
+available in that driver.

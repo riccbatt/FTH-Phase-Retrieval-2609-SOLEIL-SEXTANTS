@@ -105,8 +105,8 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     support = np.asarray(supportmask)
     if mask.shape not in {source_shape, images.shape}:
         raise ValueError("mask_pixel must be 2D or match the hologram stack.")
-    if support.ndim not in (2, 3) or support.shape[-2:] != source_shape:
-        raise ValueError("supportmask must be 2D or modal 3D and match the holograms.")
+    if support.ndim not in (2, 3):
+        raise ValueError("supportmask must be 2D or modal 3D.")
     start = None if start_fields is None else np.asarray(start_fields)
     if start is not None and start.shape[-2:] != source_shape:
         raise ValueError("start_fields spatial shape must match the holograms.")
@@ -117,6 +117,10 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     if min(used_shape) < 1:
         raise ValueError("recipe['binning'] is larger than the cropped hologram.")
     final_shape = used_shape
+    if support.shape[-2:] not in {source_shape, used_shape}:
+        raise ValueError(
+            "supportmask must match the source hologram grid or the cropped/binned retrieval grid."
+        )
     trimmed = tuple(n * binning for n in used_shape)
     trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed))
     detector_origin = tuple(crop + o for o in trim_origin)
@@ -152,7 +156,9 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     mask = blockify(mask != 0).any(axis=(-3, -1)).astype(np.uint8)
     if start is not None:
         start = blockify(start).mean(axis=(-3, -1))
-    if crop:
+    if support.shape[-2:] == used_shape:
+        support = support.copy()
+    elif crop:
         support = _resample_spatial(
             support, used_shape, order=0,
             coordinate_scale=np.asarray(source_shape) / np.asarray(cropped_shape),

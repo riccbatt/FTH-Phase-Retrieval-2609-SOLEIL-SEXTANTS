@@ -44,6 +44,15 @@ try:
 except ImportError:
     import phase_retrieval_geometry as geometry
 
+
+def _material_projector():
+    """Load the shared optional material model without changing legacy paths."""
+    try:
+        from . import phase_retrieval_universal as universal
+    except ImportError:
+        import phase_retrieval_universal as universal
+    return universal
+
 from numpy.typing import ArrayLike
 
 import matplotlib.pyplot as plt
@@ -1639,6 +1648,8 @@ def project_log_object_low_rank(
     weights=None,
     relaxation=1.0,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -1649,6 +1660,8 @@ def project_log_object_low_rank(
     where C(r) is energy independent and Delta_E(r) has rank ``rank`` over the
     energy axis. This is the unconstrained SVD option.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_log_object_low_rank(**locals())
     L_stack = _as_energy_stack(L_stack, name="L_stack")
 
     if isinstance(rank, bool) or not isinstance(rank, (int, np.integer)):
@@ -2038,6 +2051,8 @@ def project_log_object_rank1_spectral(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -2049,6 +2064,8 @@ def project_log_object_rank1_spectral(
     vector a_E. The vector can be unconstrained, KK-constrained, constrained by a
     known beta spectrum, or constrained by known beta + KK.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_log_object_rank1_spectral(**locals())
     L_stack = _as_energy_stack(L_stack, name="L_stack")
     if not (0 <= relaxation <= 1):
         raise ValueError("relaxation must be between 0 and 1.")
@@ -2178,6 +2195,8 @@ def project_fourier_fields_multi_energy(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -2195,8 +2214,10 @@ def project_fourier_fields_multi_energy(
         Generic SVD projection, L_E = C + rank-K residual.
     'rank1_spectral':
         Explicit physical model, L_E = C + M*a_E, with optional spectral
-        constraints on the complex energy dependence a_E.
+    constraints on the complex energy dependence a_E.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_fourier_fields_multi_energy(**locals())
     model = str(projection_model).lower()
     if model in {"none", "no", "off", "unconstrained"}:
         if return_components:
@@ -2324,6 +2345,7 @@ def default_multi_energy_phase_retrieval_recipe():
         # one full energy sweep, preserving the historical default cadence.
         "projection_every": None,
         "projection_relaxation": 1.0,
+        "final_projection_relaxation": 1.0,
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         # If True, apply any joint energy projection only inside the support.
@@ -2331,6 +2353,9 @@ def default_multi_energy_phase_retrieval_recipe():
         # Backward-compatible alias accepted by the general/universal libraries.
         "physical_constraints_inside_support_only": False,
         "projection_static_mode": "mean",
+        "material_mask": None,
+        "material_thickness": None,
+        "fit_material_thickness": False,
         "energy_weights": None,
         "log_floor": 1e-12,
 
@@ -2702,6 +2727,12 @@ def _verify_multi_energy_recipe(recipe, nE):
             "projection_model must be 'none', 'svd'/'low_rank', "
             "or 'rank1_spectral'."
         )
+    if not isinstance(recipe["fit_material_thickness"], bool):
+        raise ValueError("fit_material_thickness must be bool.")
+    if recipe["fit_material_thickness"] and model not in {
+        "rank1_spectral", "spectral", "explicit", "cma", "c+m*a",
+    }:
+        raise ValueError("Fitting thickness requires projection_model='rank1_spectral'.")
 
     _build_update_schedule(
         recipe,
@@ -2745,6 +2776,8 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("plot_every must be > 0.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
+    if not (0 <= recipe["final_projection_relaxation"] <= 1):
+        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
         raise ValueError("projection_constraints_inside_support_only must be bool.")
     if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
@@ -2912,6 +2945,14 @@ def multi_energy_phase_retrieval_algorithm(
 
     nE, nx, ny = holograms.shape
     _verify_multi_energy_recipe(recipe, nE)
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = _material_projector()._recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
     projection_supportmask = (
@@ -3059,6 +3100,8 @@ def multi_energy_phase_retrieval_algorithm(
                 fit_known_beta_scale=recipe["fit_known_beta_scale"],
                 fit_known_beta_offset=recipe["fit_known_beta_offset"],
                 projection_supportmask=projection_supportmask,
+                material_thickness=material_thickness,
+                fit_material_thickness=recipe["fit_material_thickness"],
                 return_components=True,
             )
             errors["projection_steps"].append(
@@ -3081,13 +3124,13 @@ def multi_energy_phase_retrieval_algorithm(
             )
 
     # Final projection, unless the user explicitly selected no projection.
-    fields, components = project_fourier_fields_multi_energy(
+    projected_fields, components = project_fourier_fields_multi_energy(
         fields,
         projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
-        relaxation=1.0,
+        relaxation=recipe["final_projection_relaxation"],
         log_floor=recipe["log_floor"],
         spectral_constraint=recipe["spectral_constraint"],
         energy_values=recipe["energy_values"],
@@ -3101,8 +3144,13 @@ def multi_energy_phase_retrieval_algorithm(
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
         projection_supportmask=projection_supportmask,
+        material_thickness=material_thickness,
+        fit_material_thickness=recipe["fit_material_thickness"],
         return_components=True,
     )
+    if recipe["final_projection_relaxation"] > 0:
+        fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
 
     if recipe["final_fourier_constraint"]:
         for j in range(nE):
