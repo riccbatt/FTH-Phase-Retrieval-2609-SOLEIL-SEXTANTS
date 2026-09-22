@@ -289,3 +289,25 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     geometry = Geometry(source_shape, used_shape, final_shape, binning, crop,
                         roi, mask.copy(), support.copy())
     return images, mask, support, start, geometry
+
+
+def support_bounding_roi(support, padding_fraction=0.15):
+    """Centered display ROI enclosing the largest aperture on the current grid.
+
+    Call after crop/binning/support recentering. Fractional padding scales with
+    the aperture, so no manually maintained source-to-retrieval pixel offsets.
+    """
+    from scipy.ndimage import label
+    support = np.asarray(support) != 0
+    if support.ndim != 2 or padding_fraction < 0:
+        raise ValueError("Expected 2D support and nonnegative padding fraction.")
+    labels, count = label(support, structure=np.ones((3, 3)))
+    if not count:
+        raise ValueError("Support has no aperture.")
+    sizes = np.bincount(labels.ravel()); sizes[0] = 0
+    points = np.argwhere(labels == np.argmax(sizes))
+    low, high = points.min(axis=0), points.max(axis=0) + 1
+    pad = np.ceil((high - low) * padding_fraction).astype(int)
+    low = np.maximum(low - pad, 0)
+    high = np.minimum(high + pad, support.shape)
+    return tuple(slice(int(a), int(b)) for a, b in zip(low, high))

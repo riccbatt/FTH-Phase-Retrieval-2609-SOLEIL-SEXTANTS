@@ -90,9 +90,9 @@ else:
     import numpy as xp
     import scipy.fft as fft
 
-    # Use all available CPU workers for FFT operations.
-    fft2 = partial(fft.fft2, workers=os.cpu_count())
-    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
+    # Respect scipy.fft.set_workers in each observation worker.
+    fft2 = fft.fft2
+    ifft2 = fft.ifft2
 
 
 def to_numpy(array, xp):
@@ -2922,6 +2922,21 @@ def format_universal_workflow(
             "├─ Other modes: state-independent common object per energy/beam; "
             f"relaxation={recipe['nonphysical_modes_common_relaxation']}"
         )
+    if recipe["preserve_warmup_masked_intensity"]:
+        lines.append("├─ Warmup order: ALL coherent states, then partial-coherence states")
+        lines.append("│  Masked intensities remain fixed to each state's coherent warmup")
+    if recipe["freeze_coherence_after_reference"]:
+        lines.append("├─ Gamma: fit reference, then reuse unchanged for every state")
+    elif recipe["coherence_kernel_scope"] == "shared":
+        descriptions = {
+            "sequential": "each state passes its updated gamma to the next state (serial)",
+            "average": "independent fits from one snapshot; normalized weighted average after each round",
+            "pooled": "fixed gamma per round; pooled fit against all states afterward",
+        }
+        lines.append("├─ Gamma: " + descriptions[recipe["shared_coherence_update"]])
+    if recipe["warmup_calibrate_shared_gamma"]:
+        lines.append("├─ Partial warmup: calibrate reference gamma first, then seed all loop fits with it")
+    lines.append(f"├─ CPU workers: {recipe['observation_workers']}; FFT threads each: {recipe['fft_workers']}")
     if recipe["freeze_saturated_fields"]:
         lines.append("├─ Saturated observations remain fixed after warmup")
     if recipe["final_projection_relaxation"] == 0:
@@ -3601,11 +3616,24 @@ def default_general_phase_retrieval_recipe():
         "warmup_start_from_first": False,
         "warmup_reference_observation": 0,
         "startimage_scale_fit": "linear",  # or "through_origin"
+        "startimage_radial_normalization": False,
         "warmup_seed_scale_fit": "sum",  # or "linear" intensity slope
         "warmup_seeded_stage_indices": None,  # None repeats the full schedule
         "freeze_saturated_fields": False,
         "partial_coherence": False,
         "coherence_kernel_scope": "per_observation",  # or "shared" across states
+        # sequential: hand gamma to the next state; average: independent fits
+        # from one snapshot; pooled: fixed gamma per sweep then joint RL fit.
+        "shared_coherence_update": "sequential",
+        "warmup_calibrate_shared_gamma": False,
+        "coherence_round_iterations": 50,
+        "observation_workers": 1,
+        "fft_workers": 1,
+        # Complete all coherent warmups first; freeze their missing-pixel targets
+        # for every later partial-coherence stage (sum of intensities for modes).
+        "preserve_warmup_masked_intensity": False,
+        # Shared scope only: calibrate gamma in reference warmup, then hold it.
+        "freeze_coherence_after_reference": False,
         "shuffle_observations": True,
         "random_seed": None,
         "beta_zero": 0.5,
@@ -3667,6 +3695,9 @@ def default_general_phase_retrieval_recipe():
         "rank_deficient": "error",
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
+        "physical_projection_object_roi": False,
+        "physical_phase_reference": False,
+        "projection_diagnostic_observation": None,
         # Optional reversible focus transform around every object-space
         # physical projection. Zero propagation skips propagation and phase.
         "projection_focus_prop_um": 0.0,
@@ -4048,6 +4079,60 @@ def project_log_objects_physical(
     ) or iterations <= 0:
         raise ValueError("physical_iterations must be a positive integer.")
     recipe = default_general_phase_retrieval_recipe() if recipe is None else recipe
+    if recipe.get("physical_phase_reference", False):
+        # Pick equivalent complex-log branches relative to the first state in
+        # each energy/beam group. This preserves exp(log_object) exactly while
+        # preventing a +/- pi wrap from masquerading as a large magnetic phase.
+        # Assumption: relative state phases lie on the nearest reference branch.
+        log_objects = log_objects.copy()
+        phase_groups = {}
+        for index, key in enumerate(zip(energy_labels, beam_labels)):
+            phase_groups.setdefault(key, []).append(index)
+        for indices in phase_groups.values():
+            reference_phase = log_objects[indices[0]].imag.copy()
+            log_objects.imag[indices] = reference_phase + np.angle(np.exp(
+                1j * (log_objects.imag[indices] - reference_phase),
+            ))
+    if recipe.get("physical_projection_object_roi", False):
+        if material_thickness is None:
+            raise ValueError("Object-ROI physical projection requires a material thickness/aperture map.")
+        aperture = np.asarray(material_thickness) > 0
+        if projection_supportmask is not None:
+            aperture &= np.asarray(projection_supportmask) != 0
+        if not np.any(aperture):
+            raise ValueError("Physical projection aperture is empty.")
+        def pack(array):
+            return None if array is None else np.asarray(array)[aperture][:, None]
+        local_recipe = dict(recipe, physical_projection_object_roi=False, physical_phase_reference=False)
+        local, components = project_log_objects_physical(
+            log_objects[:, aperture, None], state_labels, energy_labels,
+            polarization_coefficients, beam_labels, weights=weights,
+            relaxation=relaxation, saturated_states=saturated_states,
+            iterations=iterations, recipe=local_recipe,
+            magnetization_supportmask=pack(magnetization_supportmask),
+            projection_supportmask=np.ones((int(aperture.sum()), 1), dtype=bool),
+            material_thickness=pack(material_thickness),
+            fit_material_thickness=fit_material_thickness,
+            thickness_supportmask=pack(thickness_supportmask), return_components=True,
+        )
+        # Fit only active aperture pixels. Vacuum and reference holes are not
+        # silently overwritten by the zero-thickness common-field constraint.
+        projected = log_objects.copy()
+        projected[:, aperture] = local[..., 0]
+        def expand(value):
+            if isinstance(value, dict):
+                return {key: expand(item) for key, item in value.items()}
+            if isinstance(value, np.ndarray) and value.ndim >= 2 and value.shape[-2:] == local.shape[-2:]:
+                full = np.zeros(value.shape[:-2] + aperture.shape, dtype=value.dtype)
+                full[..., aperture] = value[..., 0]
+                return full
+            return value
+        components = expand(components)
+        components["physical_phase_reference"] = bool(recipe.get("physical_phase_reference", False))
+        components["physical_projection_roi_mask"] = aperture.copy()
+        components["physical_projection_fit_pixels"] = int(aperture.sum())
+        components["physical_projection_full_pixels"] = int(aperture.size)
+        return (projected, components) if return_components else projected
     if (fit_material_thickness and not recipe["fit_known_spectrum_scale"] and
             any(str(recipe[key]).lower() in {"known_beta", "known-beta", "known_beta_kk", "known-beta-kk"}
                 for key in ("charge_spectral_constraint", "magnetic_spectral_constraint"))):
@@ -4696,6 +4781,23 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
             if (isinstance(energy, bool) or not isinstance(energy, (int, float, np.number))
                     or not np.isfinite(energy) or energy <= 0):
                 raise ValueError("projection_focus_setup['energy'] must be positive and finite.")
+    for key in ("observation_workers", "fft_workers", "coherence_round_iterations"):
+        value = recipe[key]
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+            raise ValueError(f"{key} must be a positive integer.")
+    if recipe["shared_coherence_update"] not in {"sequential", "average", "pooled"}:
+        raise ValueError("shared_coherence_update must be sequential, average, or pooled.")
+    if recipe["shared_coherence_update"] != "sequential":
+        if recipe["coherence_kernel_scope"] != "shared":
+            raise ValueError("Round coherence updates require coherence_kernel_scope='shared'.")
+        if recipe["freeze_coherence_after_reference"]:
+            raise ValueError("Round coherence updates cannot freeze gamma after the reference.")
+        if not recipe["preserve_warmup_masked_intensity"]:
+            raise ValueError("Round coherence updates require preserve_warmup_masked_intensity=True.")
+    for key in ("preserve_warmup_masked_intensity", "freeze_coherence_after_reference",
+                "warmup_calibrate_shared_gamma", "startimage_radial_normalization"):
+        if not isinstance(recipe[key], bool):
+            raise ValueError(f"{key} must be bool.")
     if not isinstance(recipe["warmup_start_from_first"], bool):
         raise ValueError("warmup_start_from_first must be bool.")
     if (isinstance(recipe["warmup_reference_observation"], bool)
@@ -4840,6 +4942,96 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     _observation_weights(recipe["observation_weights"], n_observations)
 
 
+def _normalized_coherence_kernel(gamma):
+    """Return a real, nonnegative kernel with unit mass per spatial plane."""
+    kernel = np.maximum(np.asarray(gamma).real, 0).copy()
+    mass = kernel.sum(axis=(-2, -1), keepdims=True)
+    if np.any(~np.isfinite(kernel)) or np.any(mass <= 0):
+        raise ValueError("Coherence kernels must have finite positive mass.")
+    return kernel / mass
+
+
+def _initial_coherence_kernel(field):
+    kernel = np.full(np.shape(field), 2e-6, dtype=float)
+    kernel[..., kernel.shape[-2] // 2, kernel.shape[-1] // 2] = 0.7
+    return _normalized_coherence_kernel(kernel)
+
+
+def _pooled_coherence_update(fields, targets, gamma, iterations, weights=None):
+    """RL fit of one kernel per mode to the summed, weighted state likelihood.
+
+    Fields and targets use centered detector coordinates. All states contribute,
+    including states whose fields are frozen. Unlike averaging separate fits,
+    every RL step uses the joint residual and the sum of modal predictions.
+    """
+    from scipy.fft import fft2 as cpu_fft2, ifft2 as cpu_ifft2
+
+    fields = np.asarray(fields)
+    if fields.ndim == 3:
+        fields = fields[:, None]
+    squeeze = np.ndim(gamma) == 2
+    kernel = _normalized_coherence_kernel(gamma)
+    if squeeze:
+        kernel = kernel[None]
+    kernel = np.fft.ifftshift(kernel, axes=(-2, -1))
+    weights = np.ones(len(fields)) if weights is None else np.asarray(weights, dtype=float)
+    if weights.shape != (len(fields),) or np.any(weights < 0) or not np.any(weights > 0):
+        raise ValueError("Pooled coherence needs nonnegative weights with positive total.")
+    # Stream states instead of caching an extra complex FFT stack for the loop.
+    for _ in range(iterations):
+        correction = np.zeros_like(kernel)
+        kernel_fft = cpu_fft2(kernel)
+        for index, field in enumerate(fields):
+            if weights[index] == 0:
+                continue
+            intensity_fft = cpu_fft2(np.fft.ifftshift(np.abs(field) ** 2, axes=(-2, -1)))
+            prediction = cpu_ifft2(intensity_fft * kernel_fft).real.sum(axis=0)
+            target = np.fft.ifftshift(np.maximum(targets[index], 0))
+            ratio_fft = cpu_fft2(target / np.maximum(prediction, 1e-30))
+            correction += weights[index] * np.maximum(
+                cpu_ifft2(np.conj(intensity_fft) * ratio_fft).real, 0,
+            )
+        updated = kernel * correction
+        mass = updated.sum(axis=(-2, -1), keepdims=True)
+        # A mode with no illumination cannot inform its kernel.
+        kernel = np.divide(updated, mass, out=kernel.copy(), where=mass > 0)
+    kernel = np.fft.fftshift(kernel, axes=(-2, -1))
+    return kernel[0] if squeeze else kernel
+
+
+def _observation_map(function, observations, workers):
+    """Bound in-flight reconstructions and preserve deterministic result order."""
+    observations = list(observations)
+    if workers == 1:
+        for observation in observations:
+            yield observation, function(observation)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for start in range(0, len(observations), workers):
+            batch = observations[start:start + workers]
+            for observation, result in zip(batch, executor.map(function, batch)):
+                yield observation, result
+
+
+def _run_observation_update(*args, **kwargs):
+    """Use thread-local FFT settings; never change module globals in workers."""
+    from scipy.fft import set_workers
+    recipe = args[5]
+    import threading
+    started = time.perf_counter()
+    with set_workers(int(recipe["fft_workers"])):
+        output = _run_update_schedule(*args, **kwargs)
+    finished = time.perf_counter()
+    if output[1]:
+        output[1][0]["execution"] = {
+            "started": started, "finished": finished,
+            "wall_seconds": finished - started,
+            "thread_id": threading.get_ident(), "fft_workers": int(recipe["fft_workers"]),
+        }
+    return output
+
+
 def _run_update_schedule(
     field,
     amplitude,
@@ -4850,6 +5042,8 @@ def _run_update_schedule(
     phase_retrieval_kernel=None,
     gamma=None,
     return_gamma=False,
+    fixed_masked_intensity=None,
+    freeze_gamma=False,
 ):
     """Run the configured phase-retrieval stages for one observation."""
     has_rl = any(stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
@@ -4860,6 +5054,7 @@ def _run_update_schedule(
             "RL updates because no coherence kernel is supplied."
         )
     if (recipe["Nmodes"] == 2 and phase_retrieval_kernel is None
+            and recipe.get("observation_workers", 1) == 1
             and not has_rl and not recipe.get("partial_coherence", False)):
         try:
             from . import phase_retrieval_core_multienergy_multimode as modal
@@ -4882,7 +5077,13 @@ def _run_update_schedule(
     stage_results = []
     filled_intensity = None
     for stage_index, stage in enumerate(schedule):
+        stage = dict(stage)
         iterations = stage["Nit"]
+        if freeze_gamma and stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
+            if gamma is None:
+                raise ValueError("A fitted reference gamma is required before freezing coherence.")
+            # Keep convolution active, but no RL update occurs in range(Nit).
+            stage["RL_freq"] = iterations
         use_rl = stage["RL_it"] > 0 and stage["RL_freq"] <= iterations
         if use_rl:
             if gamma is None:
@@ -4893,7 +5094,9 @@ def _run_update_schedule(
             if filled_intensity is None:
                 current = (np.sum(np.abs(field) ** 2, axis=0)
                            if recipe["Nmodes"] == 2 else np.abs(field) ** 2)
-                filled_intensity = np.where(bsmask != 0, current, amplitude ** 2)
+                masked_values = (current if fixed_masked_intensity is None
+                                 else np.asarray(fixed_masked_intensity))
+                filled_intensity = np.where(bsmask != 0, masked_values, amplitude ** 2)
             stage_amplitude = np.sqrt(np.maximum(filled_intensity, 0))
             stage_bsmask = np.zeros_like(bsmask)
         else:
@@ -4956,7 +5159,7 @@ def _run_update_schedule(
                 TV_freq=stage["TV_freq"],
                 **kernel_args,
             )
-            if gamma_out is not None:
+            if gamma_out is not None and not freeze_gamma:
                 gamma = gamma_out
         stage_results.append({
             "schedule_stage": stage_index,
@@ -4981,6 +5184,43 @@ def _apply_measured_amplitudes(fields, amplitudes, bsmasks):
         amplitudes[observed] * np.exp(1j * np.angle(constrained[observed]))
     )
     return constrained
+
+
+def _radially_normalize_startimage(field, hologram, mask_pixel):
+    """Match total modal intensity to the valid detector's radial mean.
+
+    One-pixel annuli are centered on the central detector pixel after crop/binning.
+    Masked/nonfinite/negative data are excluded; measured zeros remain samples.
+    Empty annuli interpolate between populated rings (nearest at either end).
+    Phases and relative modal amplitudes are retained wherever power is nonzero.
+    At exact field zeros, put the target amplitude in the first mode at phase zero.
+    This is an initialization only, not a constraint on subsequent iterations.
+    """
+    measured = np.asarray(hologram, dtype=float)
+    array = np.asarray(field, dtype=np.complex128)
+    if measured.ndim != 2 or array.ndim not in (2, 3) or array.shape[-2:] != measured.shape:
+        raise ValueError("Radial initialization requires a 2D hologram and matching field.")
+    rows, columns = np.ogrid[:measured.shape[0], :measured.shape[1]]
+    rings = np.floor(np.hypot(rows - measured.shape[0] // 2,
+                             columns - measured.shape[1] // 2)).astype(int)
+    valid = (np.asarray(mask_pixel) == 0) & np.isfinite(measured) & (measured >= 0)
+    if not np.any(valid):
+        raise ValueError("Radial initialization needs at least one valid detector pixel.")
+    size = int(rings.max()) + 1
+    counts = np.bincount(rings[valid], minlength=size)
+    sums = np.bincount(rings[valid], weights=measured[valid], minlength=size)
+    populated = counts > 0
+    profile = np.interp(np.arange(size), np.flatnonzero(populated),
+                        sums[populated] / counts[populated])
+    target_amplitude = np.sqrt(profile[rings])
+    modes = array[None] if array.ndim == 2 else array
+    amplitude = np.sqrt(np.sum(np.abs(modes) ** 2, axis=0))
+    scale = np.divide(target_amplitude, amplitude, out=np.zeros_like(amplitude),
+                      where=amplitude > 0)
+    result = modes * scale
+    empty = amplitude == 0
+    result[0, empty] = target_amplitude[empty]
+    return result[0] if array.ndim == 2 else result
 
 
 def _initialize_fields(
@@ -5078,51 +5318,39 @@ def _project_nonphysical_modes_common(
     relaxation = float(recipe["nonphysical_modes_common_relaxation"])
     output = array.copy()
     group_records = []
+    if relaxation == 0:
+        return output, group_records
+    groups = {}
+    for observation, key in enumerate(zip(energies.tolist(), beams.tolist())):
+        groups.setdefault(key, []).append(observation)
     for mode_index in range(1, array.shape[1]):
-        focused = _projection_focus_transform(
-            array[:, mode_index],
-            energies,
-            recipe["projection_focus_prop_um"],
-            recipe["projection_focus_phase_rad"],
-            recipe["projection_focus_setup"],
-            inverse=False,
-            integer_wavelength=recipe["projection_focus_integer_wavelength"],
-        )
-        logs = fourier_field_to_object_log(
-            focused, log_floor=recipe["log_floor"], unwrap_energy_phase=False,
-        )
-        projected_logs = logs.copy()
-        groups = {}
-        for observation, key in enumerate(zip(energies.tolist(), beams.tolist())):
-            groups.setdefault(key, []).append(observation)
         for key, indices in groups.items():
             group_weights = observation_weights[indices]
             total = float(np.sum(group_weights))
             if total <= 0:
                 raise ValueError("Each common-mode energy/beam group needs positive weight.")
-            common_log = np.sum(
-                logs[indices] * group_weights[:, None, None], axis=0,
-            ) / total
-            projected_logs[indices] = (
-                (1 - relaxation) * logs[indices] + relaxation * common_log
-            )
+            # Incoherent modes have arbitrary independent global phases. Align
+            # that gauge before taking a linear complex-field average. Averaging
+            # wrapped log phases creates artificial phase edges and diffraction.
+            fields_group = array[indices, mode_index].copy()
+            anchor = fields_group[0]
+            if not np.any(anchor):
+                anchor = fields_group[np.argmax(np.sum(np.abs(fields_group) ** 2, axis=(-2, -1)))]
+            for index in range(len(fields_group)):
+                overlap = np.vdot(anchor, fields_group[index])
+                if abs(overlap) > 0:
+                    fields_group[index] *= np.exp(-1j * np.angle(overlap))
+            common = np.sum(fields_group * group_weights[:, None, None], axis=0) / total
+            output[indices, mode_index] = (1 - relaxation) * fields_group + relaxation * common
+            # A common focus transform within each energy/beam group is linear
+            # and unitary, so averaging here is equivalent to averaging in focus.
             group_records.append({
                 "mode_index": mode_index,
                 "support_factor": mode_index + 1,
-                "energy": key[0],
-                "beam": key[1],
+                "energy": key[0], "beam": key[1],
                 "observations": list(indices),
+                "averaging": "phase_aligned_complex_field",
             })
-        projected = object_log_to_fourier_field(projected_logs)
-        output[:, mode_index] = _projection_focus_transform(
-            projected,
-            energies,
-            recipe["projection_focus_prop_um"],
-            recipe["projection_focus_phase_rad"],
-            recipe["projection_focus_setup"],
-            inverse=True,
-            integer_wavelength=recipe["projection_focus_integer_wavelength"],
-        )
     return output, group_records
 
 
@@ -5135,17 +5363,23 @@ def _project_physical_modes(
     **kwargs,
 ):
     """Apply the physical model to mode 1 and optional common-mode constraints."""
+    diagnostic_callback = kwargs.pop("diagnostic_callback", None)
     if np.asarray(fields).ndim == 3:
-        return project_fourier_fields_general(
+        result = project_fourier_fields_general(
             fields, state_labels, energy_labels, polarization_coefficients,
             beam_labels, **kwargs,
         )
+        if diagnostic_callback is not None:
+            diagnostic_callback("physical_primary", result[0] if kwargs.get("return_components") else result)
+        return result
     projected_primary, components = project_fourier_fields_general(
         fields[:, 0], state_labels, energy_labels, polarization_coefficients,
         beam_labels, **kwargs,
     )
     output = np.asarray(fields).copy()
     output[:, 0] = projected_primary
+    if diagnostic_callback is not None:
+        diagnostic_callback("physical_primary", output)
     recipe = kwargs.get("recipe")
     common_groups = []
     if recipe is not None and recipe["constrain_nonphysical_modes_common"]:
@@ -5156,6 +5390,8 @@ def _project_physical_modes(
             recipe,
             weights=kwargs.get("weights"),
         )
+    if diagnostic_callback is not None:
+        diagnostic_callback("common_secondary", output)
     components["Nmodes"] = output.shape[1]
     components["physical_model_modes"] = [1]
     components["nonphysical_modes_common"] = bool(
@@ -5358,6 +5594,11 @@ def general_phase_retrieval_algorithm(
                 supportmask, amplitudes, intensities, mask_stack,
                 scale_fit=recipe["startimage_scale_fit"],
             )
+        if recipe["startimage_radial_normalization"]:
+            for observation in range(n_observations):
+                fields[observation] = _radially_normalize_startimage(
+                    fields[observation], holograms[observation], mask_stack[observation],
+                )
     else:
         fields = np.asarray(start_fields, dtype=np.complex128).copy()
         expected = ((n_observations, 2, nx, ny) if recipe["Nmodes"] == 2
@@ -5372,6 +5613,36 @@ def general_phase_retrieval_algorithm(
         "projection_steps": [],
         "settings": recipe.copy(),
     }
+    diagnostic_observation = recipe["projection_diagnostic_observation"]
+    if diagnostic_observation is not None and (
+            isinstance(diagnostic_observation, bool)
+            or not isinstance(diagnostic_observation, (int, np.integer))
+            or not 0 <= diagnostic_observation < n_observations):
+        raise ValueError("projection_diagnostic_observation must index a selected observation.")
+    errors["detector_constraint_diagnostics"] = []
+    if diagnostic_observation is not None:
+        yy, xx = np.indices((nx, ny))
+        outer_pixels = np.hypot(yy - nx // 2, xx - ny // 2) > min(nx, ny) / 4
+        explicit_outer = outer_pixels & (mask_stack[diagnostic_observation] != 0)
+        observed_pixels = bsmasks[diagnostic_observation] == 0
+
+    def record_checkpoint(stage, checkpoint_fields=None):
+        if diagnostic_observation is None:
+            return
+        current = (fields if checkpoint_fields is None else checkpoint_fields)[diagnostic_observation]
+        power = np.abs(current) ** 2
+        primary = power[0] if power.ndim == 3 else power
+        total = power.sum(axis=0) if power.ndim == 3 else power
+        target = amplitudes[diagnostic_observation][observed_pixels]
+        residual = np.sqrt(total[observed_pixels]) - target
+        errors["detector_constraint_diagnostics"].append({
+            "stage": stage, "observation": int(diagnostic_observation),
+            "outer_masked_pixels": int(explicit_outer.sum()),
+            "primary_outer_masked_mean": float(primary[explicit_outer].mean()) if explicit_outer.any() else None,
+            "total_outer_masked_mean": float(total[explicit_outer].mean()) if explicit_outer.any() else None,
+            "observed_amplitude_relative_error": float(np.linalg.norm(residual) / max(np.linalg.norm(target), 1e-30)),
+        })
+
     coherence_kernels = [None] * n_observations
     shared_coherence_kernel = None
     share_coherence = recipe["coherence_kernel_scope"] == "shared"
@@ -5384,6 +5655,33 @@ def general_phase_retrieval_algorithm(
         f"{outer_iterations} outer loops",
         flush=True,
     )
+
+    workers = min(int(recipe["observation_workers"]), n_observations)
+    import inspect
+    kernel_module = inspect.getmodule(phase_retrieval_kernel) if phase_retrieval_kernel else None
+    if workers > 1 and (GPU if kernel_module is None else getattr(kernel_module, "GPU", GPU)):
+        print("GPU backend: using one observation worker to avoid competing GPU jobs", flush=True)
+        workers = 1
+    gamma_strategy = recipe["shared_coherence_update"]
+    round_coherence = (share_coherence and recipe["partial_coherence"]
+                       and gamma_strategy != "sequential")
+    print(f"Observation workers: {workers}; FFT threads per worker: {recipe['fft_workers']}; "
+          f"shared gamma update: {gamma_strategy}", flush=True)
+    projection_every, projection_start = _resolve_projection_cadence(
+        recipe, default_every=n_observations,
+    )
+    parallel_joint = (round_coherence or (workers > 1 and
+                      (not recipe["partial_coherence"] or not share_coherence
+                       or recipe["freeze_coherence_after_reference"])))
+    if parallel_joint and recipe["projection_model"] != "none" and recipe["projection_relaxation"] > 0:
+        if projection_every % n_observations or projection_start % n_observations:
+            raise ValueError("Parallel rounds require physical projection boundaries at complete observation sweeps.")
+    state_weights = _observation_weights(recipe["observation_weights"], n_observations)
+
+    preserve_masked = recipe["preserve_warmup_masked_intensity"]
+    fixed_masked_intensities = [None] * n_observations
+    if recipe["freeze_coherence_after_reference"] and not share_coherence:
+        raise ValueError("Freezing reference coherence requires coherence_kernel_scope='shared'.")
 
     # Optional independent warmup before coupling observations.
     warmup_schedule = _build_update_schedule(
@@ -5419,72 +5717,140 @@ def general_phase_retrieval_algorithm(
             f"for {n_observations} observations",
             flush=True,
         )
-        for observation in warmup_order:
-            if observation == reference_observation:
-                observation_schedule = reference_schedule
-            elif other_schedule is not None:
-                observation_schedule = other_schedule
-            elif seeded_indices is not None:
-                observation_schedule = [warmup_schedule[index] for index in seeded_indices]
-            else:
-                observation_schedule = warmup_schedule
-            if observation != reference_observation and recipe["warmup_start_from_first"]:
-                if recipe["warmup_seed_scale_fit"] == "linear":
-                    valid = ((bsmasks[reference_observation] == 0)
-                             & (bsmasks[observation] == 0))
-                    source = intensities[reference_observation][valid]
-                    target = intensities[observation][valid]
-                    if source.size < 2:
-                        raise ValueError("Cannot scale warmup field: fewer than two shared valid pixels.")
-                    source_centered = source - np.mean(source)
-                    denominator = np.dot(source_centered, source_centered)
-                    factor = (np.dot(source_centered, target - np.mean(target))
-                              / denominator if denominator > 0 else 0)
-                    if not np.isfinite(factor) or factor <= 0:
-                        raise ValueError("Cannot scale warmup field: non-positive intensity slope.")
-                    scale = np.sqrt(factor)
+        warmup_passes = ("coherent", "partial") if preserve_masked else ("original",)
+        for pass_kind in warmup_passes:
+            pass_started = time.perf_counter()
+            synchronous = round_coherence and pass_kind == "partial"
+            round_gamma = shared_coherence_kernel
+            if synchronous and round_gamma is None:
+                round_gamma = _initial_coherence_kernel(fields[reference_observation])
+
+            calibrate_reference = synchronous and recipe["warmup_calibrate_shared_gamma"]
+
+            def update_warmup(observation):
+                field = fields[observation]
+                if observation == reference_observation:
+                    observation_schedule = reference_schedule
+                elif other_schedule is not None:
+                    observation_schedule = other_schedule
+                elif seeded_indices is not None:
+                    observation_schedule = [warmup_schedule[index] for index in seeded_indices]
                 else:
-                    reference_sum = float(np.sum(intensities[reference_observation]))
-                    current_sum = float(np.sum(intensities[observation]))
-                    scale = (np.sqrt(current_sum / reference_sum)
-                             if reference_sum > 0 and current_sum > 0 else 1.0)
-                fields[observation] = fields[reference_observation] * scale
-            print(
-                f"  Warmup observation "
-                f"{observation + 1}/{n_observations}",
-                flush=True,
-            )
-            fields[observation], results, updated_gamma = _run_update_schedule(
-                fields[observation],
-                amplitudes[observation],
-                modal_supportmask,
-                bsmasks[observation],
-                observation_schedule,
-                recipe,
-                phase_retrieval_kernel=phase_retrieval_kernel,
-                gamma=(shared_coherence_kernel if share_coherence
-                       else coherence_kernels[observation]),
-                return_gamma=True,
-            )
-            if share_coherence:
-                shared_coherence_kernel = updated_gamma
-            else:
-                coherence_kernels[observation] = updated_gamma
-            for result in results:
-                errors["observation_steps"].append({
-                    "outer": -1,
-                    "observation": observation,
-                    "state": metadata["states"][observation],
-                    "energy": metadata["energies"][observation],
-                    "polarization": metadata["polarizations"][observation],
-                    "beam": metadata["beams"][observation],
-                    "stage": "warmup",
-                    **result,
-                })
+                    observation_schedule = warmup_schedule
+                if preserve_masked:
+                    partial_flags = [stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
+                                     for stage in observation_schedule]
+                    if pass_kind == "coherent" and any(partial_flags):
+                        first_partial = partial_flags.index(True)
+                        if not all(partial_flags[first_partial:]):
+                            raise ValueError("Preserved warmup requires coherent stages before partial stages.")
+                    observation_schedule = [stage for stage, partial in zip(observation_schedule, partial_flags)
+                                            if partial == (pass_kind == "partial")]
+                    if pass_kind == "coherent" and not observation_schedule:
+                        raise ValueError("Every state needs a coherent warmup to preserve masked intensities.")
+                if not observation_schedule:
+                    return None
+                if (pass_kind != "partial" and observation != reference_observation
+                        and recipe["warmup_start_from_first"]):
+                    if recipe["warmup_seed_scale_fit"] == "linear":
+                        valid = ((bsmasks[reference_observation] == 0)
+                                 & (bsmasks[observation] == 0))
+                        source = intensities[reference_observation][valid]
+                        target = intensities[observation][valid]
+                        if source.size < 2:
+                            raise ValueError("Cannot scale warmup field: fewer than two shared valid pixels.")
+                        source_centered = source - np.mean(source)
+                        denominator = np.dot(source_centered, source_centered)
+                        factor = (np.dot(source_centered, target - np.mean(target))
+                                  / denominator if denominator > 0 else 0)
+                        if not np.isfinite(factor) or factor <= 0:
+                            raise ValueError("Cannot scale warmup field: non-positive intensity slope.")
+                        scale = np.sqrt(factor)
+                    else:
+                        reference_sum = float(np.sum(intensities[reference_observation]))
+                        current_sum = float(np.sum(intensities[observation]))
+                        scale = (np.sqrt(current_sum / reference_sum)
+                                 if reference_sum > 0 and current_sum > 0 else 1.0)
+                    field = fields[reference_observation] * scale
+                    if recipe["startimage_radial_normalization"]:
+                        field = _radially_normalize_startimage(
+                            field, holograms[observation], mask_stack[observation],
+                        )
+                gamma = (round_gamma if synchronous else shared_coherence_kernel
+                         if share_coherence else coherence_kernels[observation])
+                return _run_observation_update(
+                    field, amplitudes[observation], modal_supportmask,
+                    bsmasks[observation], observation_schedule, recipe,
+                    phase_retrieval_kernel=phase_retrieval_kernel,
+                    gamma=None if gamma is None else gamma.copy(), return_gamma=True,
+                    fixed_masked_intensity=fixed_masked_intensities[observation],
+                    freeze_gamma=((synchronous and gamma_strategy == "pooled"
+                                   and not (calibrate_reference and observation == reference_observation)) or
+                                  (recipe["freeze_coherence_after_reference"]
+                                   and observation != reference_observation)),
+                )
+
+            # Seeded coherent states depend only on the completed reference.
+            # Sequential shared-gamma warmup retains its legacy ordering.
+            parallel_pass = (pass_kind == "coherent" or synchronous
+                             or not recipe["partial_coherence"] or not share_coherence)
+            pass_workers = workers if parallel_pass else 1
+            batches = ([warmup_order[:1], warmup_order[1:]]
+                       if (recipe["warmup_start_from_first"] and pass_kind != "partial")
+                       or calibrate_reference else [warmup_order])
+            gamma_sum = None
+            gamma_weight = 0.0
+            for batch in batches:
+                for observation, result in _observation_map(update_warmup, batch, pass_workers):
+                    if result is None:
+                        continue
+                    print(f"  Warmup observation {observation + 1}/{n_observations} ({pass_kind})", flush=True)
+                    fields[observation], results, updated_gamma = result
+                    if preserve_masked and pass_kind == "coherent":
+                        fixed_masked_intensities[observation] = (
+                            np.sum(np.abs(fields[observation]) ** 2, axis=0)
+                            if recipe["Nmodes"] == 2 else np.abs(fields[observation]) ** 2
+                        )
+                    if synchronous:
+                        if calibrate_reference and observation == reference_observation:
+                            round_gamma = _normalized_coherence_kernel(updated_gamma)
+                        if updated_gamma is not None:
+                            contribution = state_weights[observation] * _normalized_coherence_kernel(updated_gamma)
+                            gamma_sum = contribution if gamma_sum is None else gamma_sum + contribution
+                            gamma_weight += state_weights[observation]
+                    elif share_coherence:
+                        shared_coherence_kernel = updated_gamma
+                    else:
+                        coherence_kernels[observation] = updated_gamma
+                    for result in results:
+                        errors["observation_steps"].append({
+                            "outer": -1, "observation": observation,
+                            "state": metadata["states"][observation],
+                            "energy": metadata["energies"][observation],
+                            "polarization": metadata["polarizations"][observation],
+                            "beam": metadata["beams"][observation],
+                            "stage": "warmup", **result,
+                        })
+            if synchronous:
+                if gamma_strategy == "average":
+                    if gamma_weight <= 0:
+                        raise ValueError("Average gamma requires partial-coherence warmup stages.")
+                    shared_coherence_kernel = _normalized_coherence_kernel(gamma_sum / gamma_weight)
+                else:
+                    targets = np.where(bsmasks != 0, np.asarray(fixed_masked_intensities), amplitudes ** 2)
+                    shared_coherence_kernel = _pooled_coherence_update(
+                        fields, targets, round_gamma, recipe["coherence_round_iterations"], state_weights,
+                    )
+            record_checkpoint("warmup_" + pass_kind)
+            elapsed = time.perf_counter() - pass_started
+            errors.setdefault("warmup_passes", []).append({"pass": pass_kind, "wall_seconds": elapsed})
+            print(f"  Warmup {pass_kind} pass complete in {elapsed:.2f} seconds", flush=True)
         print("Universal phase retrieval: warmup complete", flush=True)
     else:
         print("Universal phase retrieval: warmup disabled", flush=True)
 
+    if preserve_masked and any(value is None for value in fixed_masked_intensities):
+        raise ValueError("Every state needs a coherent warmup to preserve masked intensities.")
     fieldswarmup=fields.copy()
     frozen_indices = []
     if recipe["freeze_saturated_fields"]:
@@ -5516,6 +5882,8 @@ def general_phase_retrieval_algorithm(
         default_every=n_observations,
     )
     completed_updates = 0
+    fixed_targets = (np.where(bsmasks != 0, np.asarray(fixed_masked_intensities), amplitudes ** 2)
+                     if round_coherence else None)
 
     # Alternate detector/support updates with the metadata-aware object model.
     # Every projection sees the complete current observation stack.
@@ -5530,19 +5898,74 @@ def general_phase_retrieval_algorithm(
             if recipe["shuffle_observations"]
             else np.arange(n_observations)
         )
+        round_results = {}
+        if parallel_joint:
+            round_gamma = shared_coherence_kernel
+            if round_coherence and round_gamma is None:
+                round_gamma = _initial_coherence_kernel(fields[0])
+
+            def update_joint(observation):
+                gamma = round_gamma if share_coherence else coherence_kernels[observation]
+                if observation in frozen_indices:
+                    # Frozen fields still inform the shared illumination estimate.
+                    if round_coherence and gamma_strategy == "average":
+                        fitted_gamma = _pooled_coherence_update(
+                            fields[observation:observation + 1],
+                            fixed_targets[observation:observation + 1], gamma,
+                            recipe["coherence_round_iterations"],
+                        )
+                        return fields[observation], [], fitted_gamma
+                    return fields[observation], [], gamma
+                return _run_observation_update(
+                    fields[observation], amplitudes[observation], modal_supportmask,
+                    bsmasks[observation], inner_schedule, recipe,
+                    phase_retrieval_kernel=phase_retrieval_kernel,
+                    gamma=None if gamma is None else gamma.copy(), return_gamma=True,
+                    fixed_masked_intensity=fixed_masked_intensities[observation],
+                    freeze_gamma=(recipe["freeze_coherence_after_reference"] or
+                                  (round_coherence and gamma_strategy == "pooled")),
+                )
+
+            gamma_sum = None
+            for position, (observation, (field, results, gamma)) in enumerate(
+                    _observation_map(update_joint, order, workers), start=1):
+                print(f"  Updating observation {position}/{n_observations} "
+                      f"(index {int(observation)}, parallel round)", flush=True)
+                fields[observation] = field
+                round_results[observation] = results
+                if round_coherence and gamma_strategy == "average":
+                    contribution = state_weights[observation] * _normalized_coherence_kernel(gamma)
+                    gamma_sum = contribution if gamma_sum is None else gamma_sum + contribution
+                elif not share_coherence:
+                    coherence_kernels[observation] = gamma
+            if round_coherence:
+                if gamma_strategy == "average":
+                    shared_coherence_kernel = _normalized_coherence_kernel(gamma_sum)
+                else:
+                    shared_coherence_kernel = _pooled_coherence_update(
+                        fields, fixed_targets, round_gamma,
+                        recipe["coherence_round_iterations"], state_weights,
+                    )
+                errors.setdefault("coherence_rounds", []).append({
+                    "outer": outer, "strategy": gamma_strategy,
+                    "observations": n_observations,
+                })
         for position, observation in enumerate(order, start=1):
-            print(
-                "  Updating observation "
-                f"{position}/{n_observations} "
-                f"(index {int(observation)}, "
-                f"energy={metadata['energies'][observation]}, "
-                f"polarization={metadata['polarizations'][observation]:g})",
-                flush=True,
-            )
-            if observation in frozen_indices:
+            if not parallel_joint:
+                print(
+                    "  Updating observation "
+                    f"{position}/{n_observations} "
+                    f"(index {int(observation)}, "
+                    f"energy={metadata['energies'][observation]}, "
+                    f"polarization={metadata['polarizations'][observation]:g})",
+                    flush=True,
+                )
+            if parallel_joint:
+                results = round_results[observation]
+            elif observation in frozen_indices:
                 results = []
             else:
-                fields[observation], results, updated_gamma = _run_update_schedule(
+                fields[observation], results, updated_gamma = _run_observation_update(
                     fields[observation],
                     amplitudes[observation],
                     modal_supportmask,
@@ -5553,6 +5976,8 @@ def general_phase_retrieval_algorithm(
                     gamma=(shared_coherence_kernel if share_coherence
                            else coherence_kernels[observation]),
                     return_gamma=True,
+                    fixed_masked_intensity=fixed_masked_intensities[observation],
+                    freeze_gamma=recipe["freeze_coherence_after_reference"],
                 )
                 if share_coherence:
                     shared_coherence_kernel = updated_gamma
@@ -5582,6 +6007,7 @@ def general_phase_retrieval_algorithm(
             if recipe["projection_relaxation"] == 0:
                 continue
 
+            record_checkpoint("joint_detector_support")
             print("  Applying joint physical projection", flush=True)
             fields, components = _project_physical_modes(
                 fields,
@@ -5603,6 +6029,7 @@ def general_phase_retrieval_algorithm(
                 fit_material_thickness=recipe["fit_material_thickness"],
                 thickness_supportmask=thickness_supportmask,
                 return_components=True,
+                diagnostic_callback=record_checkpoint,
             )
             restore_frozen_observations(fields)
             errors["projection_steps"].append({
@@ -5658,6 +6085,7 @@ def general_phase_retrieval_algorithm(
     )
 
     # Optionally finish exactly on the measured Fourier amplitudes.
+    record_checkpoint("before_final_fourier")
     if recipe["final_fourier_constraint"]:
         fields = _apply_measured_amplitudes(fields, amplitudes, bsmasks)
         restore_frozen_observations(fields)
@@ -5680,11 +6108,14 @@ def general_phase_retrieval_algorithm(
         components["common_mode_applied_after_final_fourier"] = bool(
             recipe["final_fourier_constraint"]
         )
+    record_checkpoint("returned_final")
     components["Nmodes"] = int(recipe["Nmodes"])
     components["modes"] = list(mode_factors)
     components["modal_supportmask_used"] = np.asarray(modal_supportmask).copy()
     components["mode_support_shifts"] = mode_support_shifts
     components["frozen_saturated_observations"] = frozen_indices
+    components["observation_workers"] = workers
+    components["shared_coherence_update"] = gamma_strategy
     components["coherence_kernel_scope"] = recipe["coherence_kernel_scope"]
     components["partial_coherence"] = (
         shared_coherence_kernel is not None if share_coherence
@@ -5696,6 +6127,20 @@ def general_phase_retrieval_algorithm(
         else:
             components["coherence_kernels"] = np.stack(coherence_kernels)
 
+    executions = [record["execution"] for record in errors["observation_steps"] if "execution" in record]
+    events = sorted([(item["started"], 1) for item in executions]
+                    + [(item["finished"], -1) for item in executions])
+    active = maximum = 0
+    for _, change in events:
+        active += change
+        maximum = max(maximum, active)
+    errors["execution_summary"] = {
+        "requested_workers": int(recipe["observation_workers"]),
+        "effective_workers": workers, "max_concurrent_updates": maximum,
+        "worker_threads_used": len({item["thread_id"] for item in executions}),
+        "summed_update_wall_seconds": sum(item["wall_seconds"] for item in executions),
+    }
+    print(f"Measured concurrent observation updates: {maximum} (configured {workers})", flush=True)
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
     print(
         "Universal phase retrieval: complete in "

@@ -197,6 +197,62 @@ class PhaseRetrievalHandoffTests(unittest.TestCase):
         )
         np.testing.assert_allclose(final_fields[0, 1], final_fields[1, 1])
 
+    def test_all_coherent_states_precede_partial_and_preserve_masked_intensity(self):
+        for modes in ([1], [1, 2]):
+            for shared, freeze in ((True, True), (True, False), (False, False)):
+                with self.subTest(modes=modes, shared=shared, freeze=freeze):
+                    shape = (8, 8)
+                    masks = np.zeros((2, *shape))
+                    masks[:, 2, 3] = 1
+                    holograms = np.stack([np.full(shape, 4.), np.full(shape, 9.)])
+                    calls = []
+
+                    def kernel(**kw):
+                        calls.append({key: np.copy(value) if isinstance(value, np.ndarray) else value
+                                      for key, value in kw.items()})
+                        gamma = kw["gamma"]
+                        if gamma is not None and kw["RL_freq"] < kw["Nit"]:
+                            gamma = np.full_like(gamma, len(calls) / np.prod(shape))
+                        # Deliberately change the fields at every call: masked targets
+                        # must still come from the first coherent result for each state.
+                        field = np.full_like(kw["Phase"], len(calls) + 1, dtype=complex)
+                        return field, np.array([0.]), np.array([0.]), gamma
+
+                    recipe = universal.default_universal_phase_retrieval_recipe()
+                    recipe.update(
+                        modes=modes, partial_coherence=True,
+                        coherence_kernel_scope="shared" if shared else "per_observation",
+                        preserve_warmup_masked_intensity=True,
+                        freeze_coherence_after_reference=freeze,
+                        warmup_mode=["ER", "ER"], warmup_Nit=[4, 4],
+                        warmup_RL_it=[0, 1], warmup_RL_freq=[100, 1],
+                        warmup_start_from_first=True,
+                        inner_mode=["ER"], inner_Nit=[4], RL_it=1, RL_freq=1,
+                        outer_iterations=2, shuffle_observations=False,
+                        projection_model="none", final_projection_relaxation=0,
+                        final_fourier_constraint=False, average_img=1,
+                    )
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        universal.universal_phase_retrieval_algorithm(
+                            holograms, masks, np.ones(shape),
+                            ["saturated", "loop"], [783, 783], [1, 1], ["beam", "beam"],
+                            universal_recipe=recipe, phase_retrieval_kernel=kernel,
+                        )
+                    self.assertEqual(len(calls), 8)
+                    self.assertIsNone(calls[0]["gamma"])
+                    self.assertIsNone(calls[1]["gamma"])
+                    for index, call in enumerate(calls[2:]):
+                        observation = index % 2
+                        expected = (observation + 2) ** 2 * len(modes)
+                        self.assertAlmostEqual(call["diffract"][2, 3] ** 2, expected)
+                        self.assertAlmostEqual(call["diffract"][0, 0] ** 2,
+                                               holograms[observation, 0, 0])
+                        np.testing.assert_array_equal(call["bsmask"], 0)
+                        if shared and index > 0:
+                            expected_gamma = 3 if freeze else index + 2
+                            np.testing.assert_allclose(call["gamma"], expected_gamma / np.prod(shape))
+                            self.assertEqual(call["RL_freq"], call["Nit"] if freeze else 1)
+
     def test_partial_coherence_can_use_fixed_kernel(self):
         shape = (8, 8)
         gamma = np.zeros(shape)

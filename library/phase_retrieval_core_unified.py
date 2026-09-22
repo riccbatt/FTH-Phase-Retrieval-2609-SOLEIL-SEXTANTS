@@ -85,9 +85,9 @@ else:
     import numpy as xp
     import scipy.fft as fft
 
-    # Use all available CPU workers for FFT operations.
-    fft2 = partial(fft.fft2, workers=os.cpu_count())
-    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
+    # Respect scipy.fft.set_workers in each observation worker.
+    fft2 = fft.fft2
+    ifft2 = fft.ifft2
 
 
 def to_numpy(array, xp):

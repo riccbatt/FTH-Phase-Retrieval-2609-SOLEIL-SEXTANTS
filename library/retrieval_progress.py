@@ -87,7 +87,11 @@ def retrieval_progress(recipe, n_observations=None, *, kind, leave=True,
         warmup = bool(recipe.get("warmup_mode")) and any(
             n > 0 for n in recipe.get("warmup_Nit", [])
         )
-        total = n_observations * (int(recipe["outer_iterations"]) + int(warmup)) + 1
+        warmup_passes = int(warmup)
+        if (warmup and recipe.get("preserve_warmup_masked_intensity")
+                and recipe.get("partial_coherence")):
+            warmup_passes = 2
+        total = n_observations * (int(recipe["outer_iterations"]) + warmup_passes) + 1
         unit = "step"
     else:
         raise ValueError("kind must be 'unified' or 'universal'")
