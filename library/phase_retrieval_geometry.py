@@ -162,6 +162,11 @@ _SPATIAL_COMPONENT_KEYS = {
 
 
 def _map_components(value, old_shape, target_shape, *, force=False):
+    """
+    Output helper for nested component structures. Resample only recognized spatial maps;
+    spectra and observation labels must not be interpreted as images merely because they are
+    arrays.
+    """
     if isinstance(value, dict):
         return {
             key: _map_components(
@@ -190,6 +195,11 @@ class Geometry:
     support_used: np.ndarray
 
     def finish(self, fields, warmup, components, bsmasks, errors):
+        """
+        Output bookkeeping: attach the exact masks/support/geometry used by retrieval. Returned
+        fields remain on the retrieval grid; this method does not invent source-resolution
+        information.
+        """
         components["supportmask_used"] = self.support_used.copy()
         components["supportmask"] = self.support_used.copy()
         components["mask_pixel"] = self.mask_used.copy()
@@ -206,7 +216,14 @@ class Geometry:
 
 
 def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
-    """Crop the detector grid first, then bin intensities and masks."""
+    """
+    Crop the detector grid first, then bin intensities and masks.
+
+    Context:
+    Input geometry boundary shared by retrieval and refinement. Crop detector edges, sum
+    intensity bins, propagate invalid pixels and map the object support. Return prepared
+    images, mask, support, optional starts and a Geometry record.
+    """
     binning = _positive_integer(recipe["binning"], "binning", 1)
     crop = _positive_integer(recipe["crop"], "crop", 0)
     images = np.asarray(holograms)
@@ -292,10 +309,16 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
 
 
 def support_bounding_roi(support, padding_fraction=0.15):
-    """Centered display ROI enclosing the largest aperture on the current grid.
+    """
+    Centered display ROI enclosing the largest aperture on the current grid.
 
     Call after crop/binning/support recentering. Fractional padding scales with
     the aperture, so no manually maintained source-to-retrieval pixel offsets.
+
+    Context:
+    Display helper only: bound the largest connected aperture on the prepared object grid.
+    The physical fit uses its positive-thickness pixel selection, which need not be
+    rectangular or identical to this display crop.
     """
     from scipy.ndimage import label
     support = np.asarray(support) != 0

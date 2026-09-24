@@ -212,6 +212,11 @@ def _resolve_start_field(start_spec, default_field, latest, name):
       - None: use the default support-based initialization
       - np.ndarray: use this array directly
       - str: use latest[str]
+
+    Context:
+    Legacy stage-driver handoff: resolve an explicit start or a previously reconstructed
+    labeled field. This is separate from the universal driver's independent/reference warmup
+    policy.
     """
 
     if start_spec is None:
@@ -247,6 +252,10 @@ def _as_modes(arr, Nmodes, shape_2d, name, dtype=None):
       - ``(nx, ny)``: copied into all modes
       - ``(1, nx, ny)``: copied into all modes
       - ``(Nmodes, nx, ny)``: used directly
+
+    Context:
+    Internal shape contract: kernels work with an explicit leading mode axis even when the
+    public single-mode API supplies a 2D image.
     """
     arr = np.asarray(arr)
 
@@ -312,7 +321,13 @@ def _expand_support_about_center(support, factor):
 
 
 def _mode_supports(supportmask, mode_factors, shape_2d):
-    """Build modal supports from legacy spatial expansion factors."""
+    """
+    Build modal supports from legacy spatial expansion factors.
+
+    Context:
+    Build the object support allowed for each incoherent mode from the configured support-
+    size factors. This controls geometry, not whether a mode is magnetic.
+    """
     supportmask = np.asarray(supportmask)
     nmodes = len(mode_factors)
     if supportmask.ndim == 2:
@@ -388,7 +403,13 @@ def _normalize_startimage_amplitude(startimage, measured_amplitude, start_amplit
 
 
 def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
-    """Return one coherent or partially coherent intensity per mode."""
+    """
+    Return one coherent or partially coherent intensity per mode.
+
+    Context:
+    Kernel-level forward model in the kernel's FFT ordering. Preserve one intensity plane
+    per mode until the detector constraint sums them.
+    """
     convolved = xp.zeros_like(current_guess, dtype=xp.complex128)
     for mode_index in range(nmodes):
         intensity = xp.abs(current_guess[mode_index]) ** 2
@@ -408,7 +429,13 @@ def _apply_modal_fourier_constraint(
     observed,
     invalid,
 ):
-    """Jointly rescale all modes to match the measured total intensity."""
+    """
+    Jointly rescale all modes to match the measured total intensity.
+
+    Context:
+    One detector measurement constrains the sum of incoherent mode powers. Apply the same
+    amplitude factor to all modes; invalid pixels receive factor one and remain free.
+    """
     total_intensity = xp.sum(current_convolved, axis=0)
     modal_amplitude = xp.sqrt(total_intensity)
     modal_amplitude = xp.where(
@@ -854,6 +881,10 @@ def phase_retrieval_algorithm(
     ``supportmask`` and ``mask_pixel`` use the same grid as the returned field.
     ``recipe['roi']`` is in the supplied support's coordinates and is shifted
     into the centered support crop of the final detector grid.
+
+    Context:
+    Stage-based compatibility entry point used by simpler notebooks. Mixed-state physical
+    fitting and shared-gamma round scheduling live in phase_retrieval_universal instead.
     """
     (
         holograms,
@@ -1664,6 +1695,11 @@ def PhaseRtrv_core_single(
     This is the lean 2D implementation used by the original
     ``phase_retrieval_core``. It deliberately does not create a modal axis, so
     it is the fast path selected whenever ``Nmodes == 1``.
+
+    Context:
+    Single-observation, single-mode iteration kernel. Alternates detector and support
+    constraints; it does not know observation metadata, shared physical components or outer-
+    round refresh policy.
     """
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
@@ -1896,6 +1932,11 @@ def PhaseRtrv_core_multimode(
 
     For ``Nmodes == 1``, outputs are squeezed back to 2D to preserve the
     previous API.
+
+    Context:
+    Single-observation multimode kernel. All modes contribute to the detector intensity, but
+    each has its own support. State-independent secondary-mode projection is a
+    responsibility of the universal driver.
     """
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
@@ -2139,6 +2180,10 @@ def PhaseRtrv_core(*args, Nmodes=1, **kwargs):
     from the standard core. ``Nmodes > 1`` uses
     :func:`PhaseRtrv_core_multimode`, where the Fourier constraint is applied to
     the summed modal intensity.
+
+    Context:
+    Public kernel dispatcher: select single/multimode implementation through Nmodes while
+    preserving the shared call contract expected by observation workers.
     """
     if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
         raise ValueError("Nmodes must be a positive integer.")

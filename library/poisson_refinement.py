@@ -22,6 +22,10 @@ class PoissonRefinementResult:
 
 
 def _modes(field):
+    """
+    Shape adapter: represent a single field as a one-mode stack so the same intensity and
+    gradient code supports either case.
+    """
     array = np.asarray(field, dtype=complex)
     if array.ndim not in (2, 3):
         raise ValueError("Expected a field or a stack of modes.")
@@ -29,6 +33,10 @@ def _modes(field):
 
 
 def _kernel_fft(gamma, shape):
+    """
+    Prepare fixed blur for the optimizer. Normalize each modal kernel and move its centered
+    origin into FFT order before transforming. None denotes full coherence.
+    """
     if gamma is None:
         return None
     kernel = np.broadcast_to(np.asarray(gamma).real, shape).copy()
@@ -42,6 +50,10 @@ def _kernel_fft(gamma, shape):
 
 
 def _blur(values, kernel_fft, adjoint=False):
+    """
+    Forward/adjoint circular convolution on centered detector arrays. The adjoint conjugates
+    the kernel spectrum and is needed to back-propagate intensity residuals correctly.
+    """
     if kernel_fft is None:
         return values
     kernel = np.conj(kernel_fft) if adjoint else kernel_fft
@@ -50,17 +62,30 @@ def _blur(values, kernel_fft, adjoint=False):
 
 
 def predicted_intensity(field, gamma=None):
+    """
+    Forward detector model used for diagnostics and objective comparisons: blur each modal
+    intensity, then sum incoherently. No object-space or magnetic projection is applied.
+    """
     modes = _modes(field)
     return np.maximum(_blur(np.abs(modes) ** 2, _kernel_fft(gamma, modes.shape)).sum(axis=0), 0)
 
 
 def valid_pixels(measured, mask):
+    """
+    Likelihood sample selection: retain finite nonnegative measurements including zeros, and
+    exclude explicit invalid pixels. Negative dark-corrected values are not usable counts.
+    """
     measured = np.asarray(measured, dtype=float)
     # True zeros are evidence. Negative dark-corrected values are not counts.
     return np.isfinite(measured) & (measured >= 0) & ~np.broadcast_to(np.asarray(mask, dtype=bool), measured.shape)
 
 
 def poisson_deviance(prediction, measured, mask=0, floor=1e-10):
+    """
+    Scalar diagnostic on observed pixels. Compare stages using the same mask and forward
+    model; in processed camera units this is a quasi-Poisson score rather than a calibrated
+    statistical test.
+    """
     valid = valid_pixels(measured, mask)
     if not np.any(valid):
         raise ValueError("No valid nonnegative measurements.")
@@ -74,12 +99,18 @@ def poisson_deviance(prediction, measured, mask=0, floor=1e-10):
 
 def refine_poisson(field, measured, support, mask=0, *, gamma=None, steps=50,
                    learning_rate=1., refine_modes=None, tolerance=1e-7):
-    """Projected Wirtinger descent with backtracking; no amplitude overwrite.
+    """
+    Projected Wirtinger descent with backtracking; no amplitude overwrite.
 
     Support is centered and may be modal. Only ``refine_modes`` are changed;
     use [0] to preserve a shared secondary mode. Missing-pixel fills are ignored.
     The returned history starts AFTER enforcing support on the starting field;
     baseline_loss records the original, potentially unsupported starting field.
+
+    Context:
+    Optional post-retrieval optimizer, separate from the joint physical model. Keep
+    secondary modes fixed with refine_modes=[0]. The returned fields may improve detector
+    agreement without preserving the baseline fitted magnetic/charge maps.
     """
     original = np.asarray(field)
     current = _modes(field).copy()
@@ -112,11 +143,13 @@ def refine_poisson(field, measured, support, mask=0, *, gamma=None, steps=50,
         loss = float(np.sum((mu - y * np.log(mu))[valid]) / count)
         if not gradient:
             return loss
+        # Unmeasured pixels supply no likelihood gradient; measured zeros do.
         residual = np.where(valid, 1 - y / mu, 0)
         grad = array * _blur(np.broadcast_to(residual, array.shape), kfft, adjoint=True)
         grad[~selected] = 0
         return loss, project(grad)
 
+    # Keep the pre-support baseline so plots expose any initial projection cost.
     baseline = evaluate(current)
     if steps:
         projected = project(current)
@@ -131,6 +164,8 @@ def refine_poisson(field, measured, support, mask=0, *, gamma=None, steps=50,
             status = "stationary"
             break
         trial_rate = min(rate * 1.5, learning_rate)
+        # Backtracking accepts only a finite sufficient decrease; a failed search
+        # returns the last accepted field, not the rejected trial.
         for _ in range(30):
             candidate = current - trial_rate * grad
             candidate_loss = evaluate(candidate)

@@ -1517,6 +1517,11 @@ def _prepare_energy_amplitudes(
     Returns
     -------
     amplitudes, intensities, bsmasks : arrays, shape (nE, nx, ny)
+
+    Context:
+    Input boundary: convert measured intensities into amplitude targets and effective
+    invalid masks. Keep the explicit detector mask distinct from cutoff-based exclusions
+    when estimating radial means or low-count statistics.
     """
     intensities = _as_energy_stack(holograms).astype(float, copy=True)
     nE, nx, ny = intensities.shape
@@ -1682,7 +1687,14 @@ def _validate_material_thickness(value, shape):
 
 
 def _recipe_material_thickness(recipe, input_geometry):
-    """Map optional object-grid material inputs through crop/bin geometry."""
+    """
+    Map optional object-grid material inputs through crop/bin geometry.
+
+    Context:
+    Geometry bridge: bring the supplied material/thickness information onto the object grid
+    used by the physical projection, rather than treating detector binning as object-space
+    averaging.
+    """
     mask = recipe.get("material_mask")
     thickness = recipe.get("material_thickness")
     if mask is None and thickness is None and not recipe.get("fit_material_thickness", False):
@@ -2648,7 +2660,13 @@ def _broadcast_stage_parameter(value, stage_count, key):
 
 
 def _build_update_schedule(recipe, name, allow_disabled=False):
-    """Build fully specified stage dictionaries from a recipe."""
+    """
+    Build fully specified stage dictionaries from a recipe.
+
+    Context:
+    Schedule compiler used before executing observations. Expand scalar controls to one
+    value per stage so the numerical runner does not need to interpret notebook shorthand.
+    """
     prefix = "" if name == "inner" else "warmup_"
     mode_key = "inner_mode" if name == "inner" else "warmup_mode"
     Nit_key = "inner_Nit" if name == "inner" else "warmup_Nit"
@@ -2772,11 +2790,17 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
 
 
 def _build_role_warmup_schedule(recipe, role):
-    """Build an optional reference/other warmup schedule.
+    """
+    Build an optional reference/other warmup schedule.
 
     A role schedule inherits controls from the shared ``warmup_*`` schedule.
     Leaving its mode and iteration settings unset preserves the legacy shared
     schedule behaviour.
+
+    Context:
+    Resolve the reference or other-observation override. This selects algorithms/iterations;
+    whether a field is copied from the reference is controlled separately by
+    warmup_start_from_first.
     """
     mode = recipe[f"warmup_{role}_mode"]
     Nit = recipe[f"warmup_{role}_Nit"]
@@ -2807,12 +2831,18 @@ def format_universal_workflow(
     state_labels=None,
     start_fields_provided=False,
 ):
-    """Return an ASCII tree describing a universal retrieval recipe.
+    """
+    Return an ASCII tree describing a universal retrieval recipe.
 
     The tree reports which warmup schedule is applied to the reference and
     nonreference holograms, where their starting fields come from, and how the
     later joint phase-retrieval and physical-projection loop is arranged.
     This function only inspects the recipe; it does not allocate image arrays.
+
+    Context:
+    Notebook-facing plan, not a run log: render the recipe without reconstructing any
+    fields. Use this before launching a long calculation to inspect initialization,
+    schedules and coherence policy.
     """
     recipe = default_universal_phase_retrieval_recipe()
     if universal_recipe is not None:
@@ -3797,7 +3827,14 @@ def _normalize_metadata(
     beam_labels,
     n_observations,
 ):
-    """Validate and encode all observation metadata used by the model."""
+    """
+    Validate and encode all observation metadata used by the model.
+
+    Context:
+    Observation labels define which fitted quantities are shared. Preserve encounter order
+    when assigning group indices so component arrays remain aligned with the input
+    observations.
+    """
     states = np.asarray(state_labels)
     energies = np.asarray(energy_labels)
     polarizations = np.asarray(polarization_coefficients, dtype=float)
@@ -4099,6 +4136,11 @@ def project_log_objects_physical(
     supplied, are fixed to +1 or -1. Charge and magnetic response spectra can
     be constrained through the local free/KK/known-beta spectral options,
     followed by optional rectangular value bounds.
+
+    Context:
+    Physical-fit boundary: input is a stack of complex object logarithms, not detector
+    intensities. With object ROI enabled, pack only positive-thickness pixels before phase
+    adjustment and fitting, then scatter them back while preserving the exterior.
     """
     log_objects = _as_energy_stack(log_objects, name="log_objects")
     if not (0 <= relaxation <= 1):
@@ -4117,6 +4159,8 @@ def project_log_objects_physical(
             aperture &= np.asarray(projection_supportmask) != 0
         if not np.any(aperture):
             raise ValueError("Physical projection aperture is empty.")
+        # A compact (active_pixels, 1) image reuses the spatial fitting code
+        # without allocating observations × modes × the full detector area.
         def pack(array):
             return None if array is None else np.asarray(array)[aperture][:, None]
         local_recipe = dict(recipe, physical_projection_object_roi=False)
@@ -4135,6 +4179,8 @@ def project_log_objects_physical(
         # silently overwritten by the zero-thickness common-field constraint.
         projected = log_objects.copy()
         projected[:, aperture] = local[..., 0]
+        # Restore map shapes for plotting/saving, but do not label unused
+        # exterior component values as physically fitted information.
         def expand(value):
             if isinstance(value, dict):
                 return {key: expand(item) for key, item in value.items()}
@@ -4565,7 +4611,14 @@ def _projection_focus_transform(
     inverse=False,
     integer_wavelength=True,
 ):
-    """Apply the reversible Fourier-plane transform used by ``fth.propagate``."""
+    """
+    Apply the reversible Fourier-plane transform used by ``fth.propagate``.
+
+    Context:
+    Projection-only propagation/alignment: move fields to the calibrated physical-model
+    plane and undo that transform afterward. This operation still needs a full Fourier grid
+    even when the subsequent physical fit uses only an aperture.
+    """
     array = _as_energy_stack(fields, name="fields").astype(np.complex128, copy=True)
     if float(propagation_um) == 0:
         return array
@@ -4627,7 +4680,14 @@ def project_fourier_fields_general(
     thickness_supportmask=None,
     return_components=False,
 ):
-    """Apply the selected general model to Fourier-domain fields."""
+    """
+    Apply the selected general model to Fourier-domain fields.
+
+    Context:
+    Bridge detector fields to object-space constraints. Fourier transforms and complex
+    logarithms happen here; the downstream projector fits model parameters in log-object
+    space.
+    """
     focus_prop_um = 0.0 if recipe is None else recipe.get("projection_focus_prop_um", 0.0)
     focus_phase_rad = 0.0 if recipe is None else recipe.get("projection_focus_phase_rad", 0.0)
     focus_setup = None if recipe is None else recipe.get("projection_focus_setup")
@@ -4990,7 +5050,14 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
 
 
 def _normalized_coherence_kernel(gamma):
-    """Return a real, nonnegative kernel with unit mass per spatial plane."""
+    """
+    Return a real, nonnegative kernel with unit mass per spatial plane.
+
+    Context:
+    Called after shared-kernel fitting/averaging. Unit mass is enforced separately for each
+    modal spatial plane; otherwise the blur kernel could absorb an arbitrary intensity
+    scale.
+    """
     kernel = np.maximum(np.asarray(gamma).real, 0).copy()
     mass = kernel.sum(axis=(-2, -1), keepdims=True)
     if np.any(~np.isfinite(kernel)) or np.any(mass <= 0):
@@ -4999,17 +5066,27 @@ def _normalized_coherence_kernel(gamma):
 
 
 def _initial_coherence_kernel(field):
+    """
+    Create a centered, nearly delta-like initial blur on the same spatial/modal grid as one
+    observation. This is an initial guess, not a fitted detector point-spread function.
+    """
     kernel = np.full(np.shape(field), 2e-6, dtype=float)
     kernel[..., kernel.shape[-2] // 2, kernel.shape[-1] // 2] = 0.7
     return _normalized_coherence_kernel(kernel)
 
 
 def _pooled_coherence_update(fields, targets, gamma, iterations, weights=None):
-    """RL fit of one kernel per mode to the summed, weighted state likelihood.
+    """
+    RL fit of one kernel per mode to the summed, weighted state likelihood.
 
     Fields and targets use centered detector coordinates. All states contribute,
     including states whose fields are frozen. Unlike averaging separate fits,
     every RL step uses the joint residual and the sum of modal predictions.
+
+    Context:
+    Called at synchronous round boundaries with fields held fixed. targets already contains
+    measured intensities plus the currently frozen masked fills. The leading observation
+    dimension is pooled; modal kernels remain separate.
     """
     from scipy.fft import fft2 as cpu_fft2, ifft2 as cpu_ifft2
 
@@ -5047,7 +5124,14 @@ def _pooled_coherence_update(fields, targets, gamma, iterations, weights=None):
 
 
 def _observation_map(function, observations, workers):
-    """Bound in-flight reconstructions and preserve deterministic result order."""
+    """
+    Bound in-flight reconstructions and preserve deterministic result order.
+
+    Context:
+    Scheduling boundary for independent work: return results in requested observation order
+    even when workers finish out of order. Bounded submission limits the number of large
+    reconstruction buffers alive at once.
+    """
     observations = list(observations)
     if workers == 1:
         for observation in observations:
@@ -5062,7 +5146,14 @@ def _observation_map(function, observations, workers):
 
 
 def _run_observation_update(*args, **kwargs):
-    """Use thread-local FFT settings; never change module globals in workers."""
+    """
+    Use thread-local FFT settings; never change module globals in workers.
+
+    Context:
+    Worker wrapper around one observation schedule. Configure FFT threads locally and attach
+    execution timing; update shared gamma only after collecting worker results in the parent
+    driver.
+    """
     from scipy.fft import set_workers
     recipe = args[5]
     import threading
@@ -5092,7 +5183,14 @@ def _run_update_schedule(
     fixed_masked_intensity=None,
     freeze_gamma=False,
 ):
-    """Run the configured phase-retrieval stages for one observation."""
+    """
+    Run the configured phase-retrieval stages for one observation.
+
+    Context:
+    Numerical stage runner, not a multi-state driver. Coherent stages pass the invalid mask
+    through unchanged. Partial stages substitute masked intensity fills and use a fully
+    observed effective target; callers own the lifetime of those fills.
+    """
     has_rl = any(stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
                  for stage in schedule)
     if has_rl and not recipe.get("partial_coherence", False):
@@ -5219,7 +5317,14 @@ def _run_update_schedule(
 
 
 def _apply_measured_amplitudes(fields, amplitudes, bsmasks):
-    """Reapply measured Fourier amplitudes outside invalid-pixel regions."""
+    """
+    Reapply measured Fourier amplitudes outside invalid-pixel regions.
+
+    Context:
+    Final detector projection: replace amplitudes only at observed pixels. For multiple
+    incoherent modes use one common scale factor based on summed modal power, preserving
+    their relative weights.
+    """
     constrained = np.asarray(fields).copy()
     if constrained.ndim == 4:
         total = np.sqrt(np.sum(np.abs(constrained) ** 2, axis=1))
@@ -5277,7 +5382,14 @@ def _initialize_fields(
     mask_stack,
     scale_fit="linear",
 ):
-    """Create and approximately normalize one initial field per observation."""
+    """
+    Create and approximately normalize one initial field per observation.
+
+    Context:
+    Single-mode support-based initialization. Each observation starts with the support
+    transform and receives its own measured-amplitude scaling; the caller optionally applies
+    radial normalization afterward.
+    """
     n_observations = amplitudes.shape[0]
     start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     fields = np.repeat(start[None], n_observations, axis=0).astype(
@@ -5306,6 +5418,11 @@ def _initialize_fields(
 
 def _initialize_physical_modal_fields(supportmask, amplitudes, intensities,
                                       mask_stack, recipe):
+    """
+    Multimode initialization branch used by the general driver. support_fft transforms each
+    modal support; the alternative delegates to the random-phase initializer. Scaling uses
+    total modal power, not a coherent field sum.
+    """
     if recipe["mode_initialization"] == "support_fft":
         support_modes = np.asarray(supportmask)
         base_modes = np.empty_like(support_modes, dtype=np.complex128)
@@ -5346,7 +5463,14 @@ def _project_nonphysical_modes_common(
     recipe,
     weights=None,
 ):
-    """Remove state dependence from modes outside the physical model."""
+    """
+    Remove state dependence from modes outside the physical model.
+
+    Context:
+    Secondary-mode projection at joint boundaries and final output. Group by energy and
+    illumination, ignoring state and polarization; align arbitrary modal global phases
+    before complex averaging to avoid cancellation.
+    """
     array = np.asarray(fields)
     if array.ndim != 4 or array.shape[1] < 2:
         return array.copy(), []
@@ -5409,7 +5533,13 @@ def _project_physical_modes(
     beam_labels,
     **kwargs,
 ):
-    """Apply the physical model to mode 1 and optional common-mode constraints."""
+    """
+    Apply the physical model to mode 1 and optional common-mode constraints.
+
+    Context:
+    Dispatch the primary mode to the physical model, then enforce the optional shared
+    secondary mode. The secondary field never enters the charge/magnetization fit.
+    """
     diagnostic_callback = kwargs.pop("diagnostic_callback", None)
     if np.asarray(fields).ndim == 3:
         result = project_fourier_fields_general(
@@ -5514,6 +5644,11 @@ def general_phase_retrieval_algorithm(
         Invalid-pixel masks used by the reconstruction.
     errors : dict
         Per-stage errors and projection diagnostics.
+
+    Context:
+    Main orchestration for mixed metadata. Owns warmup, coherent masked-fill snapshots, per-
+    observation/shared gamma, coherent refreshes, worker synchronization and physical-
+    projection cadence. The low-level kernel only sees one observation at a time.
     """
     recipe = default_general_phase_retrieval_recipe()
     if general_recipe is not None:
@@ -6427,13 +6562,25 @@ def _pure_energy_scan(metadata):
 
 
 def _physical_driver_recipe(recipe):
-    """Select recipe entries understood by the local physical driver."""
+    """
+    Select recipe entries understood by the local physical driver.
+
+    Context:
+    Adapter at universal dispatch: retain the keys accepted by the general physical driver
+    so universal-only spectrum aliases do not leak into lower-level validation.
+    """
     defaults = default_general_phase_retrieval_recipe()
     return {key: recipe[key] for key in defaults}
 
 
 def _energy_driver_recipe(recipe):
-    """Translate universal settings for the local pure-energy driver."""
+    """
+    Translate universal settings for the local pure-energy driver.
+
+    Context:
+    Compatibility adapter for pure-energy low-rank retrieval. This dispatch is distinct from
+    the mixed-state physical driver and does not support every newer joint-workflow option.
+    """
     defaults = default_multi_energy_phase_retrieval_recipe()
     translated = {
         key: recipe[key]
@@ -6618,6 +6765,12 @@ def universal_phase_retrieval_algorithm(
         Observation-specific invalid-pixel masks.
     errors : dict
         Per-stage errors, settings, metadata, and projection diagnostics.
+
+    Context:
+    Public notebook entry point. Supply intensity images plus
+    state/energy/polarization/illumination metadata. Returns final fields, warmup snapshot,
+    fitted components, effective masks and diagnostics; it does not run the optional
+    notebook Poisson polish.
     """
     recipe = default_universal_phase_retrieval_recipe()
     if universal_recipe is not None:

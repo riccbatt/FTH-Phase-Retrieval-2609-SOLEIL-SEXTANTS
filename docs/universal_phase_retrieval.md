@@ -276,6 +276,138 @@ projects onto support; its first loss can exceed the unprojected baseline.
 | Physical fit worsens detector agreement | Relaxation/cadence, material aperture, phase-reference assumption, model identifiability |
 | Changes appear ignored | Rerun recipe construction; restart kernel after library edits; inspect printed tree |
 
+## Workflow schematics
+
+These diagrams describe the general driver used by ajajas 02 and MAX IV 05.
+The plotted recipe in each notebook resolves the actual iteration counts and
+options for that run. Mermaid diagrams render in supporting Markdown viewers;
+the text below each diagram gives the same main sequence.
+
+### From notebook to numerical kernels
+
+```mermaid
+flowchart TD
+    N[Notebook: data, metadata, recipe] --> U[Universal entry point]
+    U --> G[Geometry: crop, bin, support grid]
+    G --> I[Initialization: support FFT and normalization]
+    I --> W[Warmup: independent or reference-seeded]
+    W --> O[Joint outer rounds]
+    O --> R{Coherent refresh requested?}
+    R -->|Yes| C[Coherent update and new masked fills]
+    R -->|No| D[Detector and support updates]
+    C --> D
+    D --> P[Primary physical fit and common secondary mode]
+    P --> M{More rounds?}
+    M -->|Yes| O
+    M -->|No| F[Final configured constraints]
+    F --> B[Baseline fields, components and diagnostics]
+    B --> Q[Optional separate quasi-Poisson refinement]
+```
+
+Sequence: prepare → initialize → warm up → repeat detector/support and physical
+updates → return baseline → optionally refine. Projection cadence can postpone
+physical updates until later complete sweeps; the diagram shows their logical
+position, not a promise to execute a projection on every round.
+
+### Warmup starts: two different choices
+
+```mermaid
+flowchart LR
+    S{Reference seeding?} -->|False| A[Own support-based start per observation]
+    A --> B[Each state and polarization: HAPRE 750 then ER 50]
+    S -->|True| C[Reconstruct selected reference first]
+    C --> D[Copy and scale reference field for other observations]
+    D --> E[Run each observation's configured warmup schedule]
+    B --> F[Joint physical projections couple observations]
+    E --> F
+```
+
+`WARMUP_START_FROM_REFERENCE` controls field copying. Ajajas `WARMUP_POLICY`
+controls whether reference and other observations receive the same schedule.
+These are separate choices. Neither selects the shared-gamma fitting policy.
+All coherent warmups finish before the partial warmup when masked-fill
+preservation is enabled. Phase coupling does not guarantee that every independent
+retrieval ambiguity can be resolved.
+
+### Lifetime of masked diffraction intensities
+
+```mermaid
+flowchart TD
+    A[Coherent warmup: masked pixels free] --> B[Capture total modal intensity in masked pixels]
+    B --> C[Partial-coherence rounds: use captured fills]
+    C --> D{Completed loop is in refresh list?}
+    D -->|No| C
+    D -->|Yes| E[Retain gamma outside the coherent update]
+    E --> F[Run coherent refresh with original invalid mask]
+    F --> G[Capture new total modal intensities]
+    G --> H[Replace masked fills; keep measured pixels unchanged]
+    H --> C
+```
+
+Notebook example: `REFRESH_MASK_AFTER_OUTER_LOOPS=[3, 7]` means **after** loops
+3 and 7. The library receives `coherent_refresh_rounds=[4, 8]`, meaning **before**
+rounds 4 and 8. There must be a following partial-coherence round. Frozen
+reference observations remain unchanged. Without partial coherence, masked pixels
+already remain free and do not need this transition mechanism.
+
+### Physical projection uses positive-thickness pixels
+
+```mermaid
+flowchart LR
+    A[Full detector field: mode 1] --> B[Full-grid propagation and object transform]
+    B --> C[Complex object logarithm]
+    C --> D[Pack thickness-positive pixels within projection support]
+    D --> E[Phase-reference adjustment on packed pixels]
+    E --> F[Charge, magnetic and thickness fit on packed pixels]
+    F --> G[Scatter projected pixels into original object]
+    C -->|Preserve zero-thickness exterior| G
+    G --> H[Full-grid inverse transform]
+    S[Mode 2 fields] --> T[Group by energy and illumination]
+    T --> V[Align global phases and complex-average across states]
+```
+
+The fit domain is a pixel selection, not a bounding rectangle: holes and
+zero-thickness pixels inside a bounding box are excluded too. Coordinate
+transforms still require the full grid. The packed physical solve and its phase
+adjustment do not. Mode 2 bypasses the magnetic model; it becomes common across
+state/polarization at the shared-mode projection.
+
+### Shared gamma: independent averaging versus pooled fitting
+
+```mermaid
+flowchart TD
+    K[One gamma snapshot at round start] --> S{Shared update strategy}
+    S -->|average| A[Each observation fits fields and its own gamma copy]
+    A --> B[Collect fits; normalize each modal kernel]
+    B --> C[Weighted average and normalize]
+    S -->|pooled| D[Each observation updates fields with gamma fixed]
+    D --> E[Joint RL fit using all weighted observations]
+    C --> N[Shared gamma for next round]
+    E --> N
+```
+
+`sequential` instead passes each observation's updated gamma directly to the next.
+`per_observation` retains a separate kernel per observation. Neither should be
+confused with the average strategy, which fits independent copies only within a
+round and then makes one common kernel again.
+
+### Reading the source
+
+| Start here | Follow into | Responsibility |
+|---|---|---|
+| `universal_phase_retrieval_algorithm` | `general_phase_retrieval_algorithm` | Dispatch and observation-level orchestration |
+| `_build_update_schedule` | `_run_observation_update`, `_run_update_schedule` | Expand recipe stages, execute one observation |
+| `_run_update_schedule` | `PhaseRtrv_core` in the unified core for multimode | Iterative support/detector constraints |
+| `_project_physical_modes` | `project_fourier_fields_general`, `project_log_objects_physical` | Primary-mode physical projection |
+| `_project_nonphysical_modes_common` | Phase alignment and weighted complex average | Shared nonmagnetic secondary mode |
+| `_pooled_coherence_update` | Weighted modal intensity predictions | Shared gamma fit with fields fixed |
+| `phase_retrieval_geometry.prepare` | `Geometry.finish` | Input geometry and output metadata |
+| `poisson_refinement.refine_poisson` | Forward blur, adjoint blur, line search | Optional post-retrieval refinement |
+
+The universal module also contains historical single/pure-energy entry points.
+Follow the dispatch branch matching `projection_model`; a function with a similar
+name elsewhere is not necessarily used by the current joint notebook.
+
 ## Complete recipe defaults
 
 The following inventory is generated from `default_universal_phase_retrieval_recipe()`.
