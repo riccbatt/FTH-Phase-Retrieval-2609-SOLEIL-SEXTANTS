@@ -1,3 +1,5 @@
+For the current joint library, full option reference and repeated coherence transitions, see [Universal phase retrieval: user guide](universal_phase_retrieval.md).
+
 # Phase retrieval API and workflow guide
 
 This guide covers the current unified and universal phase retrieval APIs. The

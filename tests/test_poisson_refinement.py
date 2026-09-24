@@ -76,6 +76,20 @@ class PoissonTests(unittest.TestCase):
         self.assertEqual(components['magnetization'].shape, logs.shape)
         self.assertEqual(components['physical_projection_fit_pixels'], 12)
 
+    def test_roi_phase_reference_leaves_vacuum_logs_unchanged(self):
+        logs = np.ones((2, 8, 8), complex)
+        logs[0] += 3.1j
+        logs[1] -= 3.1j
+        thickness = np.zeros((8, 8)); thickness[3:5, 3:5] = 1
+        recipe = u.default_general_phase_retrieval_recipe()
+        recipe.update(physical_projection_object_roi=True, physical_phase_reference=True)
+        out, components = u.project_log_objects_physical(
+            logs, ['a', 'b'], [783]*2, [1, -1], ['beam']*2,
+            recipe=recipe, material_thickness=thickness, iterations=2,
+            return_components=True)
+        np.testing.assert_array_equal(out[:, thickness == 0], logs[:, thickness == 0])
+        self.assertEqual(components['physical_projection_fit_pixels'], 4)
+
     def test_reference_phase_branch_preserves_an_exact_physical_model(self):
         y, x = np.indices((32, 32))
         aperture = (abs(x-16)<7) & (abs(y-16)<7)

@@ -49,6 +49,10 @@ class _ProgressStream:
             self.active_observation = True
         elif "warmup complete" in line:
             self._complete_observation()
+        elif "Coherent refresh observation " in line:
+            self._complete_observation()
+            self.bar.set_postfix_str("coherent refresh", refresh=False)
+            self.active_observation = True
         elif "Updating observation " in line or "Updating energy " in line:
             self._complete_observation()
             self.bar.set_postfix_str("joint retrieval", refresh=False)
@@ -91,7 +95,7 @@ def retrieval_progress(recipe, n_observations=None, *, kind, leave=True,
         if (warmup and recipe.get("preserve_warmup_masked_intensity")
                 and recipe.get("partial_coherence")):
             warmup_passes = 2
-        total = n_observations * (int(recipe["outer_iterations"]) + warmup_passes) + 1
+        total = n_observations * (int(recipe["outer_iterations"]) + warmup_passes + len(recipe.get("coherent_refresh_rounds", []))) + 1
         unit = "step"
     else:
         raise ValueError("kind must be 'unified' or 'universal'")
