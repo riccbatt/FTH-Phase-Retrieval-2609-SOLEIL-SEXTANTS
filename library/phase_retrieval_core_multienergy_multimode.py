@@ -305,6 +305,7 @@ def _run_energy_update_schedule(
     recipe,
     nmodes,
     image_shape,
+    phase_retrieval_kernel=None,
 ):
     """Run all scheduled multimode updates sequentially for one energy."""
     stage_results = []
@@ -338,7 +339,7 @@ def _run_energy_update_schedule(
                 Fourier_last=recipe["Fourier_last"],
             )
         else:
-            result, err_d, err_s, _ = multimode.PhaseRtrv_core(
+            result, err_d, err_s, _ = (phase_retrieval_kernel or multimode.PhaseRtrv_core)(
                 diffract=amplitude,
                 mask=supportmask,
                 mode=mode,
@@ -393,6 +394,7 @@ def multi_energy_phase_retrieval_algorithm(
     supportmask,
     multi_energy_recipe=None,
     start_fields=None,
+    phase_retrieval_kernel=None,
 ):
     """
     Jointly reconstruct multiple energies and incoherent modes.
@@ -531,6 +533,7 @@ def multi_energy_phase_retrieval_algorithm(
                 recipe,
                 nmodes,
                 (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({
@@ -575,6 +578,7 @@ def multi_energy_phase_retrieval_algorithm(
                 recipe,
                 nmodes,
                 (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({

@@ -45,8 +45,8 @@ Supply one label/coefficient per observation:
 | `polarization_coefficients` | Magnetic sign/weight, often +1 or −1 |
 | `illumination_labels` | Which common illumination applies |
 
-One field returns as `(observations, rows, columns)`; two modes add a modal axis
-`(observations, 2, rows, columns)`. Detector intensity is the **sum of modal
+One field returns as `(observations, rows, columns)`; multiple modes add a modal axis
+`(observations, len(modes), rows, columns)`. Detector intensity is the **sum of modal
 intensities**, not the magnitude squared of the summed complex fields.
 
 ## Working example
@@ -231,6 +231,160 @@ ill-conditioned fits. Refractive-index spectra require thickness/wave-number
 conversion; explicit `kt` products do not. See the complete option inventory and
 the validation messages for mutually exclusive inputs. Absolute thickness and
 spectral response scale remain coupled without external calibration.
+
+## When the incoming illumination changes
+
+**Notebook switch:** set `ALLOW_VARIABLE_ILLUMINATION=True` and choose
+`ILLUMINATION_VARIATION="energy"`, `"state"`, or `"energy_state"`.
+MAX IV defaults to grouping by energy; ajajas defaults to grouping by state.
+The switch is off by default. When enabled, the notebooks set gamma scope to
+`"shared"` across all observations and retain the selected gamma update strategy.
+Incoming-wave variation and coherence-kernel fitting remain distinct.
+`illumination_group_labels(states, energies, variation=...)` generates the labels;
+`variation="common"` reproduces the original single incoming-wave group.
+Opposite polarizations within a selected group use the same incoming wave.
+
+
+The current physical model includes a **complex illumination field** for each
+`illumination_labels` group. This represents spatial amplitude and phase in the
+physical projection plane. It is distinct from the partial-coherence kernel gamma.
+
+For observation `a`, the primary exit wave is modeled as
+
+`psi[a,r] = P[beam[a],r] * exp(t[r] * (qc[E[a]] + p[a] * qm[E[a]] * mz[state[a],r]))`.
+
+The solver fits `log(P)` as its common log-object term. Consequently, the fitted
+common field can also contain sample contributions that the data do not distinguish
+from illumination; it is not automatically a uniquely measured incident probe.
+
+### Choose groups according to what is physically shared
+
+| Situation | Illumination labels | Consequence |
+|---|---|---|
+| One stable incoming wave throughout | Same label for all observations | Strongest sharing; current notebook default |
+| Wave changes with energy, stable across states and helicities at each energy | One label per energy group | Independent illumination per energy; states/helicities still share within energy |
+| Wave changes between acquisition blocks | One label per measured stable block | Requires repeated/contrasting observations within or connecting blocks |
+| Wave changes by state, but opposite helicities share the same wave within each state | One label per state (or state/energy group) | Polarization contrast can remove the shared illumination; absolute response still needs constraints |
+| Unknown wave changes independently in every exposure | Unique labels are representable but generally underconstrained | Extra information is needed; arbitrary beam fields can absorb the sample changes |
+
+Use intentional group IDs, not noisy raw energy readings: two measurements meant
+to share an illumination must have exactly equal labels. Labels do not impose
+smoothness between nearby energies or nearby times.
+
+For MAX IV 05, after `energy_labels` has been formed from the paired/validated
+energy groups, replace only the illumination-label assignment if appropriate:
+
+```python
+# Stable illumination everywhere (existing default):
+illumination_labels = ["beam0"] * len(records)
+
+# Alternative: illumination may change with energy, but is shared by
+# opposite polarizations and all states at the same energy.
+illumination_labels = [f"beam_energy_{energy}" for energy in energy_labels]
+
+# Alternative: state and energy each define a stable illumination group.
+# Only defensible if each group has enough contrast/calibration information.
+illumination_labels = [
+    f"beam_state_{state}_energy_{energy}"
+    for state, energy in zip(states, energy_labels)
+]
+```
+
+Choose **one** assignment and pass it as `illumination_labels=illumination_labels`
+to the universal call. The API also supports arbitrary stable-block labels.
+This guide does not change the notebook's existing label assignment automatically.
+
+### What remains measurable, and what becomes ambiguous
+
+If opposite polarizations at the same energy/state see the **same** illumination,
+then for their primary exit waves (where defined, with consistent phase gauges),
+
+`psi_plus / psi_minus = exp(2 * t * qm(E) * mz)`.
+
+The common illumination and charge term cancel. This supports extracting magnetic
+contrast even when the illumination differs at other energies. Noise, phase
+ambiguities, zeros and imperfectly matched polarization exposures still matter.
+This equation is for complex exit waves, not a ratio of detector intensities.
+
+However, independent arbitrary illumination at each energy makes the absolute
+charge response ambiguous. For any complex energy-dependent number `h(E)`,
+
+`qc(E) -> qc(E) + h(E)` and `P(E,r) -> P(E,r) * exp(-t(r)*h(E))`
+
+leave the exit wave unchanged. A lower residual after adding beam groups does
+not prove that the fitted charge spectrum and probe have been separated correctly.
+Likewise, if illumination changes between the opposite polarizations, their ratio
+contains `P_plus/P_minus`, which can imitate magnetic contrast.
+
+**For ajajas' single-polarization state scan**, assigning an unconstrained beam to
+each state is particularly problematic: its free spatial field can reproduce the
+state-dependent magnetic signal. Independent warmup starts do not solve this
+identifiability problem. Keep states sharing a beam unless there is evidence and
+additional information to separate a changing beam from a changing sample.
+
+The physical-factorized `components['identifiable']` flag checks selected scale
+anchors; it is not a complete test for all beam/sample ambiguities in an arbitrary
+acquisition. Do not use it alone to validate a more flexible illumination model.
+
+### Practical procedure
+
+1. **Separate scalar flux changes from wavefront changes.** For a known positive
+   exposure/incident-flux factor `f[a]`, normalize intensities as `I[a]/f[a]`
+   (field amplitudes scale as `1/sqrt(f[a])`). Use an independent flux monitor or
+   a justified reference. Total scattering can itself change with energy/state,
+   so normalizing every image to its own total can remove genuine sample contrast.
+2. **Check shared-pair assumptions.** At MAX IV, first assess whether the two
+   helicities at each energy have the same incoming wave. If so, per-energy beam
+   groups are a sensible model to test while keeping their polarization contrast.
+3. **Add only supported flexibility.** Compare the stable-beam and grouped-beam
+   models using residuals, recovered magnetic contrast, reference repeatability,
+   and charge-spectrum stability. More groups should not be selected merely
+   because their fitting residual is smaller.
+4. **For unconstrained drift, obtain extra information.** Useful possibilities
+   include a calibrated probe/reference measurement, repeated measurements of an
+   unchanged state under different beam conditions, opposite-helicity pairs with
+   stable illumination, or a restricted drift model (for example known shifts or
+   low-dimensional wavefront variation). The present library supports free fields
+   per label; it does **not** currently provide a fixed measured-probe input or
+   a smooth/low-dimensional probe-drift constraint. Those need an explicit extension.
+5. **Keep coherence decisions separate.** Changing illumination labels does not
+   change `coherence_kernel_scope`. A spatial wavefront change is not generally
+   represented by detector convolution with gamma. Whether gamma is shared is a
+   separate assumption about blur/coherence.
+
+Joint object/probe recovery needs measurement redundancy or constraints. For
+context, overlapping-position ptychography uses that redundancy to recover both
+functions; the present fixed-position joint CDI model does not acquire such
+redundancy merely by adding labels. See the primary research example
+[Hard X-ray ptychography for optics characterization](https://journals.iucr.org/s/issues/2020/06/00/gb5108/).
+
+### Interaction with ROI and secondary-mode constraints
+
+- With thickness-only physical projection enabled, the illumination/common-field
+  fit is performed only at selected positive-thickness pixels. Vacuum/reference
+  pixels outside that selection do not automatically calibrate the probe in this
+  fit. Expanded component maps outside the ROI are placeholders, not measured
+  incoming-wave values.
+- The common secondary mode is grouped by **energy and illumination label**.
+  Giving each state a different beam label also stops enforcing mode-2 equality
+  between those states. Per-energy labels retain equality across states sharing
+  that energy. If mode 2 must remain common even across different beam labels,
+  its grouping rule needs a separate model change; that is not the current behavior.
+- The live view shows reconstructed **exit waves**, not isolated incident probes.
+  Common log-object estimates are available in
+  `components['common_log_objects_by_beam']`, subject to the ambiguities above.
+
+```mermaid
+flowchart TD
+    A[Incoming wave appears to change] --> B{Only a known flux scale?}
+    B -->|Yes| C[Normalize intensities using measured flux]
+    B -->|No| D{Which observations still share a wave?}
+    D --> E[Assign shared illumination labels to stable groups]
+    E --> F{Enough contrast or calibration within and across groups?}
+    F -->|Yes| G[Fit grouped beams and assess sample-response stability]
+    F -->|No| H[Acquire references or add a constrained probe model]
+    H --> I[Do not interpret free per-exposure beams as unique sample recovery]
+```
 
 ## Performance, geometry and reproducibility
 
@@ -554,3 +708,209 @@ apply to their corresponding stage or physical quantity.
 | `known_charge_kt_delta_spectrum` | `None` |
 | `known_magnetic_kt_beta_spectrum` | `None` |
 | `known_magnetic_kt_delta_spectrum` | `None` |
+
+## Optional live notebook images
+
+Ajajas 02 and MAX IV 05 expose `LIVE_RECONSTRUCTION` (off by default), `LIVE_OBSERVATIONS`,
+`LIVE_EVERY_PROJECTION` and `LIVE_MIN_SECONDS`. Enable it before running retrieval.
+The display updates after completed physical projections and on final output;
+independent warmup does not yet have a fitted magnetization to show.
+
+Each selected observation shows its state's latest fitted magnetization, plus
+focused exit-wave amplitude and phase for every mode. The ROI follows the actual
+retrieval support. Magnetization and phase use fixed ranges; amplitude rescales
+for each update. Fitted magnetization and current fields can differ in consistency
+because physical projection is relaxed and final detector constraints may follow.
+
+The API hook is `progress_callback=callback` on the universal/general driver.
+It receives an event dictionary with `stage`, one-based `outer_round`, `fields`,
+`components`, `recipe`, `supportmask`, `state_labels`, and `energy_labels`.
+Arrays are borrowed; callbacks must not mutate them or retain them as historical
+snapshots without copying. The callback is not part of the serialized recipe.
+It runs synchronously on the controlling thread; exceptions propagate. The
+provided `library.retrieval_live.LiveReconstruction` only transforms selected
+observations and updates one IPython display handle, leaving the progress bar
+intact. Plotting adds runtime but does not change numerical update settings.
+
+## Cobalt thickness, magnetic scale, and optical constants
+
+### Where the wave number appears
+
+The explicit physical equation, using relative thickness t(r) and reference
+physical thickness d0, is
+
+`L_a(r) = c_beam(a)(r) - i*k(E_a)*d0*t(r)*[chi_c(E_a) + p_a*chi_m(E_a)*mz_state(a)(r)]`,
+
+where `chi_c=n_c-1`, `chi_m` is the magnetic index contribution, and
+`k(E)=2*pi/lambda(E)=E/(hbar*c)` (a wave number, not photon momentum hbar*k).
+The library instead fits `q_c=-i*k*d0*chi_c` and `q_m=-i*k*d0*chi_m`, yielding
+its compact `L=c+t*(q_c+p*q_m*mz)` expression. **k is already absorbed in q;
+do not multiply the fitted q by k again.** With absolute thickness d(r) rather
+than relative t(r), write `-i*k*d(r)` directly and omit d0.
+
+Using `exp(-i*k*n*d)` instead of its vacuum-relative form adds a known vacuum
+phase `-k*d`; that reference phase can be included in the common field. It does
+not remove the need for k in the material response.
+
+The calibration helper exports wave numbers in inverse nm and complex charge
+and magnetic index contrasts. For default sign -1, `chi=-delta-i*beta` and
+positive beta attenuates. `PHASE_PROPAGATION_SIGN=+1` supports the opposite
+convention, `chi=-delta+i*beta`; its delta conversion changes sign. Select a
+convention consistent with the reconstructed phase and external spectra.
+This postprocessing switch does not alter the fitted response or the existing
+known-spectrum/KK recipe conventions. In particular, the legacy
+`known_*_delta_spectrum` adapter maps its supplied delta to negative imaginary
+log response; do not assume that switching the export sign changes that input
+adapter. The older low-level `response_to_refractive_index` accepts an explicit
+`propagation_sign=-1` but retains its historical +1 default for compatibility.
+
+
+Ajajas 02 and the physical MAX IV 05 expose two **postprocessing** inputs:
+
+```python
+COBALT_THICKNESS_NM = None  # Replace with the measured total Co thickness in nm.
+NORMALIZE_MAGNETIZATION_TO_UNIT_RANGE = False
+```
+
+No thickness is guessed. `None` keeps outputs in dimensionless log-response
+units; a positive thickness enables delta/beta plots and saved arrays. The model's
+material thickness map must be **relative**, so local Co thickness is the entered
+value multiplied by that map. For a fitted map this reference scale must be
+interpreted consistently; it is not an independent absolute thickness measurement.
+For a multilayer, use the total Co thickness only if the extracted response can
+be attributed to cobalt. Other layers can contribute to the charge response.
+
+Using the notebook default `PHASE_PROPAGATION_SIGN=-1`, with
+`n=1-delta-i*beta` and `T=exp(-i*k*(n-1)*d)`, the fitted log coefficient is
+
+`q = -k*d*beta + i*k*d*delta`.
+
+Thus `beta=-Re(q)/(k*d)` and `delta=Im(q)/(k*d)`, with
+`k=2*pi*E/(1239.8419843320026 eV nm)`. This sign convention is stated explicitly;
+conventions that reverse propagation/complex phase need a corresponding change.
+The [LBNL X-Ray Data Booklet](https://xdb.lbl.gov/xdb.pdf) describes the complex
+index convention. The helper here performs only this algebraic conversion; it
+does not calibrate a probe or recover an unknown absolute charge offset.
+
+The reconstruction determines `q_m(E)*m_s(r)`. If normalization is enabled,
+compute one scale `s=max(abs(m))` across all states and positive-thickness pixels,
+then return `m_new=m/s` and `q_m_new=q_m*s`. The product and predicted exit waves
+remain unchanged. This makes the largest magnitude equal one without forcing
+both negative and positive extrema to -1 and +1. A min/max affine mapping would
+shift the magnetic zero and is deliberately not used. An all-zero map cannot
+be normalized and raises a clear error.
+
+The fitted solver already bounds m to [-1,1]; this reporting option does not
+change those solver bounds. Leave it disabled when the magnetic scale is already
+anchored or when the maximum observed magnetization need not represent saturation.
+When enabled without a measured saturation reference it is a chosen normalization,
+not proof that the resulting spectrum is the fully saturated Co optical constant.
+Magnetic sign and illumination/charge ambiguities remain. Thickness rescales both
+charge and magnetic coefficients; changing magnetization scale rescales only the
+magnetic coefficient.
+
+`library.retrieval_optical_constants.calibrate_responses` makes copies and returns
+postprocessed maps, spectra and calibration metadata. Notebooks keep baseline
+components and save the new values in a separate HDF5 `optical_calibration` group.
+
+## One-energy summed-polarization experiment
+
+`maxiv_phase_test/05_maxiv_hyperspectral_phase_retrieval_linear_2modes.ipynb`
+now runs **one** chosen `PAIR`, with no physical/spectral projection and no
+magnetization or index extraction. The previous version is retained in the local
+`legacy/` folder. Select the pair, inspect its energy/field metadata, check exposure
+and frame normalization, and run the notebook in order.
+
+```mermaid
+flowchart LR
+    P[Positive intensity] --> S[Dark and exposure correction]
+    N[Negative intensity] --> S
+    S --> B[Crop and bin; sum intensities; union invalid masks]
+    B --> I[Distinct seeded starts on identical supports]
+    I --> R[Two-mode HAPRE 750 then ER 50]
+    R --> D[Summed-intensity residual and mode diagnostics]
+    D --> H[Save unlabeled fields and acquisition metadata]
+```
+
+`modes=[1,1]` gives both channels the same support. They jointly constrain
+`abs(F1)**2+abs(F2)**2` to the measured sum. Separate polarization images are kept
+for inspection but are not independent reconstruction targets. The default run
+uses full coherence and no TV penalty; the stage recipe is printed and plotted.
+Distinct random object phases break exact initialization symmetry. Change
+`INITIALIZATION_SEED` to inspect sensitivity; neither seed encodes a helicity.
+
+A polarization sum is not generally a coherently linearly polarized hologram.
+For any spatially constant unitary 2x2 matrix U, mixing the two modes with U
+preserves summed intensity and their identical supports. Consequently, the modes
+cannot be uniquely assigned to positive and negative polarization from this sum
+alone. The notebook prints an explicit unitary-mixing invariance check. Separating
+physical polarization channels needs additional measurements or constraints, as
+also discussed in [Breaking ambiguities in mixed-state ptychography](https://doi.org/10.1364/OE.24.009038).
+
+
+## Thesis helicity-ratio comparison in MAX IV 05
+
+
+For each energy and state, use primary-mode `R=psi_positive/psi_negative` in the same focused object plane. Compute `A_xmcd=log(abs(R))` (amplitude, **not intensity**) and `THETA_xmcd=arg(R)` (radians), then **beta_m=-A_xmcd/(2*k*d*mz)** and **delta_m=-THETA_xmcd/(2*k*d*mz)**. The nonmagnetic secondary mode is not included: incoherent modes cannot be summed as complex fields.
+
+Warmup, final, and refined estimates all use the same cobalt thickness and the same postprocessed magnetization map, or the signed scalar `XMCD_MZ_OVERRIDE`. Thus the exit-wave estimator is separate from the spectral fit, but not an independent magnetization calibration when it uses fitted mz. Pixel estimates are averaged with weights `(2*k*d*mz)^2`, equivalently fitting each log ratio through the origin against `2*k*d*mz`. This avoids cancellation of opposite magnetic domains and unstable division near mz=0. Low-amplitude/zero-thickness pixels are excluded; counts and spatial RMS spreads are saved (spreads are not uncertainty estimates).
+
+`XMCD_REFERENCE_PHASE=True` removes the relative global phase using the circular mean ratio phase over illuminated, zero-thickness support/reference pixels. Verify these reference regions are nonmagnetic and share the incoming wave. No amplitude normalization is applied. If no valid phase reference exists, delta is reported as NaN rather than inventing a phase calibration. Setting False uses the raw phase, whose global offset can be arbitrary for independent warmups. Principal-branch phase is used; large phase wraps or spatial phase ramps need additional justified correction. No per-energy normalization to the fitted magnetic spectrum is performed.
+
+**Sign convention:** the plotted universal comparison is also `-Im(q_m)/(k*d)` after matching the same mz calibration. This is the thesis delta convention requested here; for `PHASE_PROPAGATION_SIGN=-1` it is the negative of the earlier native optical-calibration delta. The earlier export is retained unchanged. If refinement is disabled, its curve explicitly duplicates final. A good comparison requires matched illumination for the two helicities; unknown probe changes, phase gauge and modal ambiguity can contaminate it.
+
+The notebook computes a pair per exact validated energy/state, checks that its
+polarizations are +1 and -1 and its illumination group agrees, and rejects
+ambiguous repeated pairs instead of pairing by adjacent index. It transforms
+mode 1 to the same focused, internal object grid as the physical fit. Thickness
+and magnetization maps are kept in that frame, avoiding a display-shift mismatch.
+
+Controls: `XMCD_MZ_OVERRIDE=None` uses the postprocessed fitted map for all stages;
+a signed scalar supplies an external magnetization assumption instead.
+`XMCD_MIN_ABS_MZ` and `XMCD_RELATIVE_AMPLITUDE_FLOOR` exclude unreliable divisions.
+`XMCD_REFERENCE_PHASE=True` uses nonmagnetic zero-thickness support pixels as the
+phase reference. This must be physically justified; phase spread or beam changes
+cannot in general be corrected by a single global phase. If no usable phase
+reference exists, beta remains available but delta is NaN. To inspect raw,
+unreferenced ratios explicitly set the flag False.
+
+Each stage's universal comparison uses the same valid material pixels and mz
+calibration as that stage's ratio estimator. When an external mz override is
+used, the model prediction is rescaled by projection onto that same mz map rather
+than incorrectly comparing coefficients with different magnetization units.
+No intensity/amplitude scale or phase ramp is fitted to force agreement with the
+universal spectrum. The curves therefore compare exit-wave contrast against the
+model, conditional on the selected calibration and global phase reference.
+
+Results, valid/reference pixel counts, removed phase offsets, phase-reference
+status and spatial RMS spreads are saved in `xmcd_ratio_comparison` in the output
+HDF5. The group's settings record the calibration, thresholds and refinement
+status. With unknown cobalt thickness the cell explains what to enter and skips
+physical-index calculation; it does not invent a thickness.
+
+
+## Arbitrary mode counts and repeated support factors
+
+All of `[1]`, `[1,2]`, `[1,1]`, `[1,1,2]`, `[1,2,3]`, and `[1,1,2,2]`
+are accepted. `len(modes)` determines the mode count; entries are finite positive
+support-size factors and duplicates are retained. In the physical driver the
+first mode must have factor 1. Only that **first mode**, not every factor-1 mode,
+receives the physical magnetic/charge fit. All subsequent modes use the configured
+nonphysical common-mode constraint per energy/illumination group. Mode count
+increases working memory and FFT cost; there is no fixed two-mode limit.
+
+Initialization, supplied starts, gamma arrays, coherent masked-fill capture,
+refreshes and final amplitude projections retain the complete modal axis. The
+CUDA-JIT front end uses the unified multimode kernel when fallback is enabled;
+`fallback=False` explicitly rejects unsupported JIT multimode acceleration.
+Pure-energy SVD/rank-one runs dispatch to the existing multimode spectral driver,
+which applies the spectral projector separately to each mode. Its existing
+spectral-driver feature limits still apply; it does not gain physical-driver
+coherence refresh or shared physical-thickness fitting simply by using more modes.
+
+Identical supports with `mode_initialization="support_fft"` produce identical
+initial modal fields. Use `"random_phase"` or distinct supplied modal starts
+when separation of repeated-support modes matters. This breaks initial symmetry,
+but does not remove the intrinsic ambiguity of decomposing a measured intensity
+sum. The single-pair notebook already uses distinct seeded starts and now allows
+other mode lists as well, retaining `[1,1]` as its default experiment.

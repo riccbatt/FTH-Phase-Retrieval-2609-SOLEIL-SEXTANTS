@@ -16,6 +16,13 @@ Writing ``c_m = log(C_m)``, the physical projection uses log-object space,
 
     L_a(r) = c_m(a)(r) + t(r)[q_c(E_a) + p_a q_m(E_a) mz_s(a)(r)],
 
+Here t(r) is a dimensionless relative thickness and the fitted q values are
+log-transmission coefficients, NOT refractive indices. With physical thickness
+d(r)=d0*t(r) and transmission exp(-1j*k*(n-1)*d), define
+q_c(E)=-1j*k(E)*d0*(n_c(E)-1), q_m(E)=-1j*k(E)*d0*n_m(E),
+where k(E)=2*pi/lambda(E). This absorbs k*d0 exactly once. Dropping the vacuum
+reference replaces n_c-1 by n_c and moves the vacuum phase into the common field.
+
 with ``-1 <= mz <= 1``. By default ``t=1``; optional material inputs set known
 vacuum holes to ``t=0``, supply relative thickness, or fit a shared nonnegative
 relative thickness map. The scalar spectral responses absorb the reference
@@ -3755,6 +3762,7 @@ def default_general_phase_retrieval_recipe():
         "rank_deficient": "error",
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
+        "clip_magnetization": True,
         "physical_projection_object_roi": False,
         "physical_phase_reference": False,
         "projection_diagnostic_observation": None,
@@ -3818,6 +3826,29 @@ def _ordered_unique(values):
             raise ValueError("Metadata labels must be hashable.") from exc
         indices[index] = value_index
     return unique, indices
+
+
+def illumination_group_labels(state_labels, energy_labels, variation="common"):
+    """Build stable incoming-wave groups, independently of coherence gamma.
+
+    Polarization is intentionally absent: opposite polarizations within an
+    energy/state group share the incoming wave. Energy labels must already be
+    calibrated/grouped; raw noisy readings would create unintended extra beams.
+    This selects free complex beam fields, not a uniquely calibrated probe model.
+    """
+    states, energies = list(state_labels), list(energy_labels)
+    if len(states) != len(energies):
+        raise ValueError("State and energy labels must have the same length")
+    if variation not in {"common", "energy", "state", "energy_state"}:
+        raise ValueError("variation must be common, energy, state, or energy_state")
+    groups, labels = {}, []
+    for state, energy in zip(states, energies):
+        key = (None if variation == "common" else energy if variation == "energy"
+               else state if variation == "state" else (energy, state))
+        if key not in groups:
+            groups[key] = f"beam{len(groups)}"
+        labels.append(groups[key])
+    return labels
 
 
 def _normalize_metadata(
@@ -4132,7 +4163,8 @@ def project_log_objects_physical(
     """
     Fit ``L = C_beam + t(r)[q_charge(E) + p*q_magnetic(E)*mz_state(r)]``.
 
-    ``mz_state`` is real and clipped to ``[-1, 1]``. Saturated states, when
+    ``mz_state`` is real and clipped to ``[-1, 1]`` by default. Set recipe
+    ``clip_magnetization=False`` to disable clipping. Saturated states, when
     supplied, are fixed to +1 or -1. Charge and magnetic response spectra can
     be constrained through the local free/KK/known-beta spectral options,
     followed by optional rectangular value bounds.
@@ -4151,6 +4183,9 @@ def project_log_objects_physical(
     ) or iterations <= 0:
         raise ValueError("physical_iterations must be a positive integer.")
     recipe = default_general_phase_retrieval_recipe() if recipe is None else recipe
+    clip_magnetization = recipe.get("clip_magnetization", True)
+    if not isinstance(clip_magnetization, bool):
+        raise ValueError("clip_magnetization must be bool.")
     if recipe.get("physical_projection_object_roi", False):
         if material_thickness is None:
             raise ValueError("Object-ROI physical projection requires a material thickness/aperture map.")
@@ -4302,6 +4337,35 @@ def project_log_objects_physical(
                 )
                 magnetic[energy] = direction * max(amplitude, 1e-12)
 
+        # The second moment above determines an axis, not its signed direction.
+        # Resolve that ambiguity from known saturation contrasts before fitting
+        # free states; otherwise clipping can trap them on the opposite branch
+        # from the anchors. Center within each beam to eliminate its common
+        # field (and the charge term at this energy).
+        anchor_rhs = 0j
+        anchor_norm = 0.0
+        anchor_thickness = thickness.copy()
+        if magnetization_supportmask is not None:
+            anchor_thickness *= magnetization_supportmask
+        for beam in range(n_beams):
+            anchors = [a for a in np.flatnonzero(
+                selection & (metadata["beam_indices"] == beam)
+            ) if metadata["states"][a] in saturated]
+            if len(anchors) < 2:
+                continue
+            anchor_weights = weights[anchors]
+            coefficients = np.asarray([
+                metadata["polarizations"][a] * saturated[metadata["states"][a]]
+                for a in anchors
+            ])
+            centered = coefficients - np.average(coefficients, weights=anchor_weights)
+            for a, weight, coefficient in zip(anchors, anchor_weights, centered):
+                basis = coefficient * anchor_thickness
+                anchor_rhs += weight * np.vdot(basis, log_objects[a])
+                anchor_norm += weight * float(np.vdot(basis, basis).real)
+        if anchor_norm > 1e-30:
+            magnetic[energy] = anchor_rhs / anchor_norm
+
     charge_spectral_info = {}
     magnetic_spectral_info = {}
     for _ in range(int(iterations)):
@@ -4336,7 +4400,7 @@ def project_log_objects_physical(
                 allowed_material & (thickness == 0), probe_thickness, thickness,
             )
 
-        # Fit real reduced-magnetization maps while enforcing |mz| <= 1.
+        # Fit real reduced-magnetization maps with optional |mz| <= 1 clipping.
         for state, state_name in enumerate(metadata["state_names"]):
             if state_name in saturated:
                 magnetization[state].fill(saturated[state_name])
@@ -4367,13 +4431,14 @@ def project_log_objects_physical(
                     np.conj(coefficient) * residual
                 )
                 denominator += weights[observation] * abs(coefficient) ** 2
-            magnetization[state] = np.clip(
-                np.divide(numerator, denominator,
-                          out=(magnetization[state].copy() if fit_material_thickness
-                               else np.zeros_like(numerator)),
-                          where=denominator > 1e-30),
-                -1.0, 1.0,
+            magnetization[state] = np.divide(
+                numerator, denominator,
+                out=(magnetization[state].copy() if fit_material_thickness
+                     else np.zeros_like(numerator)),
+                where=denominator > 1e-30,
             )
+            if clip_magnetization:
+                magnetization[state] = np.clip(magnetization[state], -1.0, 1.0)
             if magnetization_supportmask is not None:
                 magnetization[state] *= magnetization_supportmask
 
@@ -4597,7 +4662,7 @@ def project_log_objects_physical(
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
         "charge_spectral_info": charge_spectral_info,
         "magnetic_spectral_info": magnetic_spectral_info,
-        "magnetization_bounds": (-1.0, 1.0),
+        "magnetization_bounds": (-1.0, 1.0) if clip_magnetization else None,
     }
     return projected, components
 
@@ -4779,13 +4844,19 @@ def response_to_refractive_index(
     wave_numbers,
     thickness,
     response_energy_indices,
+    propagation_sign=1,
 ):
     """
-    Convert ``R_je = i*k_e*t*n_je`` to ``n_je`` when ``k_e`` and ``t`` are known.
+    Convert ``R=sign*1j*k*d*index_contrast`` to complex index contrast.
 
     This conversion is deliberately separate from phase retrieval because the
-    diffraction data determine the product ``i*k_e*t*n_je``, not its factors.
+    diffraction data determine the log-response product, not its factors.
+    Pass propagation_sign=-1 for exp(-1j*k*index_contrast*d). The historical
+    +1 default is retained for API compatibility; k is in inverse metres and
+    thickness in metres. This does not add the vacuum refractive index 1.
     """
+    if isinstance(propagation_sign, bool) or propagation_sign not in (-1, 1):
+        raise ValueError("propagation_sign must be -1 or +1")
     response = np.asarray(response_log_objects, dtype=np.complex128)
     wave_numbers = np.asarray(wave_numbers, dtype=float)
     response_energy_indices = np.asarray(
@@ -4818,7 +4889,7 @@ def response_to_refractive_index(
     if np.any(selected_wave_numbers == 0):
         raise ValueError("wave_numbers must be nonzero.")
     return response / (
-        1j * selected_wave_numbers[:, None, None] * float(thickness)
+        propagation_sign * 1j * selected_wave_numbers[:, None, None] * float(thickness)
     )
 
 
@@ -4826,8 +4897,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     """Validate the general retrieval recipe and observation weights."""
     if (isinstance(recipe["Nmodes"], bool)
             or not isinstance(recipe["Nmodes"], (int, np.integer))
-            or recipe["Nmodes"] not in (1, 2)):
-        raise ValueError("Nmodes must be 1 or 2 for the physical driver.")
+            or recipe["Nmodes"] < 1):
+        raise ValueError("Nmodes must be a positive integer.")
     if recipe["mode_support_center"] not in {"image", "components"}:
         raise ValueError("mode_support_center must be 'image' or 'components'.")
     if not isinstance(recipe["recenter_modal_supports"], bool):
@@ -4985,6 +5056,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError(
             "rank_deficient must be 'error' or 'minimum_norm'."
         )
+    if not isinstance(recipe["clip_magnetization"], bool):
+        raise ValueError("clip_magnetization must be bool.")
     physical_iterations = recipe["physical_iterations"]
     if (
         isinstance(physical_iterations, bool)
@@ -5198,7 +5271,7 @@ def _run_update_schedule(
             "This observation schedule does not support partial-coherence "
             "RL updates because no coherence kernel is supplied."
         )
-    if (recipe["Nmodes"] == 2 and phase_retrieval_kernel is None
+    if (recipe["Nmodes"] > 1 and phase_retrieval_kernel is None
             and recipe.get("observation_workers", 1) == 1
             and not has_rl and not recipe.get("partial_coherence", False)):
         try:
@@ -5207,10 +5280,10 @@ def _run_update_schedule(
             import phase_retrieval_core_multienergy_multimode as modal
         result = modal._run_energy_update_schedule(
             field, amplitude, supportmask, bsmask, schedule, recipe,
-            nmodes=2, image_shape=amplitude.shape,
+            nmodes=recipe["Nmodes"], image_shape=amplitude.shape,
         )
         return (*result, gamma) if return_gamma else result
-    if recipe["Nmodes"] == 2:
+    if recipe["Nmodes"] > 1:
         if phase_retrieval_kernel is None:
             try:
                 from . import phase_retrieval_core_unified as unified
@@ -5233,12 +5306,12 @@ def _run_update_schedule(
         if use_rl:
             if gamma is None:
                 gamma_shape = ((recipe["Nmodes"], *amplitude.shape)
-                               if recipe["Nmodes"] == 2 else amplitude.shape)
+                               if recipe["Nmodes"] > 1 else amplitude.shape)
                 gamma = np.full(gamma_shape, 2e-6, dtype=float)
                 gamma[..., amplitude.shape[0] // 2, amplitude.shape[1] // 2] = 0.7
             if filled_intensity is None:
                 current = (np.sum(np.abs(field) ** 2, axis=0)
-                           if recipe["Nmodes"] == 2 else np.abs(field) ** 2)
+                           if recipe["Nmodes"] > 1 else np.abs(field) ** 2)
                 masked_values = (current if fixed_masked_intensity is None
                                  else np.asarray(fixed_masked_intensity))
                 filled_intensity = np.where(bsmask != 0, masked_values, amplitude ** 2)
@@ -5281,7 +5354,7 @@ def _run_update_schedule(
             error = refined.diffraction_loss
             support_error = refined.support_loss
         else:
-            kernel_args = {"Nmodes": recipe["Nmodes"]} if recipe["Nmodes"] == 2 else {}
+            kernel_args = {"Nmodes": recipe["Nmodes"]} if recipe["Nmodes"] > 1 else {}
             field, error, support_error, gamma_out = phase_retrieval_kernel(
                 diffract=stage_amplitude,
                 mask=supportmask,
@@ -5451,7 +5524,7 @@ def _initialize_physical_modal_fields(supportmask, amplitudes, intensities,
     except ImportError:
         import phase_retrieval_core_multienergy_multimode as modal
     return modal._initialize_modal_fields(
-        supportmask, amplitudes, intensities, mask_stack, 2,
+        supportmask, amplitudes, intensities, mask_stack, recipe["Nmodes"],
         recipe["mode_initialization_seed"],
     )
 
@@ -5517,7 +5590,7 @@ def _project_nonphysical_modes_common(
             # and unitary, so averaging here is equivalent to averaging in focus.
             group_records.append({
                 "mode_index": mode_index,
-                "support_factor": mode_index + 1,
+                "support_factor": (recipe["modes"][mode_index] if recipe["modes"] is not None else 1),
                 "energy": key[0], "beam": key[1],
                 "observations": list(indices),
                 "averaging": "phase_aligned_complex_field",
@@ -5620,6 +5693,7 @@ def general_phase_retrieval_algorithm(
     general_recipe=None,
     start_fields=None,
     phase_retrieval_kernel=None,
+    progress_callback=None,
 ):
     """
     Jointly retrieve arbitrary states, energies, polarizations, and beams.
@@ -5650,6 +5724,10 @@ def general_phase_retrieval_algorithm(
     observation/shared gamma, coherent refreshes, worker synchronization and physical-
     projection cadence. The low-level kernel only sees one observation at a time.
     """
+    # Optional observer, outside the numerical recipe and never serialized.
+    # Callbacks must not mutate the borrowed reconstruction arrays.
+    if progress_callback is not None and not callable(progress_callback):
+        raise TypeError("progress_callback must be callable or None")
     recipe = default_general_phase_retrieval_recipe()
     if general_recipe is not None:
         if not isinstance(general_recipe, dict):
@@ -5665,8 +5743,8 @@ def general_phase_retrieval_algorithm(
 
     mode_factors = recipe["modes"]
     if mode_factors is not None:
-        if not isinstance(mode_factors, (list, tuple)) or len(mode_factors) not in (1, 2):
-            raise ValueError("modes must be [1] or a two-entry support-factor list.")
+        if not isinstance(mode_factors, (list, tuple)) or not mode_factors:
+            raise ValueError("modes must be a nonempty list of positive support factors.")
         if any(isinstance(value, bool) or not isinstance(value, (int, float, np.number))
                or not np.isfinite(value) or value <= 0 for value in mode_factors):
             raise ValueError("modes entries must be finite positive support factors.")
@@ -5704,7 +5782,7 @@ def general_phase_retrieval_algorithm(
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
     mode_support_shifts = [(0, 0)] * int(recipe["Nmodes"])
-    if recipe["Nmodes"] == 2:
+    if recipe["Nmodes"] > 1:
         if recipe["recenter_modal_supports"]:
             modal_supportmask, mode_support_shifts = geometry.recenter_modal_supports(
                 supportmask, mode_factors, center=recipe["mode_support_center"],
@@ -5767,7 +5845,7 @@ def general_phase_retrieval_algorithm(
 
     # Initialize each observation independently unless fields are supplied.
     if start_fields is None:
-        if recipe["Nmodes"] == 2:
+        if recipe["Nmodes"] > 1:
             fields = _initialize_physical_modal_fields(
                 modal_supportmask, amplitudes, intensities, mask_stack, recipe,
             )
@@ -5783,7 +5861,7 @@ def general_phase_retrieval_algorithm(
                 )
     else:
         fields = np.asarray(start_fields, dtype=np.complex128).copy()
-        expected = ((n_observations, 2, nx, ny) if recipe["Nmodes"] == 2
+        expected = ((n_observations, recipe["Nmodes"], nx, ny) if recipe["Nmodes"] > 1
                     else holograms.shape)
         if fields.shape != expected:
             raise ValueError(
@@ -5991,7 +6069,7 @@ def general_phase_retrieval_algorithm(
                     if preserve_masked and pass_kind == "coherent":
                         fixed_masked_intensities[observation] = (
                             np.sum(np.abs(fields[observation]) ** 2, axis=0)
-                            if recipe["Nmodes"] == 2 else np.abs(fields[observation]) ** 2
+                            if recipe["Nmodes"] > 1 else np.abs(fields[observation]) ** 2
                         )
                     if synchronous:
                         if calibrate_reference and observation == reference_observation:
@@ -6245,6 +6323,11 @@ def general_phase_retrieval_algorithm(
                 diagnostic_callback=record_checkpoint,
             )
             restore_frozen_observations(fields)
+            if progress_callback is not None:
+                progress_callback(dict(stage="physical_projection", outer_round=outer + 1,
+                    fields=fields, components=components, recipe=recipe,
+                    supportmask=supportmask, state_labels=metadata["states"],
+                    energy_labels=metadata["energies"]))
             errors["projection_steps"].append({
                 "outer": outer,
                 "observation": int(observation),
@@ -6360,6 +6443,11 @@ def general_phase_retrieval_algorithm(
         f"{errors['runtime_seconds']:.3f} s",
         flush=True,
     )
+    if progress_callback is not None:
+        progress_callback(dict(stage="final", outer_round=outer_iterations,
+            fields=fields, components=components, recipe=recipe,
+            supportmask=supportmask, state_labels=metadata["states"],
+            energy_labels=metadata["energies"]))
     return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)
 
 
@@ -6595,6 +6683,58 @@ def _energy_driver_recipe(recipe):
     return translated
 
 
+def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
+                             start_fields=None, phase_retrieval_kernel=None):
+    """Route pure-energy mode lists without silently reverting to one mode.
+
+    Prepare geometry and support factors once, then use the existing modal
+    spectral driver on that grid. Its low-rank projection acts independently
+    per mode; it does not assign magnetic meaning to a secondary mode.
+    """
+    try:
+        from . import phase_retrieval_core_multienergy_multimode as modal
+        from . import phase_retrieval_core_unified as unified
+    except ImportError:
+        import phase_retrieval_core_multienergy_multimode as modal
+        import phase_retrieval_core_unified as unified
+    factors = recipe["modes"] if recipe["modes"] is not None else [1] * recipe["Nmodes"]
+    if not isinstance(factors, (list, tuple)) or not factors or any(
+            isinstance(v, bool) or not isinstance(v, (int, float, np.number))
+            or not np.isfinite(v) or v <= 0 for v in factors):
+        raise ValueError("modes must be a nonempty list of positive support factors")
+    local = dict(recipe, Nmodes=len(factors))
+    images, mask, support, starts, geom = geometry.prepare(
+        holograms, mask_pixel, supportmask, dict(local, Nmodes=1), start_fields)
+    if local["recenter_modal_supports"]:
+        supports, shifts = geometry.recenter_modal_supports(support, factors, center=local["mode_support_center"])
+    elif local["mode_support_center"] == "components":
+        supports = _component_centered_modal_supports(support, factors)
+        shifts = [(0, 0)] * len(factors)
+    else:
+        supports = unified._mode_supports(support, factors, images.shape[-2:])
+        shifts = [(0, 0)] * len(factors)
+    if starts is None:
+        amplitudes, intensities, _ = _prepare_energy_amplitudes(
+            images, mask, hologram_intensity_cutoff_vmin=local["hologram_intensity_cutoff_vmin"])
+        masks = _as_energy_mask(mask, nE=len(images), image_shape=images.shape[-2:])
+        starts = _initialize_physical_modal_fields(supports, amplitudes, intensities, masks, local)
+        if local["startimage_radial_normalization"]:
+            starts = np.stack([_radially_normalize_startimage(f, y, m)
+                               for f, y, m in zip(starts, images, masks)])
+    translated = modal.default_multi_energy_phase_retrieval_recipe()
+    translated.update({k: v for k, v in _energy_driver_recipe(local).items() if k in translated})
+    translated.update(Nmodes=len(factors), mode_initialization_seed=local["mode_initialization_seed"],
+                      crop=0, binning=1, roi=None, material_mask=None,
+                      material_thickness=_recipe_material_thickness(local, geom))
+    result = modal.multi_energy_phase_retrieval_algorithm(
+        images, mask, supports, multi_energy_recipe=translated, start_fields=starts,
+        phase_retrieval_kernel=phase_retrieval_kernel)
+    fields, warmup, components, masks, errors = result
+    components.update(modes=list(factors), modal_supportmask_used=supports,
+                      mode_support_shifts=shifts)
+    return geom.finish(fields, warmup, components, masks, errors)
+
+
 def project_fourier_fields_universal(
     fields,
     state_labels,
@@ -6626,7 +6766,16 @@ def project_fourier_fields_universal(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
-    fields = _as_energy_stack(fields, name="fields")
+    fields = np.asarray(fields)
+    if fields.ndim == 4:
+        if fields.shape[1] < 1:
+            raise ValueError("Fields must contain at least one mode")
+        _as_energy_stack(fields[:, 0], name="fields")
+        recipe["Nmodes"] = fields.shape[1]
+        if recipe["modes"] is not None and len(recipe["modes"]) != fields.shape[1]:
+            raise ValueError("modes length must match the supplied field mode axis")
+    else:
+        fields = _as_energy_stack(fields, name="fields")
     metadata = _normalize_metadata(
         state_labels,
         energy_labels,
@@ -6671,7 +6820,7 @@ def project_fourier_fields_universal(
             recipe,
             len(metadata["energy_names"]),
         )
-        return project_fourier_fields_general(
+        result = _project_physical_modes(
             fields,
             metadata["states"],
             metadata["energies"],
@@ -6688,8 +6837,9 @@ def project_fourier_fields_universal(
             material_thickness=material_thickness,
             fit_material_thickness=recipe["fit_material_thickness"],
             thickness_supportmask=thickness_supportmask,
-            return_components=return_components,
+            return_components=True,
         )
+        return result if return_components else result[0]
 
     if model in {"svd", "rank1_spectral"}:
         if recipe["coherent_refresh_rounds"]:
@@ -6701,7 +6851,14 @@ def project_fourier_fields_universal(
                 "and one observation per energy. Use 'physical_factorized' "
                 "for mixed datasets."
             )
-        result = project_fourier_fields_multi_energy(
+        projector = project_fourier_fields_multi_energy
+        if fields.ndim == 4:
+            try:
+                from .phase_retrieval_core_multienergy_multimode import project_fourier_fields_multi_energy_multimode
+            except ImportError:
+                from phase_retrieval_core_multienergy_multimode import project_fourier_fields_multi_energy_multimode
+            projector = project_fourier_fields_multi_energy_multimode
+        result = projector(
             fields,
             projection_model=model,
             rank=recipe["rank"],
@@ -6744,6 +6901,7 @@ def universal_phase_retrieval_algorithm(
     universal_recipe=None,
     start_fields=None,
     phase_retrieval_kernel=None,
+    progress_callback=None,
 ):
     """
     Reconstruct a metadata-described list of diffraction measurements.
@@ -6785,6 +6943,17 @@ def universal_phase_retrieval_algorithm(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
+    if recipe["modes"] is not None:
+        factors = recipe["modes"]
+        if not isinstance(factors, (list, tuple)) or not factors or any(
+                isinstance(v, bool) or not isinstance(v, (int, float, np.number))
+                or not np.isfinite(v) or v <= 0 for v in factors):
+            raise ValueError("modes must be a nonempty list of positive support factors")
+        recipe["Nmodes"] = len(factors)
+    if (isinstance(recipe["Nmodes"], bool) or
+            not isinstance(recipe["Nmodes"], (int, np.integer)) or recipe["Nmodes"] < 1):
+        raise ValueError("Nmodes must be a positive integer")
+
     holograms = _as_energy_stack(
         holograms,
         name="holograms",
@@ -6806,6 +6975,8 @@ def universal_phase_retrieval_algorithm(
 
     # Pure energy modes intentionally use the original multi-energy driver.
     if model in {"svd", "rank1_spectral"}:
+        if progress_callback is not None:
+            raise ValueError("Live callbacks require the general physical driver")
         if recipe["coherent_refresh_rounds"]:
             raise ValueError("Coherent refresh requires the general driver (physical_factorized, state_energy_beam, or none).")
         if not _pure_energy_scan(metadata):
@@ -6813,16 +6984,22 @@ def universal_phase_retrieval_algorithm(
                 f"projection_model={model!r} requires a pure energy scan. "
                 "Use 'physical_factorized' for mixed metadata."
             )
-        fields, fieldswarmup,components, bsmasks, errors = (
-            multi_energy_phase_retrieval_algorithm(
-                holograms,
-                mask_pixel,
-                supportmask,
-                multi_energy_recipe=_energy_driver_recipe(recipe),
-                start_fields=start_fields,
-                phase_retrieval_kernel=phase_retrieval_kernel,
+        requested_modes = recipe["modes"]
+        nmodes = len(requested_modes) if requested_modes is not None else recipe["Nmodes"]
+        if nmodes > 1:
+            fields, fieldswarmup, components, bsmasks, errors = _run_multimode_spectral(
+                holograms, mask_pixel, supportmask, recipe, start_fields, phase_retrieval_kernel)
+        else:
+            fields, fieldswarmup,components, bsmasks, errors = (
+                multi_energy_phase_retrieval_algorithm(
+                    holograms,
+                    mask_pixel,
+                    supportmask,
+                    multi_energy_recipe=_energy_driver_recipe(recipe),
+                    start_fields=start_fields,
+                    phase_retrieval_kernel=phase_retrieval_kernel,
+                )
             )
-        )
     elif model in _PHYSICAL_MODELS:
         physical_recipe = _prepare_physical_recipe(
             recipe,
@@ -6839,6 +7016,7 @@ def universal_phase_retrieval_algorithm(
                 metadata["beams"],
                 saturated_states=physical_recipe["saturated_states"],
                 general_recipe=_physical_driver_recipe(physical_recipe),
+                progress_callback=progress_callback,
                 start_fields=start_fields,
                 phase_retrieval_kernel=phase_retrieval_kernel,
             )

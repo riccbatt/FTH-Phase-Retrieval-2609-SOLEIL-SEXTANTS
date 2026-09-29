@@ -1,0 +1,178 @@
+{
+  "configuration": {
+    "energy_ev": 775.6741890109415,
+    "shape": [
+      194,
+      194
+    ],
+    "binning": 8,
+    "crop": 248,
+    "iterations": [
+      750,
+      50
+    ],
+    "seeds": [
+      0,
+      1
+    ],
+    "source": "Reduced-resolution preprocessed MAXIV cache; same pair manifest as notebook 05",
+    "residual": "Measured intensity error after object-support projection; not final Fourier-constrained error",
+    "limitation": "Single-energy control; coherent references also have substantial residuals. Not a uniqueness or full hyperspectral separation result."
+  },
+  "results": {
+    "5": {
+      "reference_errors": [
+        [
+          0.4769788712823917,
+          0.496326861272087
+        ],
+        [
+          0.4877340380535316,
+          0.4862745137813725
+        ]
+      ],
+      "trials": [
+        {
+          "seed": 0,
+          "residual": 0.4722240587860382,
+          "metrics": {
+            "complex_relative_error": 1.1919183192646643,
+            "ranks": [
+              2,
+              2
+            ],
+            "mode_power_fractions": [
+              0.6002636586754712,
+              0.3997363413245289
+            ],
+            "reference_power_fractions": [
+              0.6748192241091199,
+              0.32518077589088024
+            ],
+            "principal_angles_degrees": [
+              64.20370451369477,
+              85.90071086669963
+            ],
+            "per_mode": [
+              {
+                "complex_correlation": 0.17378321241524508,
+                "amplitude_relative_error": 0.8294947564972559,
+                "phase_rmse_radians": 1.4127637287191228,
+                "phase_pixel_count": 1422
+              },
+              {
+                "complex_correlation": 0.3860174751923013,
+                "amplitude_relative_error": 0.6460703223311852,
+                "phase_rmse_radians": 1.1820775236654328,
+                "phase_pixel_count": 1442
+              }
+            ]
+          },
+          "material_metrics": {
+            "complex_relative_error": 1.0536433007862327,
+            "ranks": [
+              2,
+              2
+            ],
+            "mode_power_fractions": [
+              0.7700114737856503,
+              0.22998852621434987
+            ],
+            "reference_power_fractions": [
+              0.7016143452690318,
+              0.29838565473096834
+            ],
+            "principal_angles_degrees": [
+              59.071147754212944,
+              83.56440971228679
+            ],
+            "per_mode": [
+              {
+                "complex_correlation": 0.22331472533558,
+                "amplitude_relative_error": 0.645527392005628,
+                "phase_rmse_radians": 1.3876946378558732,
+                "phase_pixel_count": 1412
+              },
+              {
+                "complex_correlation": 0.4858253430896607,
+                "amplitude_relative_error": 0.5492668992769528,
+                "phase_rmse_radians": 1.1636452611143675,
+                "phase_pixel_count": 1422
+              }
+            ]
+          }
+        },
+        {
+          "seed": 1,
+          "residual": 0.47307257117423457,
+          "metrics": {
+            "complex_relative_error": 1.1286908400193258,
+            "ranks": [
+              2,
+              2
+            ],
+            "mode_power_fractions": [
+              0.6211506336320348,
+              0.37884936636796523
+            ],
+            "reference_power_fractions": [
+              0.6748192241091199,
+              0.32518077589088024
+            ],
+            "principal_angles_degrees": [
+              57.26607364510105,
+              85.61147077509371
+            ],
+            "per_mode": [
+              {
+                "complex_correlation": 0.25042070073889094,
+                "amplitude_relative_error": 0.8023663023075351,
+                "phase_rmse_radians": 1.3775343440067387,
+                "phase_pixel_count": 1408
+              },
+              {
+                "complex_correlation": 0.4526600533893255,
+                "amplitude_relative_error": 0.5872150191177692,
+                "phase_rmse_radians": 1.1923244415656544,
+                "phase_pixel_count": 1449
+              }
+            ]
+          },
+          "material_metrics": {
+            "complex_relative_error": 0.9868263287750959,
+            "ranks": [
+              2,
+              2
+            ],
+            "mode_power_fractions": [
+              0.8016497862732412,
+              0.19835021372675868
+            ],
+            "reference_power_fractions": [
+              0.7016143452690318,
+              0.29838565473096834
+            ],
+            "principal_angles_degrees": [
+              53.27097302918359,
+              83.71434437508078
+            ],
+            "per_mode": [
+              {
+                "complex_correlation": 0.33285466525492785,
+                "amplitude_relative_error": 0.5951580391747447,
+                "phase_rmse_radians": 1.3993920007257274,
+                "phase_pixel_count": 1411
+              },
+              {
+                "complex_correlation": 0.5232727974039886,
+                "amplitude_relative_error": 0.5387480445339505,
+                "phase_rmse_radians": 1.175942497159061,
+                "phase_pixel_count": 1417
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
