@@ -61,6 +61,11 @@ def recenter_modal_supports(support, factors, center="image", margin=2):
     Each modal support gets its own translation. This leaves the factor-1
     physical support at its calibrated position while fitting factor-2 inside
     the available object field of view.
+
+    ``center="image"`` scales the entire support, including inter-aperture
+    distances, as required for harmonic supports. ``center="components"``
+    instead enlarges each aperture about its own center, retaining separations;
+    it is a different geometry, not a way to fit a harmonic support in the grid.
     """
     support = np.asarray(support)
     if support.ndim != 2 or not np.any(support):

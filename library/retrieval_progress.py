@@ -88,8 +88,11 @@ def retrieval_progress(recipe, n_observations=None, *, kind, leave=True,
     elif kind == "universal":
         if n_observations is None or n_observations < 1:
             raise ValueError("n_observations must be positive")
+        warmup_iterations = recipe.get("warmup_Nit", [])
+        if not isinstance(warmup_iterations, (list, tuple)):
+            warmup_iterations = [warmup_iterations]
         warmup = bool(recipe.get("warmup_mode")) and any(
-            n > 0 for n in recipe.get("warmup_Nit", [])
+            n is not None and n > 0 for n in warmup_iterations
         )
         warmup_passes = int(warmup)
         if (warmup and recipe.get("preserve_warmup_masked_intensity")

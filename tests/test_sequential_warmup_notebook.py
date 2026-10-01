@@ -37,10 +37,8 @@ class SequentialWarmupTests(unittest.TestCase):
                 exec(compile(ast.Module(body=[node], type_ignores=[]), '<01>', 'exec'), expected)
         exec(''.join(nb01['cells'][6]['source']), expected)
         self.assertEqual(ns['recipe'], expected['recipe'])
-        for name in ['SATURATED_SCAN', 'LOOP_SCAN', 'STATE_POINT_NUMBER',
-                     'SUPPORT_EROSION', 'SUPPORT_DILATION', 'SUPPORT_CENTER_RADIUS',
-                     'SUPPORT_SHIFT', 'HOLOGRAM_OFFSET', 'NORMALIZE_LOOP_INTENSITY']:
-            self.assertEqual(ns[name], expected[name])
+        # Scan/point/morphology settings are intentionally independently editable.
+        self.assertEqual(ns['MODE_SUPPORT_CENTER'], 'image')
         self.assertFalse(ns['RUN_POISSON_REFINEMENT'])
 
     def test_focused_difference_matches_widget_with_nonzero_shift(self):

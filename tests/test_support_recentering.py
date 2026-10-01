@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from scipy.ndimage import center_of_mass, label
 
 from library import phase_retrieval_core_unified as unified
 from library.phase_retrieval_geometry import (
@@ -13,6 +14,46 @@ from library.phase_retrieval_geometry import (
 
 
 class SupportRecenteringTests(unittest.TestCase):
+    def test_harmonic_scales_aperture_sizes_and_separations_together(self):
+        support = np.zeros((64, 64), dtype=np.uint8)
+        support[5:8, 10:13] = 1
+        support[14:17, 22:25] = 1
+        modes, shifts = recenter_modal_supports(support, [1, 2], center="image")
+        np.testing.assert_array_equal(modes[0], support)
+        self.assertEqual(shifts[0], (0, 0))
+        self.assertTrue(any(value != 0 for value in shifts[1]))
+        centers = []
+        areas = []
+        for mask in modes:
+            components, count = label(mask)
+            self.assertEqual(count, 2)
+            centers.append(np.array(center_of_mass(mask, components, [1, 2])))
+            areas.append([np.count_nonzero(components == i) for i in [1, 2]])
+            self.assertTrue(set(np.unique(mask)) <= {0, 1})
+        np.testing.assert_allclose(centers[1][1] - centers[1][0],
+                                   2 * (centers[0][1] - centers[0][0]))
+        np.testing.assert_array_equal(areas[1], 4 * np.asarray(areas[0]))
+        # A common translation preserves both aperture positions after scaling.
+        image_center = (np.array(support.shape) - 1) / 2
+        np.testing.assert_allclose(centers[1], image_center
+                                   + 2 * (centers[0] - image_center) + shifts[1])
+        self.assertFalse(modes[1, 0].any() or modes[1, -1].any()
+                         or modes[1, :, 0].any() or modes[1, :, -1].any())
+
+    def test_harmonic_does_not_shift_when_whole_support_already_fits(self):
+        support = np.zeros((64, 64), dtype=np.uint8)
+        support[25:28, 25:28] = 1
+        support[34:37, 34:37] = 1
+        _, shifts = recenter_modal_supports(support, [1, 2], center="image")
+        self.assertEqual(shifts, [(0, 0), (0, 0)])
+
+    def test_harmonic_rejects_span_that_translation_cannot_fit(self):
+        support = np.zeros((32, 32), dtype=np.uint8)
+        support[4:7, 4:7] = 1
+        support[25:28, 25:28] = 1
+        with self.assertRaisesRegex(ValueError, "cannot fit"):
+            recenter_modal_supports(support, [1, 2], center="image")
+
     def test_source_support_moves_into_cropped_object_grid(self):
         support = np.zeros((64, 64), dtype=np.uint8)
         support[2:5, 25:30] = 1

@@ -1,10 +1,11 @@
-"""Exercise 03's actual notebook cells against a direct 01 reconstruction."""
+"""Verify cached saturation matches repeated retrieval and executes only once."""
 import contextlib
 import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -16,11 +17,11 @@ from library import phase_retrieval_core_unified as pr
 from library.phase_retrieval_geometry import recenter_source_support
 
 ROOT = Path(__file__).resolve().parents[1]
-NB03 = ROOT / 'aperiodic_ajajas/03_sequential_hysteresis_warmup_poisson.ipynb'
+NB03 = ROOT / 'aperiodic_ajajas/03_once_saturated_hysteresis_warmup_poisson.ipynb'
 NB01 = NB03.with_name('01_phase_retrieval_2871_2872.ipynb')
 
 
-class Matches01Tests(unittest.TestCase):
+class SaturationOnceTests(unittest.TestCase):
     def test_two_states_match_direct_01_and_preserve_binary_masks(self):
         cells03 = json.loads(NB03.read_text())['cells']
         cells01 = json.loads(NB01.read_text())['cells']
@@ -42,6 +43,9 @@ class Matches01Tests(unittest.TestCase):
             reference = rng.uniform(10, 20, shape)
             loops = np.stack([reference * 1.1 + rng.uniform(1, 2, shape),
                               reference * 1.3 + rng.uniform(1, 2, shape)])
+            loops[1, 12:14, 12:14] = 0
+            loops[1, 18:20, 18:20] = -1
+            loops[1, 22:24, 22:24] = np.nan
             rgb = np.zeros((*shape, 3), np.uint8)
             rgb[15:17, 15:17] = (255, 0, 0)
             Image.fromarray(rgb).save(ns['SUPPORT_PNG'])
@@ -68,7 +72,14 @@ class Matches01Tests(unittest.TestCase):
             np.testing.assert_array_equal(ns['mask_pixel'], one['mask_pixel'])
             np.testing.assert_array_equal(ns['source_support'], one['support_used'])
             exec(''.join(cells03[5]['source']), ns)
-            exec(''.join(cells03[7]['source']), ns)
+            calls = []
+            original_core = pr.PhaseRtrv_core
+            def record_core(*args, **kwargs):
+                calls.append((kwargs['mode'], kwargs['Nit']))
+                return original_core(*args, **kwargs)
+            with patch.object(pr, 'PhaseRtrv_core', side_effect=record_core):
+                exec(''.join(cells03[7]['source']), ns)
+            self.assertEqual(calls, [('HAPRE', 8), ('ER', 3), ('ER', 3), ('ER', 3)])
             for point, loop in zip([25, 26], loops):
                 expected = pr.phase_retrieval_algorithm(
                     dict(saturated=reference, loop=loop), one['mask_pixel'],
