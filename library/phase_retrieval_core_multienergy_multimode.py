@@ -21,6 +21,11 @@ the API matches ``phase_retrieval_core_multienergy``.
 import time
 
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
 from scipy import stats
 
 try:
@@ -97,6 +102,8 @@ def project_fourier_fields_multi_energy_multimode(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -110,6 +117,8 @@ def project_fourier_fields_multi_energy_multimode(
         phase_stack, name="phase_stack"
     )
     n_energy, nmodes, nx, ny = modal_fields.shape
+    if fit_material_thickness and nmodes > 1:
+        raise ValueError("Fitting one shared thickness across multiple modes is not supported; provide a fixed material map.")
     if projection_supportmask is not None:
         projection_supportmask = np.asarray(projection_supportmask) != 0
         if projection_supportmask.ndim == 2:
@@ -159,6 +168,8 @@ def project_fourier_fields_multi_energy_multimode(
             fit_known_beta_scale=fit_known_beta_scale,
             fit_known_beta_offset=fit_known_beta_offset,
             projection_supportmask=mode_projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=fit_material_thickness,
             return_components=return_components,
         )
         if return_components:
@@ -225,8 +236,8 @@ def _initialize_modal_fields(
     )
     base_modes = np.empty((nmodes, nx, ny), dtype=np.complex128)
     for mode_index in range(nmodes):
-        base_modes[mode_index] = np.fft.fftshift(
-            np.fft.ifft2(np.fft.ifftshift(support_modes[mode_index]))
+        base_modes[mode_index] = np.fft.ifftshift(
+            np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
         )
 
     if nmodes > 1:
@@ -294,18 +305,19 @@ def _run_energy_update_schedule(
     recipe,
     nmodes,
     image_shape,
+    phase_retrieval_kernel=None,
 ):
     """Run all scheduled multimode updates sequentially for one energy."""
     stage_results = []
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This energy schedule does not support partial-coherence RL "
+                "updates because no coherence kernel is supplied."
+            )
         if mode == "gradient_descent":
-            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-                raise ValueError(
-                    "gradient_descent update stages do not support "
-                    "Richardson-Lucy partial-coherence updates."
-                )
             result, err_d, err_s, _ = multimode._refine_modes_gradient(
                 field,
                 amplitude,
@@ -327,7 +339,7 @@ def _run_energy_update_schedule(
                 Fourier_last=recipe["Fourier_last"],
             )
         else:
-            result, err_d, err_s, _ = multimode.PhaseRtrv_core(
+            result, err_d, err_s, _ = (phase_retrieval_kernel or multimode.PhaseRtrv_core)(
                 diffract=amplitude,
                 mask=supportmask,
                 mode=mode,
@@ -382,6 +394,7 @@ def multi_energy_phase_retrieval_algorithm(
     supportmask,
     multi_energy_recipe=None,
     start_fields=None,
+    phase_retrieval_kernel=None,
 ):
     """
     Jointly reconstruct multiple energies and incoherent modes.
@@ -429,10 +442,23 @@ def multi_energy_phase_retrieval_algorithm(
             )
         recipe.update(multi_energy_recipe)
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = multi_energy._as_energy_stack(holograms)
     n_energy, nx, ny = holograms.shape
     nmodes = _validate_nmodes(recipe["Nmodes"])
     _verify_multi_energy_multimode_recipe(recipe, n_energy)
+    if nmodes > 1 and recipe["fit_material_thickness"]:
+        raise ValueError("Fitting thickness requires Nmodes=1; a fixed material map works for multiple modes.")
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = multi_energy._material_projector()._recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
 
     supportmask = np.asarray(supportmask)
     if supportmask.ndim == 2:
@@ -507,6 +533,7 @@ def multi_energy_phase_retrieval_algorithm(
                 recipe,
                 nmodes,
                 (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({
@@ -551,6 +578,7 @@ def multi_energy_phase_retrieval_algorithm(
                 recipe,
                 nmodes,
                 (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
             for stage_result in stage_results:
                 errors["energy_steps"].append({
@@ -591,6 +619,8 @@ def multi_energy_phase_retrieval_algorithm(
                     fit_known_beta_scale=recipe["fit_known_beta_scale"],
                     fit_known_beta_offset=recipe["fit_known_beta_offset"],
                     projection_supportmask=projection_supportmask,
+                    material_thickness=material_thickness,
+                    fit_material_thickness=recipe["fit_material_thickness"],
                     return_components=True,
                 )
             )
@@ -607,13 +637,13 @@ def multi_energy_phase_retrieval_algorithm(
                 }
             )
 
-    fields, components = project_fourier_fields_multi_energy_multimode(
+    projected_fields, components = project_fourier_fields_multi_energy_multimode(
         fields,
         projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
-        relaxation=1.0,
+        relaxation=recipe["final_projection_relaxation"],
         log_floor=recipe["log_floor"],
         spectral_constraint=recipe["spectral_constraint"],
         energy_values=recipe["energy_values"],
@@ -627,8 +657,13 @@ def multi_energy_phase_retrieval_algorithm(
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
         projection_supportmask=projection_supportmask,
+        material_thickness=material_thickness,
+        fit_material_thickness=recipe["fit_material_thickness"],
         return_components=True,
     )
+    if recipe["final_projection_relaxation"] > 0:
+        fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
     fields, _ = _as_energy_mode_stack(fields)
 
     if recipe["final_fourier_constraint"]:
@@ -639,10 +674,8 @@ def multi_energy_phase_retrieval_algorithm(
 
     components["Nmodes"] = nmodes
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return (
+    return input_geometry.finish(
         _maybe_squeeze_energy_modes(fields, nmodes),
         _maybe_squeeze_energy_modes(fieldswarmup, nmodes),
-        components,
-        bsmasks,
-        errors,
+        components, bsmasks, errors,
     )

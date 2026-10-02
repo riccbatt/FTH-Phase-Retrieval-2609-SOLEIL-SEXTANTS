@@ -45,6 +45,11 @@ from scipy import stats
 from scipy.ndimage import affine_transform
 
 try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
+try:
     from . import phase_retrieval_gradient as gradient
 except ImportError:
     import phase_retrieval_gradient as gradient
@@ -80,9 +85,9 @@ else:
     import numpy as xp
     import scipy.fft as fft
 
-    # Use all available CPU workers for FFT operations.
-    fft2 = partial(fft.fft2, workers=os.cpu_count())
-    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
+    # Respect scipy.fft.set_workers in each observation worker.
+    fft2 = fft.fft2
+    ifft2 = fft.ifft2
 
 
 def to_numpy(array, xp):
@@ -141,13 +146,16 @@ def default_phase_retrieval_recipe():
         # modes=[1, 2] uses the original and a 2x spatially enlarged support.
         # A supplied 3-D modal support bypasses automatic enlargement.
         "modes": None,
+        "recenter_modal_supports": False,
+        "mode_support_center": "image",
         # Remove this many pixels from every edge of returned spatial arrays.
         "crop": 0,
+        # Crop detector intensities first, then bin; center crop object support.
+        "binning": 1,
+        # Optional [row_start, row_stop, column_start, column_stop] in input coordinates.
+        "roi": None,
         "normalize_startimage_between_holograms": True,
-        # Legacy initialization subtracted the fitted amplitude intercept
-        # before dividing by the slope. Keep it opt-in because subtracting a
-        # real scalar from a complex Fourier field changes both amplitude and
-        # phase near weak pixels.
+        # Retained for compatibility with saved recipes; only False is allowed.
         "subtract_startimage_fit_intercept": False,
         "return_format": "auto",
 
@@ -204,6 +212,11 @@ def _resolve_start_field(start_spec, default_field, latest, name):
       - None: use the default support-based initialization
       - np.ndarray: use this array directly
       - str: use latest[str]
+
+    Context:
+    Legacy stage-driver handoff: resolve an explicit start or a previously reconstructed
+    labeled field. This is separate from the universal driver's independent/reference warmup
+    policy.
     """
 
     if start_spec is None:
@@ -239,6 +252,10 @@ def _as_modes(arr, Nmodes, shape_2d, name, dtype=None):
       - ``(nx, ny)``: copied into all modes
       - ``(1, nx, ny)``: copied into all modes
       - ``(Nmodes, nx, ny)``: used directly
+
+    Context:
+    Internal shape contract: kernels work with an explicit leading mode axis even when the
+    public single-mode API supplies a 2D image.
     """
     arr = np.asarray(arr)
 
@@ -304,7 +321,13 @@ def _expand_support_about_center(support, factor):
 
 
 def _mode_supports(supportmask, mode_factors, shape_2d):
-    """Build modal supports from legacy spatial expansion factors."""
+    """
+    Build modal supports from legacy spatial expansion factors.
+
+    Context:
+    Build the object support allowed for each incoherent mode from the configured support-
+    size factors. This controls geometry, not whether a mode is magnetic.
+    """
     supportmask = np.asarray(supportmask)
     nmodes = len(mode_factors)
     if supportmask.ndim == 2:
@@ -318,6 +341,26 @@ def _mode_supports(supportmask, mode_factors, shape_2d):
         "supportmask",
         dtype=supportmask.dtype,
     )
+
+
+def _support_on_output_grid(supportmask, output_shape):
+    """Map object support to the grid implied by a cropped Fourier field."""
+    support = np.asarray(supportmask)
+    source_shape = np.asarray(support.shape[-2:])
+    target_shape = np.asarray(output_shape)
+    if np.array_equal(source_shape, target_shape):
+        return support.copy()
+    scale = source_shape / target_shape
+    offset = (source_shape - 1) / 2 - scale * (target_shape - 1) / 2
+    mapped = [
+        affine_transform(mode.astype(float), np.diag(scale), offset=offset,
+                         output_shape=tuple(target_shape), order=0,
+                         mode="constant", cval=0, prefilter=False)
+        for mode in _as_modes(support, support.shape[0] if support.ndim == 3 else 1,
+                              tuple(source_shape), "supportmask", dtype=support.dtype)
+    ]
+    result = (np.stack(mapped) != 0).astype(np.uint8)
+    return result if support.ndim == 3 else result[0]
 
 
 def _maybe_squeeze_modes(arr, Nmodes):
@@ -344,25 +387,29 @@ def _modal_amplitude_numpy(arr):
     return np.sqrt(_modal_intensity_numpy(arr))
 
 
-def _normalize_startimage_amplitude(
-    startimage, measured_amplitude, start_amplitude, *, subtract_intercept=False
-):
-    """Apply the fitted legacy amplitude normalization to a start field."""
+def _normalize_startimage_amplitude(startimage, measured_amplitude, start_amplitude):
+    """Scale a start field by a positive, through-origin amplitude fit."""
     x = np.asarray(measured_amplitude).ravel()
     y = np.asarray(start_amplitude).ravel()
-    if x.size < 2 or np.ptp(x) <= 0 or np.ptp(y) <= 0:
+    if x.size == 0:
         return startimage
-    fit = stats.linregress(x, y)
-    if abs(fit.slope) <= 1e-12:
+    denominator = np.dot(x, x)
+    if denominator <= 0:
         return startimage
-    normalized = np.asarray(startimage)
-    if subtract_intercept:
-        normalized = normalized - fit.intercept
-    return normalized / fit.slope
+    scale = np.dot(x, y) / denominator
+    if not np.isfinite(scale) or scale <= 1e-12:
+        return startimage
+    return np.asarray(startimage) / scale
 
 
 def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
-    """Return one coherent or partially coherent intensity per mode."""
+    """
+    Return one coherent or partially coherent intensity per mode.
+
+    Context:
+    Kernel-level forward model in the kernel's FFT ordering. Preserve one intensity plane
+    per mode until the detector constraint sums them.
+    """
     convolved = xp.zeros_like(current_guess, dtype=xp.complex128)
     for mode_index in range(nmodes):
         intensity = xp.abs(current_guess[mode_index]) ** 2
@@ -382,7 +429,13 @@ def _apply_modal_fourier_constraint(
     observed,
     invalid,
 ):
-    """Jointly rescale all modes to match the measured total intensity."""
+    """
+    Jointly rescale all modes to match the measured total intensity.
+
+    Context:
+    One detector measurement constrains the sum of incoherent mode powers. Apply the same
+    amplitude factor to all modes; invalid pixels receive factor one and remain free.
+    """
     total_intensity = xp.sum(current_convolved, axis=0)
     modal_amplitude = xp.sqrt(total_intensity)
     modal_amplitude = xp.where(
@@ -585,9 +638,13 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not isinstance(recipe["normalize_startimage_between_holograms"], bool):
         raise ValueError("normalize_startimage_between_holograms must be bool.")
+    if not isinstance(recipe["recenter_modal_supports"], bool):
+        raise ValueError("recenter_modal_supports must be bool.")
+    if recipe["mode_support_center"] not in {"image", "components"}:
+        raise ValueError("mode_support_center must be 'image' or 'components'.")
 
-    if not isinstance(recipe["subtract_startimage_fit_intercept"], bool):
-        raise ValueError("subtract_startimage_fit_intercept must be bool.")
+    if recipe["subtract_startimage_fit_intercept"] is not False:
+        raise ValueError("Startimage normalization only supports scaling; set subtract_startimage_fit_intercept=False.")
 
     if recipe["return_format"] not in {"auto", "legacy", "dict"}:
         raise ValueError("return_format must be 'auto', 'legacy', or 'dict'.")
@@ -818,6 +875,16 @@ def phase_retrieval_algorithm(
     previous key. If ``normalize_startimage_between_holograms`` is true, a
     masked linear intensity scaling is applied when a start image is reused
     across different labels. Set it to false to copy the complex field exactly.
+
+    Dictionary results include ``supportmask_used``, the exact support passed
+    to each kernel stage after input cropping, binning, and mode expansion.
+    ``supportmask`` and ``mask_pixel`` use the same grid as the returned field.
+    ``recipe['roi']`` is in the supplied support's coordinates and is shifted
+    into the centered support crop of the final detector grid.
+
+    Context:
+    Stage-based compatibility entry point used by simpler notebooks. Mixed-state physical
+    fitting and shared-gamma round scheduling live in phase_retrieval_universal instead.
     """
     (
         holograms,
@@ -886,6 +953,10 @@ def phase_retrieval_algorithm(
     crop = int(crop)
     if crop < 0:
         raise ValueError("recipe['crop'] must be a non-negative integer.")
+    binning = recipe["binning"]
+    if isinstance(binning, bool) or not isinstance(binning, (int, np.integer)) or binning < 1:
+        raise ValueError("recipe['binning'] must be a positive integer (1 disables binning).")
+    binning = int(binning)
 
     inputs = {label: np.asarray(value).copy() for label, value in holograms.items()}
     first_shape = next(iter(inputs.values())).shape
@@ -913,6 +984,67 @@ def phase_retrieval_algorithm(
     else:
         raise ValueError("supportmask must be 2D or 3D.")
 
+    source_shape = shape_2d
+    if 2 * crop >= min(source_shape):
+        raise ValueError("recipe['crop'] removes the complete detector image.")
+    cropped_shape = tuple(n - 2 * crop for n in source_shape)
+    target_shape = tuple(n // binning for n in cropped_shape)
+    if min(target_shape) < 1:
+        raise ValueError("recipe['binning'] is larger than the cropped hologram.")
+    trimmed_shape = tuple(n * binning for n in target_shape)
+    trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed_shape))
+    detector_origin = tuple(crop + o for o in trim_origin)
+    detector_slice = tuple(slice(o, o + t) for o, t in zip(detector_origin, trimmed_shape))
+    inputs = {
+        label: value[detector_slice].reshape(target_shape[0], binning,
+                                              target_shape[1], binning).sum(axis=(1, 3))
+        for label, value in inputs.items()
+    }
+    # One excluded source pixel excludes its entire detector bin.
+    mask_pixel = np.any(
+        mask_pixel[detector_slice].reshape(target_shape[0], binning,
+                                            target_shape[1], binning) != 0,
+        axis=(1, 3),
+    ).astype(np.uint8)
+    # Cropping detector pixels changes the object pixel scale. Binning alone
+    # leaves it unchanged because the detector extent in q stays the same.
+    if crop:
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        scale = np.asarray(source_shape, dtype=float) / np.asarray(cropped_shape)
+        offset = source_center - scale * output_center
+        modes = (supportmask[None] if supportmask.ndim == 2 else supportmask)
+        mapped = np.stack([
+            affine_transform(mode.astype(float), np.diag(scale), offset=offset,
+                             output_shape=target_shape, order=0,
+                             mode="constant", cval=0, prefilter=False)
+            for mode in modes
+        ])
+        supportmask = mapped[0] if supportmask.ndim == 2 else mapped
+    else:
+        support_origin = tuple((n - t) // 2 for n, t in zip(source_shape, target_shape))
+        support_slice = tuple(slice(o, o + t) for o, t in zip(support_origin, target_shape))
+        supportmask = supportmask[(...,) + support_slice]
+    shape_2d = target_shape
+    supportmask = (supportmask != 0).astype(np.uint8)
+    roi = recipe["roi"]
+    if roi is not None:
+        roi = np.asarray(roi)
+        if roi.shape != (4,) or not np.issubdtype(roi.dtype, np.integer):
+            raise ValueError("recipe['roi'] must contain four integer bounds [r0, r1, c0, c1].")
+        roi = roi.astype(int)
+        if not (0 <= roi[0] < roi[1] <= source_shape[0] and 0 <= roi[2] < roi[3] <= source_shape[1]):
+            raise ValueError("recipe['roi'] must be within the input supportmask.")
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        object_scale = np.asarray(cropped_shape, dtype=float) / np.asarray(source_shape)
+        for axis, bounds in enumerate(((0, 1), (2, 3))):
+            mapped = (roi[list(bounds)] - source_center[axis]) * object_scale[axis] + output_center[axis]
+            roi[list(bounds)] = np.rint(mapped).astype(int)
+            roi[list(bounds)] = np.clip(roi[list(bounds)], 0, target_shape[axis])
+        if roi[1] <= roi[0] or roi[3] <= roi[2]:
+            raise ValueError("recipe['roi'] falls outside the retrieved supportmask.")
+
     offset_spec = recipe["hologram_offset"]
     if isinstance(offset_spec, dict):
         unknown_offset_labels = set(offset_spec) - set(inputs)
@@ -931,14 +1063,14 @@ def phase_retrieval_algorithm(
     data = {}
     vmin = recipe["hologram_intensity_cutoff_vmin"]
     for label, intensity in inputs.items():
-        intensity = intensity - offsets[label]
+        intensity = intensity - offsets[label] * binning**2
         if vmin >= 0:
             vals = intensity[(intensity != 0) & np.isfinite(intensity)]
             if vals.size:
                 intensity = intensity - np.nanpercentile(vals, vmin)
         intensity = np.where(np.isnan(intensity), 0, intensity)
         bsmask = mask_pixel.copy()
-        bsmask[intensity < 0] = 1
+        bsmask[intensity <= 0] = 1
         intensity = np.clip(intensity, 0, None)
         data[label] = {
             "amp": np.sqrt(intensity),
@@ -946,15 +1078,21 @@ def phase_retrieval_algorithm(
             "bsmask": bsmask,
         }
 
-    support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+    if recipe["recenter_modal_supports"] and supportmask.ndim == 2:
+        support_modes, mode_support_shifts = geometry.recenter_modal_supports(
+            supportmask, mode_labels, center=recipe["mode_support_center"],
+        )
+    else:
+        support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+        mode_support_shifts = [(0, 0)] * Nmodes
     retrieval_support = support_modes if Nmodes > 1 else support_modes[0]
 
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
         Startimage_modes = np.empty_like(support_modes, dtype=np.complex128)
         for mode_index in range(Nmodes):
-            Startimage_modes[mode_index] = np.fft.fftshift(
-                np.fft.ifft2(np.fft.ifftshift(support_modes[mode_index]))
+            Startimage_modes[mode_index] = np.fft.ifftshift(
+                np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
             )
         Startimage = _maybe_squeeze_modes(Startimage_modes, Nmodes)
     elif isinstance(first_startimage, np.ndarray):
@@ -1005,7 +1143,6 @@ def phase_retrieval_algorithm(
             Startimage,
             x,
             y,
-            subtract_intercept=recipe["subtract_startimage_fit_intercept"],
         )
 
     retrieved = {label: None for label in labels}
@@ -1013,6 +1150,7 @@ def phase_retrieval_algorithm(
     retrieved_pc = {label: None for label in labels}
     retrieved_gradient = {label: None for label in labels}
     gamma = {label: Startgamma.copy() for label in labels}
+    pc_diffract = {}
     default_start_image = Startimage.copy()
     default_start_gamma = Startgamma.copy()
 
@@ -1031,15 +1169,17 @@ def phase_retrieval_algorithm(
         use_RL = RL_it > 0 and RL_freq <= Nit
 
         if use_RL:
-            if retrieved[label] is not None:
-                retrieved_intensity = _modal_intensity_numpy(retrieved[label])
-                pc_input = (
-                    retrieved_intensity * data[label]["bsmask"]
-                    + data[label]["input"] * (1 - data[label]["bsmask"])
-                )
-            else:
-                pc_input = data[label]["input"]
-            diffract = np.sqrt(pc_input)
+            if label not in pc_diffract:
+                source = retrieved_fc[label]
+                if source is None:
+                    pc_input = data[label]["input"]
+                else:
+                    pc_input = (
+                        _modal_intensity_numpy(source) * data[label]["bsmask"]
+                        + data[label]["input"] * (1 - data[label]["bsmask"])
+                    )
+                pc_diffract[label] = np.sqrt(pc_input)
+            diffract = pc_diffract[label]
             bsmask = np.zeros_like(data[label]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
@@ -1161,6 +1301,7 @@ def phase_retrieval_algorithm(
             retrieved_pc[label] = result
         else:
             retrieved_fc[label] = result
+            pc_diffract.pop(label, None)
         if gamma_out is not None:
             gamma[label] = gamma_out
 
@@ -1201,26 +1342,12 @@ def phase_retrieval_algorithm(
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
 
-    if crop:
-        if 2 * crop >= min(shape_2d):
-            raise ValueError("recipe['crop'] removes the complete reconstruction.")
-
-        def crop_spatial(value):
-            if value is None:
-                return None
-            return np.asarray(value)[..., crop:-crop, crop:-crop]
-
-        for collection in (retrieved_fc, retrieved_pc, retrieved_gradient, gamma):
-            for label, value in collection.items():
-                collection[label] = crop_spatial(value)
-        for label in labels:
-            data[label]["bsmask"] = crop_spatial(data[label]["bsmask"])
-        for step in error["steps"]:
-            step["field_after"] = crop_spatial(step["field_after"])
-        for output_info in error["outputs"]:
-            output_info["field"] = crop_spatial(output_info["field"])
-
     result = {
+        "supportmask": retrieval_support.copy(),
+        "supportmask_used": retrieval_support.copy(),
+        "mode_support_shifts": mode_support_shifts,
+        "mask_pixel": mask_pixel.copy(),
+        "roi": roi,
         "full_coherence": retrieved_fc,
         "partial_coherence": retrieved_pc,
         "gradient_descent": retrieved_gradient,
@@ -1568,6 +1695,11 @@ def PhaseRtrv_core_single(
     This is the lean 2D implementation used by the original
     ``phase_retrieval_core``. It deliberately does not create a modal axis, so
     it is the fast path selected whenever ``Nmodes == 1``.
+
+    Context:
+    Single-observation, single-mode iteration kernel. Alternates detector and support
+    constraints; it does not know observation metadata, shared physical components or outer-
+    round refresh policy.
     """
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
@@ -1800,6 +1932,11 @@ def PhaseRtrv_core_multimode(
 
     For ``Nmodes == 1``, outputs are squeezed back to 2D to preserve the
     previous API.
+
+    Context:
+    Single-observation multimode kernel. All modes contribute to the detector intensity, but
+    each has its own support. State-independent secondary-mode projection is a
+    responsibility of the universal driver.
     """
     diffract = np.asarray(diffract)
     mask = np.asarray(mask)
@@ -1959,7 +2096,7 @@ def PhaseRtrv_core_multimode(
             new_guess[m] = ifft2(inv)
 
         # Update partial-coherence kernels only at the requested RL interval.
-        if use_RL and s > RL_freq and (s % RL_freq == 0):
+        if use_RL and s > 2 and (s % RL_freq == 0):
             for m in range(Nmodes):
                 convolved_new_m = ifft2(
                     fft2(xp.abs(new_guess[m]) ** 2) * fft2(gamma_cp[m])
@@ -2043,6 +2180,10 @@ def PhaseRtrv_core(*args, Nmodes=1, **kwargs):
     from the standard core. ``Nmodes > 1`` uses
     :func:`PhaseRtrv_core_multimode`, where the Fourier constraint is applied to
     the summed modal intensity.
+
+    Context:
+    Public kernel dispatcher: select single/multimode implementation through Nmodes while
+    preserving the shared call contract expected by observation workers.
     """
     if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
         raise ValueError("Nmodes must be a positive integer.")

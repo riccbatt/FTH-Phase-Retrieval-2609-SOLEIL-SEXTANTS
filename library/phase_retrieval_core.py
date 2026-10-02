@@ -526,12 +526,12 @@ def phase_retrieval_algorithm(
     pos_input = np.where(np.isnan(pos_input), 0, pos_input)
     neg_input = np.where(np.isnan(neg_input), 0, neg_input)
 
-    # Full-coherence beamstop masks inherit the external mask and mark negative
-    # corrected intensities as unconstrained. Zero intensity remains constrained.
+    # Full-coherence masks inherit the external mask and mark nonpositive
+    # corrected intensities as unconstrained.
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
-    bsmask_p[pos_input < 0] = 1
-    bsmask_n[neg_input < 0] = 1
+    bsmask_p[pos_input <= 0] = 1
+    bsmask_n[neg_input <= 0] = 1
 
 
     # Clip negative corrected intensities to zero before taking square roots.
@@ -545,9 +545,7 @@ def phase_retrieval_algorithm(
     # convention of the original implementation.
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
-        Startimage = np.fft.fftshift(
-            np.fft.ifft2(np.fft.ifftshift(supportmask))
-        )
+        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     elif isinstance(first_startimage, np.ndarray):
         Startimage = np.asarray(first_startimage).copy()
     else:
@@ -606,6 +604,7 @@ def phase_retrieval_algorithm(
     retrieved_pc = {"pos": None, "neg": None}
     retrieved_gradient = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+    pc_diffract = {}
 
 
     default_start_image = Startimage.copy()
@@ -627,15 +626,17 @@ def phase_retrieval_algorithm(
         # RL-enabled steps use the beamstop-filled intensity estimate and no
         # Fourier-domain beamstop mask, matching the old partial-coherence logic.
         if use_RL:
-            if retrieved[h] is not None:
-                pc_input = (
-                    np.abs(retrieved[h]) ** 2 * data[h]["bsmask"]
-                    + data[h]["input"] * (1 - data[h]["bsmask"])
-                )
-            else:
-                pc_input = data[h]["input"]
-
-            diffract = np.sqrt(pc_input)
+            if h not in pc_diffract:
+                source = retrieved_fc[h]
+                if source is None:
+                    pc_input = data[h]["input"]
+                else:
+                    pc_input = (
+                        np.abs(source) ** 2 * data[h]["bsmask"]
+                        + data[h]["input"] * (1 - data[h]["bsmask"])
+                    )
+                pc_diffract[h] = np.sqrt(pc_input)
+            diffract = pc_diffract[h]
             bsmask = np.zeros_like(data[h]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
@@ -739,6 +740,7 @@ def phase_retrieval_algorithm(
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
+            pc_diffract.pop(h, None)
 
 
         if gamma_out is not None:

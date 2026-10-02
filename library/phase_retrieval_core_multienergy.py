@@ -39,6 +39,20 @@ from functools import partial
 import os
 import time
 import numpy as np
+try:
+    from . import phase_retrieval_geometry as geometry
+except ImportError:
+    import phase_retrieval_geometry as geometry
+
+
+def _material_projector():
+    """Load the shared optional material model without changing legacy paths."""
+    try:
+        from . import phase_retrieval_universal as universal
+    except ImportError:
+        import phase_retrieval_universal as universal
+    return universal
+
 from numpy.typing import ArrayLike
 
 import matplotlib.pyplot as plt
@@ -500,12 +514,12 @@ def phase_retrieval_algorithm(
     pos_input = np.where(np.isnan(pos_input), 0, pos_input)
     neg_input = np.where(np.isnan(neg_input), 0, neg_input)
 
-    # Full-coherence beamstop masks inherit the external mask and mark negative
-    # corrected intensities as unconstrained. Zero intensity remains constrained.
+    # Full-coherence masks inherit the external mask and mark nonpositive
+    # corrected intensities as unconstrained.
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
-    bsmask_p[pos_input < 0] = 1
-    bsmask_n[neg_input < 0] = 1
+    bsmask_p[pos_input <= 0] = 1
+    bsmask_n[neg_input <= 0] = 1
 
 
     # clip positive intensities to zero to avoid NaNs in the square root.
@@ -519,9 +533,7 @@ def phase_retrieval_algorithm(
     # convention of the original implementation.
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
-        Startimage = np.fft.fftshift(
-            np.fft.ifft2(np.fft.ifftshift(supportmask))
-        )
+        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
     elif isinstance(first_startimage, np.ndarray):
         Startimage = np.asarray(first_startimage).copy()
     else:
@@ -580,6 +592,7 @@ def phase_retrieval_algorithm(
     retrieved_pc = {"pos": None, "neg": None}
     retrieved_gradient = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+    pc_diffract = {}
 
 
     default_start_image = Startimage.copy()
@@ -601,15 +614,17 @@ def phase_retrieval_algorithm(
         # RL-enabled steps use the beamstop-filled intensity estimate and no
         # Fourier-domain beamstop mask, matching the old partial-coherence logic.
         if use_RL:
-            if retrieved[h] is not None:
-                pc_input = (
-                    np.abs(retrieved[h]) ** 2 * data[h]["bsmask"]
-                    + data[h]["input"] * (1 - data[h]["bsmask"])
-                )
-            else:
-                pc_input = data[h]["input"]
-
-            diffract = np.sqrt(pc_input)
+            if h not in pc_diffract:
+                source = retrieved_fc[h]
+                if source is None:
+                    pc_input = data[h]["input"]
+                else:
+                    pc_input = (
+                        np.abs(source) ** 2 * data[h]["bsmask"]
+                        + data[h]["input"] * (1 - data[h]["bsmask"])
+                    )
+                pc_diffract[h] = np.sqrt(pc_input)
+            diffract = pc_diffract[h]
             bsmask = np.zeros_like(data[h]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
@@ -712,6 +727,7 @@ def phase_retrieval_algorithm(
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
+            pc_diffract.pop(h, None)
 
 
         if gamma_out is not None:
@@ -1632,6 +1648,8 @@ def project_log_object_low_rank(
     weights=None,
     relaxation=1.0,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -1642,6 +1660,8 @@ def project_log_object_low_rank(
     where C(r) is energy independent and Delta_E(r) has rank ``rank`` over the
     energy axis. This is the unconstrained SVD option.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_log_object_low_rank(**locals())
     L_stack = _as_energy_stack(L_stack, name="L_stack")
 
     if isinstance(rank, bool) or not isinstance(rank, (int, np.integer)):
@@ -2031,6 +2051,8 @@ def project_log_object_rank1_spectral(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -2042,6 +2064,8 @@ def project_log_object_rank1_spectral(
     vector a_E. The vector can be unconstrained, KK-constrained, constrained by a
     known beta spectrum, or constrained by known beta + KK.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_log_object_rank1_spectral(**locals())
     L_stack = _as_energy_stack(L_stack, name="L_stack")
     if not (0 <= relaxation <= 1):
         raise ValueError("relaxation must be between 0 and 1.")
@@ -2171,6 +2195,8 @@ def project_fourier_fields_multi_energy(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -2188,8 +2214,10 @@ def project_fourier_fields_multi_energy(
         Generic SVD projection, L_E = C + rank-K residual.
     'rank1_spectral':
         Explicit physical model, L_E = C + M*a_E, with optional spectral
-        constraints on the complex energy dependence a_E.
+    constraints on the complex energy dependence a_E.
     """
+    if material_thickness is not None or fit_material_thickness:
+        return _material_projector().project_fourier_fields_multi_energy(**locals())
     model = str(projection_model).lower()
     if model in {"none", "no", "off", "unconstrained"}:
         if return_components:
@@ -2306,6 +2334,9 @@ def default_multi_energy_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
+        "binning": 1,
+        "crop": 0,
+        "roi": None,
 
         # Multi-energy projection settings.
         "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
@@ -2314,6 +2345,7 @@ def default_multi_energy_phase_retrieval_recipe():
         # one full energy sweep, preserving the historical default cadence.
         "projection_every": None,
         "projection_relaxation": 1.0,
+        "final_projection_relaxation": 1.0,
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         # If True, apply any joint energy projection only inside the support.
@@ -2321,6 +2353,9 @@ def default_multi_energy_phase_retrieval_recipe():
         # Backward-compatible alias accepted by the general/universal libraries.
         "physical_constraints_inside_support_only": False,
         "projection_static_mode": "mean",
+        "material_mask": None,
+        "material_thickness": None,
+        "fit_material_thickness": False,
         "energy_weights": None,
         "log_floor": 1e-12,
 
@@ -2550,12 +2585,12 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This energy schedule does not support partial-coherence RL "
+                "updates because no coherence kernel is supplied."
+            )
         if mode == "gradient_descent":
-            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-                raise ValueError(
-                    "gradient_descent update stages do not support "
-                    "Richardson-Lucy partial-coherence updates."
-                )
             refined = gradient.refine_field_gradient(
                 field,
                 amplitude,
@@ -2692,6 +2727,12 @@ def _verify_multi_energy_recipe(recipe, nE):
             "projection_model must be 'none', 'svd'/'low_rank', "
             "or 'rank1_spectral'."
         )
+    if not isinstance(recipe["fit_material_thickness"], bool):
+        raise ValueError("fit_material_thickness must be bool.")
+    if recipe["fit_material_thickness"] and model not in {
+        "rank1_spectral", "spectral", "explicit", "cma", "c+m*a",
+    }:
+        raise ValueError("Fitting thickness requires projection_model='rank1_spectral'.")
 
     _build_update_schedule(
         recipe,
@@ -2735,6 +2776,8 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("plot_every must be > 0.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
+    if not (0 <= recipe["final_projection_relaxation"] <= 1):
+        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
         raise ValueError("projection_constraints_inside_support_only must be bool.")
     if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
@@ -2894,11 +2937,22 @@ def multi_energy_phase_retrieval_algorithm(
             )
         recipe.update(multi_energy_recipe)
 
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
     holograms = _as_energy_stack(holograms)
     supportmask = np.asarray(supportmask)
 
     nE, nx, ny = holograms.shape
     _verify_multi_energy_recipe(recipe, nE)
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = _material_projector()._recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
     projection_supportmask = (
@@ -2919,7 +2973,7 @@ def multi_energy_phase_retrieval_algorithm(
     mask_stack = _as_energy_mask(mask_pixel, nE=nE, image_shape=(nx, ny))
 
     if start_fields is None:
-        start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
+        start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
         fields = np.repeat(start[None, :, :], nE, axis=0).astype(np.complex128)
 
         # Rough per-energy amplitude normalization, analogous to the original
@@ -3046,6 +3100,8 @@ def multi_energy_phase_retrieval_algorithm(
                 fit_known_beta_scale=recipe["fit_known_beta_scale"],
                 fit_known_beta_offset=recipe["fit_known_beta_offset"],
                 projection_supportmask=projection_supportmask,
+                material_thickness=material_thickness,
+                fit_material_thickness=recipe["fit_material_thickness"],
                 return_components=True,
             )
             errors["projection_steps"].append(
@@ -3068,13 +3124,13 @@ def multi_energy_phase_retrieval_algorithm(
             )
 
     # Final projection, unless the user explicitly selected no projection.
-    fields, components = project_fourier_fields_multi_energy(
+    projected_fields, components = project_fourier_fields_multi_energy(
         fields,
         projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
-        relaxation=1.0,
+        relaxation=recipe["final_projection_relaxation"],
         log_floor=recipe["log_floor"],
         spectral_constraint=recipe["spectral_constraint"],
         energy_values=recipe["energy_values"],
@@ -3088,8 +3144,13 @@ def multi_energy_phase_retrieval_algorithm(
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
         projection_supportmask=projection_supportmask,
+        material_thickness=material_thickness,
+        fit_material_thickness=recipe["fit_material_thickness"],
         return_components=True,
     )
+    if recipe["final_projection_relaxation"] > 0:
+        fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
 
     if recipe["final_fourier_constraint"]:
         for j in range(nE):
@@ -3101,4 +3162,4 @@ def multi_energy_phase_retrieval_algorithm(
 
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
 
-    return fields, fieldswarmup, components, bsmasks, errors
+    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)

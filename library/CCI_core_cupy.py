@@ -315,9 +315,13 @@ def dyn_factor(image,image_ref,method = 'scalarproduct', crop = 0, plot = False,
     #Not optimized for gpu support yet
     elif method == 'correlation':
         #Create y, x data
-        xdata = np.concatenate(image_ref[crop_s])
-        ydata = np.concatenate(image[crop_s])
-        
+        if image_ref.ndim==2:
+            xdata = np.concatenate(image_ref[crop_s])
+            ydata = np.concatenate(image[crop_s])
+        else:
+            xdata = image_ref[crop_s].copy()
+            ydata = image[crop_s].copy()
+
         #Ignore all x,y = 0 values, e.g., if a mask is used
         ignore = np.logical_or((np.abs(xdata)<=1e-5),(np.abs(ydata)<=1e-5))
         xdata = xdata[np.argwhere(ignore == False)]

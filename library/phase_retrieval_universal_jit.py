@@ -26,7 +26,18 @@ default_universal_phase_retrieval_recipe = (
 
 def _configured_kernel(fallback):
     """Return the JIT kernel with the selected unsupported-feature behavior."""
-    return partial(jit_core.PhaseRtrv_core_jit, fallback=fallback)
+    def kernel(*args, **kwargs):
+        nmodes = kwargs.pop("Nmodes", 1)
+        if nmodes > 1:
+            if not fallback:
+                raise NotImplementedError("Multimode updates use the unified kernel; enable fallback")
+            try:
+                from .phase_retrieval_core_unified import PhaseRtrv_core
+            except ImportError:
+                from phase_retrieval_core_unified import PhaseRtrv_core
+            return PhaseRtrv_core(*args, Nmodes=nmodes, **kwargs)
+        return jit_core.PhaseRtrv_core_jit(*args, fallback=fallback, **kwargs)
+    return kernel
 
 
 def universal_phase_retrieval_algorithm_jit(*args, fallback=True, **kwargs):

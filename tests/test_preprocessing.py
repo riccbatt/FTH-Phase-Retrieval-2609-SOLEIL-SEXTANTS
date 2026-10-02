@@ -272,18 +272,16 @@ class PreprocessingTests(unittest.TestCase):
         self.assertGreater(modal[1].sum(), modal[0].sum())
         self.assertEqual(modal[1][4, 4], 1)
 
-    def test_startimage_intercept_correction_is_optional(self):
+    def test_startimage_normalization_only_scales(self):
         field = np.array([[5 + 2j, 9 + 2j]])
         measured = np.array([1.0, 3.0])
-        amplitude_fit = np.array([5.0, 9.0])  # slope=2, intercept=3
-        slope_only = unified_pr._normalize_startimage_amplitude(
-            field, measured, amplitude_fit, subtract_intercept=False
+        amplitude_fit = np.array([5.0, 9.0])
+        normalized = unified_pr._normalize_startimage_amplitude(
+            field, measured, amplitude_fit
         )
-        legacy = unified_pr._normalize_startimage_amplitude(
-            field, measured, amplitude_fit, subtract_intercept=True
-        )
-        np.testing.assert_allclose(slope_only, field / 2)
-        np.testing.assert_allclose(legacy, (field - 3) / 2)
+        expected_scale = np.dot(measured, amplitude_fit) / np.dot(measured, measured)
+        np.testing.assert_allclose(normalized, field / expected_scale)
+        np.testing.assert_allclose(np.angle(normalized), np.angle(field))
 
     def test_load_average_accepts_one_id_or_a_list(self):
         class FakeLoader:

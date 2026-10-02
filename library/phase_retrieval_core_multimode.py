@@ -682,8 +682,8 @@ def phase_retrieval_algorithm(
 
     bsmask_p = mask_pixel.copy()
     bsmask_n = mask_pixel.copy()
-    bsmask_p[pos_input < 0] = 1
-    bsmask_n[neg_input < 0] = 1
+    bsmask_p[pos_input <= 0] = 1
+    bsmask_n[neg_input <= 0] = 1
 
     pos_input = np.clip(pos_input, 0, None)
     neg_input = np.clip(neg_input, 0, None)
@@ -705,8 +705,8 @@ def phase_retrieval_algorithm(
     if first_startimage is None:
         Startimage_modes = np.empty_like(support_modes, dtype=np.complex128)
         for m in range(Nmodes):
-            Startimage_modes[m] = np.fft.fftshift(
-                np.fft.ifft2(np.fft.ifftshift(support_modes[m]))
+            Startimage_modes[m] = np.fft.ifftshift(
+                np.fft.ifft2(np.fft.fftshift(support_modes[m]))
             )
         Startimage = _maybe_squeeze_modes(Startimage_modes, Nmodes)
     elif isinstance(first_startimage, np.ndarray):
@@ -766,6 +766,7 @@ def phase_retrieval_algorithm(
     retrieved_fc = {"pos": None, "neg": None}
     retrieved_pc = {"pos": None, "neg": None}
     gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+    pc_diffract = {}
 
     default_start_image = Startimage.copy()
     default_start_gamma = Startgamma.copy()
@@ -782,16 +783,17 @@ def phase_retrieval_algorithm(
         use_RL = RL_it > 0 and RL_freq <= Nit
 
         if use_RL:
-            if retrieved[h] is not None:
-                retrieved_intensity = _modal_intensity_numpy(retrieved[h])
-                pc_input = (
-                    retrieved_intensity * data[h]["bsmask"]
-                    + data[h]["input"] * (1 - data[h]["bsmask"])
-                )
-            else:
-                pc_input = data[h]["input"]
-
-            diffract = np.sqrt(pc_input)
+            if h not in pc_diffract:
+                source = retrieved_fc[h]
+                if source is None:
+                    pc_input = data[h]["input"]
+                else:
+                    pc_input = (
+                        _modal_intensity_numpy(source) * data[h]["bsmask"]
+                        + data[h]["input"] * (1 - data[h]["bsmask"])
+                    )
+                pc_diffract[h] = np.sqrt(pc_input)
+            diffract = pc_diffract[h]
             bsmask = np.zeros_like(data[h]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
@@ -882,6 +884,7 @@ def phase_retrieval_algorithm(
             retrieved_pc[h] = result
         else:
             retrieved_fc[h] = result
+            pc_diffract.pop(h, None)
 
         if gamma_out is not None:
             gamma[h] = gamma_out
@@ -1424,7 +1427,7 @@ def PhaseRtrv_core(
             new_guess[m] = ifft2(inv)
 
         # Update partial-coherence kernels only at the requested RL interval.
-        if use_RL and s > RL_freq and (s % RL_freq == 0):
+        if use_RL and s > 2 and (s % RL_freq == 0):
             for m in range(Nmodes):
                 convolved_new_m = ifft2(
                     fft2(xp.abs(new_guess[m]) ** 2) * fft2(gamma_cp[m])
