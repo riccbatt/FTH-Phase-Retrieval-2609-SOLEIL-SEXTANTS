@@ -1,5 +1,8 @@
 # Universal phase retrieval: user guide
 
+For task-based examples of plain XMCD, hyperspectral, and hysteresis retrieval,
+see [Universal reconstruction examples](universal_reconstruction_examples.md).
+
 ## Implementation and entry points
 
 Use `library/phase_retrieval_universal.py` for joint state, polarization, energy,

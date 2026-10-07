@@ -1,5 +1,8 @@
 For the current joint library, full option reference and repeated coherence transitions, see [Universal phase retrieval: user guide](universal_phase_retrieval.md).
 
+For task-based examples of plain XMCD, hyperspectral, and hysteresis retrieval,
+see [Universal reconstruction examples](universal_reconstruction_examples.md).
+
 # Phase retrieval API and workflow guide
 
 This guide covers the universal public phase retrieval API. The
