@@ -4079,8 +4079,8 @@ def _verify_multi_energy_recipe(recipe, nE):
         or projection_every <= 0
     ):
         raise ValueError("projection_every must be None or a positive integer.")
-    if recipe["outer_iterations"] <= 0:
-        raise ValueError("outer_iterations must be > 0.")
+    if recipe["outer_iterations"] < 0:
+        raise ValueError("outer_iterations must be >= 0.")
     projection_start = recipe["projection_start"]
     if projection_start is not None and (
         isinstance(projection_start, bool)
@@ -4522,7 +4522,7 @@ def default_general_phase_retrieval_recipe():
         # Phase-retrieval stages applied independently to every observation.
         "inner_mode": ["HAPRE"],
         "inner_Nit": [1],
-        "outer_iterations": 300,
+        "outer_iterations": 300,  # 0 runs warmup and configured final constraints only
         "warmup_mode": ["HAPRE"],
         "warmup_Nit": [20],
         # Optional explicit schedules for the reference observation and all
@@ -5864,8 +5864,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         value = recipe[key]
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"{key} must be an integer.")
-    if recipe["outer_iterations"] <= 0:
-        raise ValueError("outer_iterations must be > 0.")
+    if recipe["outer_iterations"] < 0:
+        raise ValueError("outer_iterations must be >= 0.")
     projection_start = recipe["projection_start"]
     if projection_start is not None and (
         isinstance(projection_start, bool)
