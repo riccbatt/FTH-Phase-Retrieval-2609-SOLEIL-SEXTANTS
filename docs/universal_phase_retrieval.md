@@ -128,6 +128,38 @@ outer-round refresh controls for repeated transitions.
 
 ## Initialization and the radial envelope
 
+To reproduce the unified sequential workflow (pos: HAPRE × 750 + ER × 50;
+neg: ER × 50 starting from the completed pos solution), order observations as
+`[pos, neg]` and configure:
+
+```python
+recipe = default_universal_phase_retrieval_recipe()
+recipe.update(
+    outer_iterations=0,
+    warmup_start_from_first=True,
+    warmup_reference_observation=0,
+    warmup_mode=["HAPRE", "ER"], warmup_Nit=[750, 50],
+    warmup_reference_mode=["HAPRE", "ER"], warmup_reference_Nit=[750, 50],
+    warmup_other_mode=["ER"], warmup_other_Nit=[50],
+    warmup_reference_beta_mode=["arctan", "const"],
+    warmup_other_beta_mode="const",
+    startimage_scale_fit="through_origin",
+    warmup_seed_scale_fit="linear",
+    mode_initialization="support_fft",
+    average_img=1,
+    projection_model="none",
+    constrain_nonphysical_modes_common=False,
+    final_fourier_constraint=False,
+)
+```
+
+The scaling settings match the unified support initialization and pos-to-neg
+handoff. Each retrieval stage still uses `Fourier_last=True`. Choose the same
+`modes`, beta/alpha, averaging and mask settings as in the original recipe.
+Zero outer iterations skips joint rounds; configured final constraints still
+run, so the example disables them to return the sequential warmup unchanged.
+Negative outer iteration counts are rejected.
+
 Both main notebooks default to independent coherent HAPRE × 750 + ER × 50
 warmups for every observation, including opposite polarizations. Set
 `WARMUP_START_FROM_REFERENCE=True` to seed from the selected reconstructed
