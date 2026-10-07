@@ -31,8 +31,9 @@ to +1 or -1 within material. Absolute thickness and refractive index remain
 coupled unless external information fixes their scale.
 
 The module contains its own phase-retrieval kernel, schedules, multi-energy
-projectors, and metadata-aware physical projectors. It does not import any
-other phase-retrieval library. Selecting ``svd`` or ``rank1_spectral`` for a
+projectors, ordered observation stages, and single/multimode kernels.
+The historical unified module is a compatibility alias of this module.
+Selecting ``svd`` or ``rank1_spectral`` for a
 pure energy scan remains numerically equivalent to the corresponding
 multi-energy implementation, while ``physical_factorized`` handles mixed
 state/polarization/energy/illumination datasets.
@@ -55,6 +56,7 @@ from numpy.typing import ArrayLike
 import matplotlib.pyplot as plt
 
 from scipy import stats
+from scipy.ndimage import affine_transform
 
 try:
     from . import kramers_kronig as kk
@@ -116,6 +118,8 @@ def to_numpy(array, xp):
 # ############################################################
 
 
+
+# Ordered observation stages and modal kernel share the universal implementation.
 def default_phase_retrieval_recipe():
     """
     Return the default flat phase-retrieval recipe.
@@ -150,23 +154,68 @@ def default_phase_retrieval_recipe():
         "Fourier_last": [True, True, True, True, True, True],
         "output": [False, False, False, False, True, True],
 
+        # Number of incoherent reconstruction modes. Nmodes=1 reproduces
+        # the standard single-mode phase retrieval. Nmodes>1 uses a modal
+        # intensity sum for the Fourier constraint.
+        "Nmodes": 1,
+        # Legacy harmonic-mode support expansion factors. For a 2-D support,
+        # modes=[1, 2] uses the original and a 2x spatially enlarged support.
+        # A supplied 3-D modal support bypasses automatic enlargement.
+        "modes": None,
+        "recenter_modal_supports": False,
+        "mode_support_center": "image",
+        # Remove this many pixels from every edge of returned spatial arrays.
+        "crop": 0,
+        # Crop detector intensities first, then bin; center crop object support.
+        "binning": 1,
+        # Optional [row_start, row_stop, column_start, column_stop] in input coordinates.
+        "roi": None,
+        "normalize_startimage_between_holograms": True,
+        # Retained for compatibility with saved recipes; only False is allowed.
+        "subtract_startimage_fit_intercept": False,
+        "return_format": "auto",
+
         "hologram_intensity_cutoff_vmin": -1,
+        # Explicit detector-intensity offset subtracted before clipping/sqrt.
+        # Use one scalar for all holograms or a {label: offset} mapping.
+        "hologram_offset": 0.0,
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
     return recipe
 
-
-def _default_output_flags(helicity):
-    """Return True for the last recipe step of each helicity."""
-    flags = [False] * len(helicity)
-    for h in ("pos", "neg"):
-        for index in range(len(helicity) - 1, -1, -1):
-            if helicity[index] == h:
+def _default_output_flags(labels):
+    """Return True for the last recipe step of each requested hologram label."""
+    flags = [False] * len(labels)
+    for label in dict.fromkeys(labels):
+        for index in range(len(labels) - 1, -1, -1):
+            if labels[index] == label:
                 flags[index] = True
                 break
     return flags
 
+def _broadcast_recipe_scalars(recipe):
+    """Expand scalar per-step settings to the number of algorithm stages."""
+    stage_count = len(recipe["algorithm_list"])
+    scalar_keys = (
+        "beta_zero",
+        "beta_mode",
+        "alpha_zero",
+        "alpha_mode",
+        "RL_its",
+        "RL_freqs",
+        "TV_freqs",
+        "plot_every",
+        "average_img",
+        "Fourier_last",
+        "output",
+    )
+    for key in scalar_keys:
+        value = recipe[key]
+        if isinstance(value, tuple):
+            recipe[key] = list(value)
+        elif not isinstance(value, list):
+            recipe[key] = [value] * stage_count
 
 def _resolve_start_field(start_spec, default_field, latest, name):
     """
@@ -175,8 +224,12 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     start_spec can be:
       - None: use the default support-based initialization
       - np.ndarray: use this array directly
-      - "pos": use latest["pos"]
-      - "neg": use latest["neg"]
+      - str: use latest[str]
+
+    Context:
+    Legacy stage-driver handoff: resolve an explicit start or a previously reconstructed
+    labeled field. This is separate from the universal driver's independent/reference warmup
+    policy.
     """
 
     if start_spec is None:
@@ -185,7 +238,11 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     if isinstance(start_spec, np.ndarray):
         return start_spec.copy()
 
-    if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
+    if isinstance(start_spec, str):
+        if start_spec not in latest:
+            raise ValueError(
+                f"{name} requested unknown hologram label {start_spec!r}."
+            )
         if latest[start_spec] is None:
             raise ValueError(
                 f"{name} requested latest '{start_spec}', "
@@ -195,9 +252,282 @@ def _resolve_start_field(start_spec, default_field, latest, name):
 
     raise ValueError(
         f"Invalid {name} entry: {start_spec!r}. "
-        "Allowed values are None, np.ndarray, 'pos', or 'neg'."
+        "Allowed values are None, np.ndarray, or a hologram label string."
     )
 
+def _as_modes(arr, Nmodes, shape_2d, name, dtype=None):
+    """
+    Convert a 2D or 3D array into modal shape ``(Nmodes, nx, ny)``.
+
+    Accepted inputs are:
+      - ``(nx, ny)``: copied into all modes
+      - ``(1, nx, ny)``: copied into all modes
+      - ``(Nmodes, nx, ny)``: used directly
+
+    Context:
+    Internal shape contract: kernels work with an explicit leading mode axis even when the
+    public single-mode API supplies a 2D image.
+    """
+    arr = np.asarray(arr)
+
+    if arr.ndim == 2:
+        if arr.shape != shape_2d:
+            raise ValueError(f"{name} must have shape {shape_2d}.")
+        out = np.repeat(arr[None, :, :], Nmodes, axis=0)
+
+    elif arr.ndim == 3:
+        if arr.shape[1:] != shape_2d:
+            raise ValueError(
+                f"{name} has incompatible spatial shape {arr.shape[1:]}; "
+                f"expected {shape_2d}."
+            )
+        if arr.shape[0] == Nmodes:
+            out = arr.copy()
+        elif arr.shape[0] == 1:
+            out = np.repeat(arr, Nmodes, axis=0)
+        else:
+            raise ValueError(
+                f"{name} first dimension must be 1 or Nmodes={Nmodes}."
+            )
+    else:
+        raise ValueError(f"{name} must be 2D or 3D.")
+
+    if dtype is not None:
+        out = out.astype(dtype, copy=False)
+
+    return out
+
+def _expand_support_about_center(support, factor):
+    """Enlarge a 2-D support spatially about the array center."""
+    support = np.asarray(support)
+    if support.ndim != 2:
+        raise ValueError("support must be 2D")
+    if isinstance(factor, bool) or not isinstance(factor, (int, float, np.number)):
+        raise TypeError("mode support expansion factors must be numeric")
+    factor = float(factor)
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("mode support expansion factors must be finite and > 0")
+    if factor == 1:
+        return support.copy()
+
+    inverse_scale = np.eye(2) / factor
+    center = (np.asarray(support.shape, dtype=float) - 1) / 2
+    offset = center - inverse_scale @ center
+    expanded = affine_transform(
+        support.astype(float),
+        inverse_scale,
+        offset=offset,
+        output_shape=support.shape,
+        order=0,
+        mode="constant",
+        cval=0,
+        prefilter=False,
+    )
+    if np.issubdtype(support.dtype, np.bool_) or np.array_equal(
+        support, support.astype(bool)
+    ):
+        return (expanded > 0.5).astype(support.dtype)
+    return expanded.astype(support.dtype, copy=False)
+
+def _mode_supports(supportmask, mode_factors, shape_2d):
+    """
+    Build modal supports from legacy spatial expansion factors.
+
+    Context:
+    Build the object support allowed for each incoherent mode from the configured support-
+    size factors. This controls geometry, not whether a mode is magnetic.
+    """
+    supportmask = np.asarray(supportmask)
+    nmodes = len(mode_factors)
+    if supportmask.ndim == 2:
+        return np.stack(
+            [_expand_support_about_center(supportmask, factor) for factor in mode_factors]
+        )
+    return _as_modes(
+        supportmask,
+        nmodes,
+        shape_2d,
+        "supportmask",
+        dtype=supportmask.dtype,
+    )
+
+def _support_on_output_grid(supportmask, output_shape):
+    """Map object support to the grid implied by a cropped Fourier field."""
+    support = np.asarray(supportmask)
+    source_shape = np.asarray(support.shape[-2:])
+    target_shape = np.asarray(output_shape)
+    if np.array_equal(source_shape, target_shape):
+        return support.copy()
+    scale = source_shape / target_shape
+    offset = (source_shape - 1) / 2 - scale * (target_shape - 1) / 2
+    mapped = [
+        affine_transform(mode.astype(float), np.diag(scale), offset=offset,
+                         output_shape=tuple(target_shape), order=0,
+                         mode="constant", cval=0, prefilter=False)
+        for mode in _as_modes(support, support.shape[0] if support.ndim == 3 else 1,
+                              tuple(source_shape), "supportmask", dtype=support.dtype)
+    ]
+    result = (np.stack(mapped) != 0).astype(np.uint8)
+    return result if support.ndim == 3 else result[0]
+
+def _maybe_squeeze_modes(arr, Nmodes):
+    """Return 2D output for ``Nmodes == 1`` and 3D output otherwise."""
+    if arr is None:
+        return None
+    if Nmodes == 1 and np.asarray(arr).ndim == 3:
+        return arr[0]
+    return arr
+
+def _modal_intensity_numpy(arr):
+    """Return the total intensity of a 2D single-mode or 3D multimode field."""
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return np.abs(arr) ** 2
+    if arr.ndim == 3:
+        return np.sum(np.abs(arr) ** 2, axis=0)
+    raise ValueError("Expected a 2D or 3D reconstruction array.")
+
+def _modal_amplitude_numpy(arr):
+    """Return sqrt(total modal intensity) for a 2D or 3D complex field."""
+    return np.sqrt(_modal_intensity_numpy(arr))
+
+def _normalize_startimage_amplitude(startimage, measured_amplitude, start_amplitude):
+    """Scale a start field by a positive, through-origin amplitude fit."""
+    x = np.asarray(measured_amplitude).ravel()
+    y = np.asarray(start_amplitude).ravel()
+    if x.size == 0:
+        return startimage
+    denominator = np.dot(x, x)
+    if denominator <= 0:
+        return startimage
+    scale = np.dot(x, y) / denominator
+    if not np.isfinite(scale) or scale <= 1e-12:
+        return startimage
+    return np.asarray(startimage) / scale
+
+def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
+    """
+    Return one coherent or partially coherent intensity per mode.
+
+    Context:
+    Kernel-level forward model in the kernel's FFT ordering. Preserve one intensity plane
+    per mode until the detector constraint sums them.
+    """
+    convolved = xp.zeros_like(current_guess, dtype=xp.complex128)
+    for mode_index in range(nmodes):
+        intensity = xp.abs(current_guess[mode_index]) ** 2
+        if current_gamma is None:
+            convolved[mode_index] = intensity
+        else:
+            convolved[mode_index] = ifft2(
+                fft2(intensity) * fft2(current_gamma[mode_index])
+            )
+    return convolved
+
+def _apply_modal_fourier_constraint(
+    current_guess,
+    current_convolved,
+    measured_amplitude,
+    observed,
+    invalid,
+):
+    """
+    Jointly rescale all modes to match the measured total intensity.
+
+    Context:
+    One detector measurement constrains the sum of incoherent mode powers. Apply the same
+    amplitude factor to all modes; invalid pixels receive factor one and remain free.
+    """
+    total_intensity = xp.sum(current_convolved, axis=0)
+    modal_amplitude = xp.sqrt(total_intensity)
+    modal_amplitude = xp.where(
+        xp.abs(modal_amplitude) > 1e-30,
+        modal_amplitude,
+        1e-30,
+    )
+    factor = measured_amplitude / modal_amplitude
+    return current_guess * (
+        observed[None, :, :] * factor[None, :, :]
+        + invalid[None, :, :]
+    )
+
+def _apply_modal_fourier_constraint_numpy(field_modes, measured_amplitude, bsmask):
+    """NumPy version of the summed-intensity modal Fourier constraint."""
+    observed = bsmask == 0
+    invalid = ~observed
+    total_amplitude = _modal_amplitude_numpy(field_modes)
+    total_amplitude = np.where(total_amplitude > 1e-30, total_amplitude, 1e-30)
+    factor = measured_amplitude / total_amplitude
+    return field_modes * (
+        observed[None, :, :] * factor[None, :, :]
+        + invalid[None, :, :]
+    )
+
+def _refine_modes_gradient(
+    phase,
+    measured_amplitude,
+    supportmask,
+    bsmask,
+    *,
+    nmodes,
+    image_shape,
+    Nit,
+    learning_rate,
+    support_weight,
+    Fourier_last,
+):
+    """Refine every coherent mode and preserve summed-amplitude convention."""
+    phase_modes = _as_modes(
+        phase,
+        nmodes,
+        image_shape,
+        "Phase",
+        dtype=np.complex128,
+    )
+    support_modes = _as_modes(
+        supportmask,
+        nmodes,
+        image_shape,
+        "supportmask",
+        dtype=np.asarray(supportmask).dtype,
+    )
+    refined_modes = np.empty_like(phase_modes, dtype=np.complex128)
+    diffraction_losses = []
+    support_losses = []
+    total_losses = []
+    modal_target = measured_amplitude / np.sqrt(max(nmodes, 1))
+
+    for mode_index in range(nmodes):
+        result = gradient.refine_field_gradient(
+            phase_modes[mode_index],
+            modal_target,
+            supportmask=support_modes[mode_index],
+            mask_pixel=bsmask,
+            n_steps=Nit,
+            learning_rate=learning_rate,
+            support_weight=support_weight,
+            loss_mode="amplitude",
+            support_projection=False,
+            fourier_projection=False,
+        )
+        refined_modes[mode_index] = result.fields
+        diffraction_losses.append(result.diffraction_loss)
+        support_losses.append(result.support_loss)
+        total_losses.append(result.loss)
+
+    if Fourier_last:
+        refined_modes = _apply_modal_fourier_constraint_numpy(
+            refined_modes,
+            measured_amplitude,
+            bsmask,
+        )
+
+    return (
+        _maybe_squeeze_modes(refined_modes, nmodes),
+        np.mean(np.stack(diffraction_losses), axis=0),
+        np.mean(np.stack(support_losses), axis=0),
+        np.mean(np.stack(total_losses), axis=0),
+    )
 
 def _verify_valid_phase_retrieval_recipe(recipe):
     """
@@ -268,13 +598,8 @@ def _verify_valid_phase_retrieval_recipe(recipe):
             f"Allowed algorithms are: {sorted(allowed_algorithms)}"
         )
 
-    invalid_helicity = [h for h in recipe["helicity"] if h not in {"pos", "neg"}]
-
-    if invalid_helicity:
-        raise ValueError(
-            f"Invalid helicity value(s): {invalid_helicity}. "
-            "Allowed values are 'pos' and 'neg'."
-        )
+    if not all(isinstance(h, str) for h in recipe["helicity"]):
+        raise ValueError("All helicity entries must be hologram label strings.")
 
     if not all(isinstance(n, int) and n > 0 for n in recipe["number_iterations"]):
         raise ValueError("All number_iterations values must be positive integers.")
@@ -284,10 +609,10 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(f > 0 for f in recipe["RL_freqs"]):
         raise ValueError("All RL_freqs values must be > 0.")
-    
+
     if not all(f > 0 for f in recipe["TV_freqs"]):
         raise ValueError("All TV_freqs values must be > 0.")
-    
+
     if not all(n > 0 for n in recipe["plot_every"]):
         raise ValueError("All plot_every values must be > 0.")
 
@@ -300,6 +625,19 @@ def _verify_valid_phase_retrieval_recipe(recipe):
     if not all(isinstance(flag, bool) for flag in recipe["output"]):
         raise ValueError("All output values must be bool.")
 
+    if not isinstance(recipe["normalize_startimage_between_holograms"], bool):
+        raise ValueError("normalize_startimage_between_holograms must be bool.")
+    if not isinstance(recipe["recenter_modal_supports"], bool):
+        raise ValueError("recenter_modal_supports must be bool.")
+    if recipe["mode_support_center"] not in {"image", "components"}:
+        raise ValueError("mode_support_center must be 'image' or 'components'.")
+
+    if recipe["subtract_startimage_fit_intercept"] is not False:
+        raise ValueError("Startimage normalization only supports scaling; set subtract_startimage_fit_intercept=False.")
+
+    if recipe["return_format"] not in {"auto", "legacy", "dict"}:
+        raise ValueError("return_format must be 'auto', 'legacy', or 'dict'.")
+
     for key in ["Startimage", "Startgamma"]:
         if key not in recipe:
             raise ValueError(f"Missing recipe key: {key}")
@@ -311,11 +649,11 @@ def _verify_valid_phase_retrieval_recipe(recipe):
             raise ValueError(
                 f"Recipe key '{key}' must have same length as algorithm_list."
             )
-        
-def _scale_phase_between_helicities(
+
+def _scale_phase_between_holograms(
     phase,
-    source_helicity,
-    target_helicity,
+    source_label,
+    target_label,
     intensity_data,
     bsmasks,
     use_offset=False,
@@ -324,8 +662,8 @@ def _scale_phase_between_helicities(
     verbose=False,
 ):
     """
-    Rescale a reconstruction when it is reused as the starting guess for the
-    opposite helicity.
+    Rescale a reconstruction when it is reused as the starting guess for a
+    different hologram label.
 
     The scale factor is estimated from a linear fit of the measured hologram
     intensities, while excluding invalid pixels from both helicities using
@@ -335,8 +673,8 @@ def _scale_phase_between_helicities(
     ----------
     phase : np.ndarray
         Previous reconstructed complex Fourier-domain field.
-    source_helicity, target_helicity : {"pos", "neg"}
-        Helicity of the previous reconstruction and the target step.
+    source_label, target_label : str
+        Label of the previous reconstruction and the target step.
     intensity_data : dict
         {"pos": pos_input, "neg": neg_input}
     bsmasks : dict
@@ -356,18 +694,18 @@ def _scale_phase_between_helicities(
         Rescaled complex reconstruction.
     """
 
-    if phase is None or source_helicity is None or source_helicity == target_helicity:
+    if phase is None or source_label is None or source_label == target_label:
         return phase
 
-    if source_helicity not in {"pos", "neg"} or target_helicity not in {"pos", "neg"}:
+    if source_label not in intensity_data or target_label not in intensity_data:
         raise ValueError(
-            f"Invalid helicity conversion: {source_helicity!r} -> {target_helicity!r}"
+            f"Invalid hologram conversion: {source_label!r} -> {target_label!r}"
         )
 
-    source_intensity = intensity_data[source_helicity].copy()
-    target_intensity = intensity_data[target_helicity].copy()
+    source_intensity = intensity_data[source_label].copy()
+    target_intensity = intensity_data[target_label].copy()
 
-    valid = (bsmasks[source_helicity] == 0) & (bsmasks[target_helicity] == 0)
+    valid = (bsmasks[source_label] == 0) & (bsmasks[target_label] == 0)
 
     if not isinstance(crop, int) or crop < 0:
         raise ValueError("crop must be a non-negative integer.")
@@ -433,46 +771,121 @@ def _scale_phase_between_helicities(
 
     return scaled_phase
 
+def _normalize_phase_retrieval_inputs(
+    holograms,
+    neg=None,
+    mask_pixel=None,
+    supportmask=None,
+    phase_retrieval_recipe=None,
+):
+    """Accept both legacy positional inputs and the new hologram dictionary."""
+    legacy_call = not isinstance(holograms, dict)
+
+    if legacy_call:
+        if neg is None or mask_pixel is None or supportmask is None:
+            raise TypeError(
+                "Legacy calls require pos, neg, mask_pixel, supportmask."
+            )
+        return (
+            {"pos": holograms, "neg": neg},
+            mask_pixel,
+            supportmask,
+            phase_retrieval_recipe,
+            True,
+        )
+
+    if not holograms:
+        raise ValueError("holograms dictionary must not be empty.")
+
+    if phase_retrieval_recipe is None and isinstance(supportmask, dict):
+        phase_retrieval_recipe = supportmask
+        supportmask = mask_pixel
+        mask_pixel = neg
+    elif supportmask is None:
+        supportmask = mask_pixel
+        mask_pixel = neg
+
+    if mask_pixel is None or supportmask is None:
+        raise TypeError(
+            "Dictionary calls require holograms, mask_pixel, supportmask."
+        )
+
+    return holograms, mask_pixel, supportmask, phase_retrieval_recipe, False
+
+def _legacy_tuple_from_result(result):
+    """Return the historical ``pos/neg`` tuple from a structured result."""
+    fc = result["full_coherence"]
+    pc = result["partial_coherence"]
+    bsmasks = result["bsmasks"]
+    gamma = result["gamma"]
+    return (
+        fc.get("pos"),
+        fc.get("neg"),
+        pc.get("pos"),
+        pc.get("neg"),
+        bsmasks.get("pos"),
+        bsmasks.get("neg"),
+        gamma.get("pos"),
+        gamma.get("neg"),
+        result["error"],
+    )
 
 def phase_retrieval_algorithm(
-    pos: ArrayLike,
-    neg: ArrayLike,
-    mask_pixel: ArrayLike,
-    supportmask: ArrayLike,
+    holograms: ArrayLike,
+    neg: ArrayLike = None,
+    mask_pixel: ArrayLike = None,
+    supportmask: ArrayLike = None,
     phase_retrieval_recipe=None,
 ):
     """
-    Run a recipe-driven two-helicity phase retrieval.
+    Run a recipe-driven phase retrieval for any number of hologram labels.
 
-    The recipe is a flat sequence of steps. Each step selects an algorithm,
-    iteration count, helicity (``"pos"`` or ``"neg"``), beta schedule, optional TV
-    schedule through alpha, and optional Richardson-Lucy parameters.
+    Legacy use is still supported::
 
-    The starting phase of each step is controlled by recipe["Startimage"].
-    Startimage[i] may be:
-        None        -> use the default support-based start image
-        "pos"       -> use the latest positive-helicity reconstruction
-        "neg"       -> use the latest negative-helicity reconstruction
-        np.ndarray  -> use the supplied array directly
+        phase_retrieval_algorithm(pos, neg, mask, support, recipe)
 
-    When a reconstruction from a different helicity is reused, it is rescaled
-    using a masked correlation-based linear normalization.
+    New generalized use passes a dictionary::
 
+        phase_retrieval_algorithm(
+            {"pos": pos, "neg": neg, "LH": LH, "LV": LV},
+            mask,
+            support,
+            recipe,
+        )
 
-    Returns
-    -------
-    retrieved_p, retrieved_n : np.ndarray or None
-        Final reconstruction for positive/negative helicity, if requested.
-    bsmask_p, bsmask_n : np.ndarray
-        Beamstop/floating-pixel masks used for full-coherence steps.
-    gamma_p, gamma_n : np.ndarray
-        Latest mutual-coherence estimates for each helicity. If no RL step was
-        performed for a helicity, this is the initial gamma estimate.
-    error : dict
-        Step-wise error information stored under ``error["steps"]``.
+    ``recipe["helicity"]`` lists the dictionary keys to reconstruct in order.
+    ``recipe["modes"]`` contains legacy spatial support-expansion factors. With
+    a 2-D support, ``[1, 2]`` assigns the original support to the first mode
+    and a 2x enlarged support to the second. An explicit 3-D support is used
+    directly. ``recipe["Startimage"]`` and ``recipe["Startgamma"]`` may refer to any
+    previous key. If ``normalize_startimage_between_holograms`` is true, a
+    masked linear intensity scaling is applied when a start image is reused
+    across different labels. Set it to false to copy the complex field exactly.
+
+    Dictionary results include ``supportmask_used``, the exact support passed
+    to each kernel stage after input cropping, binning, and mode expansion.
+    ``supportmask`` and ``mask_pixel`` use the same grid as the returned field.
+    ``recipe['roi']`` is in the supplied support's coordinates and is shifted
+    into the centered support crop of the final detector grid.
+
+    Context:
+    Ordered-stage entry point for simpler notebooks. Mixed-state physical fitting
+    and shared-gamma round scheduling use universal_phase_retrieval_algorithm.
     """
+    (
+        holograms,
+        mask_pixel,
+        supportmask,
+        phase_retrieval_recipe,
+        legacy_call,
+    ) = _normalize_phase_retrieval_inputs(
+        holograms,
+        neg=neg,
+        mask_pixel=mask_pixel,
+        supportmask=supportmask,
+        phase_retrieval_recipe=phase_retrieval_recipe,
+    )
 
-    # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
     user_supplied_output = False
     if phase_retrieval_recipe is not None:
@@ -488,186 +901,302 @@ def phase_retrieval_algorithm(
         recipe.update(phase_retrieval_recipe)
     if not user_supplied_output:
         recipe["output"] = _default_output_flags(recipe["helicity"])
+    _broadcast_recipe_scalars(recipe)
     _verify_valid_phase_retrieval_recipe(recipe)
 
-    pos_input = np.asarray(pos).copy()
-    neg_input = np.asarray(neg).copy()
+    labels = list(holograms.keys())
+    requested = list(dict.fromkeys(recipe["helicity"]))
+    missing = [label for label in requested if label not in holograms]
+    if missing:
+        raise ValueError(
+            f"Recipe requests hologram label(s) absent from input: {missing}"
+        )
+
+    mode_labels = recipe["modes"]
+    if mode_labels is not None:
+        if not isinstance(mode_labels, (list, tuple)) or not mode_labels:
+            raise ValueError("recipe['modes'] must be a non-empty list or tuple.")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float, np.number))
+            or not np.isfinite(value)
+            or value <= 0
+            for value in mode_labels
+        ):
+            raise ValueError("recipe['modes'] entries must be finite numbers > 0.")
+        Nmodes = len(mode_labels)
+    else:
+        Nmodes = recipe["Nmodes"]
+        mode_labels = [1] * int(Nmodes)
+    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
+        raise ValueError("recipe['Nmodes'] must be a positive integer.")
+    Nmodes = int(Nmodes)
+    if Nmodes <= 0:
+        raise ValueError("recipe['Nmodes'] must be a positive integer.")
+    crop = recipe["crop"]
+    if isinstance(crop, bool) or not isinstance(crop, (int, np.integer)):
+        raise ValueError("recipe['crop'] must be a non-negative integer.")
+    crop = int(crop)
+    if crop < 0:
+        raise ValueError("recipe['crop'] must be a non-negative integer.")
+    binning = recipe["binning"]
+    if isinstance(binning, bool) or not isinstance(binning, (int, np.integer)) or binning < 1:
+        raise ValueError("recipe['binning'] must be a positive integer (1 disables binning).")
+    binning = int(binning)
+
+    inputs = {label: np.asarray(value).copy() for label, value in holograms.items()}
+    first_shape = next(iter(inputs.values())).shape
+    if len(first_shape) != 2:
+        raise ValueError("All holograms must be 2D measured intensities.")
+    for label, value in inputs.items():
+        if value.ndim != 2:
+            raise ValueError(f"Hologram {label!r} must be 2D.")
+        if value.shape != first_shape:
+            raise ValueError("All holograms must have the same shape.")
+
     mask_pixel = np.asarray(mask_pixel)
     supportmask = np.asarray(supportmask)
+    shape_2d = first_shape
+    if mask_pixel.shape != shape_2d:
+        raise ValueError("mask_pixel must have the same shape as the holograms.")
+    if supportmask.ndim == 2:
+        if supportmask.shape != shape_2d:
+            raise ValueError("2D supportmask must match the hologram shape.")
+    elif supportmask.ndim == 3:
+        if supportmask.shape[1:] != shape_2d:
+            raise ValueError("3D supportmask must have shape (Nmodes, nx, ny).")
+        if supportmask.shape[0] not in {1, Nmodes}:
+            raise ValueError("supportmask first axis must be 1 or Nmodes.")
+    else:
+        raise ValueError("supportmask must be 2D or 3D.")
 
-    if pos_input.shape != neg_input.shape:
-        raise ValueError("pos and neg must have the same shape.")
-    if mask_pixel.shape != pos_input.shape:
-        raise ValueError("mask_pixel must have the same shape as pos/neg.")
-    if supportmask.shape != pos_input.shape:
-        raise ValueError("supportmask must have the same shape as pos/neg.")
+    source_shape = shape_2d
+    if 2 * crop >= min(source_shape):
+        raise ValueError("recipe['crop'] removes the complete detector image.")
+    cropped_shape = tuple(n - 2 * crop for n in source_shape)
+    target_shape = tuple(n // binning for n in cropped_shape)
+    if min(target_shape) < 1:
+        raise ValueError("recipe['binning'] is larger than the cropped hologram.")
+    trimmed_shape = tuple(n * binning for n in target_shape)
+    trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed_shape))
+    detector_origin = tuple(crop + o for o in trim_origin)
+    detector_slice = tuple(slice(o, o + t) for o, t in zip(detector_origin, trimmed_shape))
+    inputs = {
+        label: value[detector_slice].reshape(target_shape[0], binning,
+                                              target_shape[1], binning).sum(axis=(1, 3))
+        for label, value in inputs.items()
+    }
+    # One excluded source pixel excludes its entire detector bin.
+    mask_pixel = np.any(
+        mask_pixel[detector_slice].reshape(target_shape[0], binning,
+                                            target_shape[1], binning) != 0,
+        axis=(1, 3),
+    ).astype(np.uint8)
+    # Cropping detector pixels changes the object pixel scale. Binning alone
+    # leaves it unchanged because the detector extent in q stays the same.
+    if crop:
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        scale = np.asarray(source_shape, dtype=float) / np.asarray(cropped_shape)
+        offset = source_center - scale * output_center
+        modes = (supportmask[None] if supportmask.ndim == 2 else supportmask)
+        mapped = np.stack([
+            affine_transform(mode.astype(float), np.diag(scale), offset=offset,
+                             output_shape=target_shape, order=0,
+                             mode="constant", cval=0, prefilter=False)
+            for mode in modes
+        ])
+        supportmask = mapped[0] if supportmask.ndim == 2 else mapped
+    else:
+        support_origin = tuple((n - t) // 2 for n, t in zip(source_shape, target_shape))
+        support_slice = tuple(slice(o, o + t) for o, t in zip(support_origin, target_shape))
+        supportmask = supportmask[(...,) + support_slice]
+    shape_2d = target_shape
+    supportmask = (supportmask != 0).astype(np.uint8)
+    roi = recipe["roi"]
+    if roi is not None:
+        roi = np.asarray(roi)
+        if roi.shape != (4,) or not np.issubdtype(roi.dtype, np.integer):
+            raise ValueError("recipe['roi'] must contain four integer bounds [r0, r1, c0, c1].")
+        roi = roi.astype(int)
+        if not (0 <= roi[0] < roi[1] <= source_shape[0] and 0 <= roi[2] < roi[3] <= source_shape[1]):
+            raise ValueError("recipe['roi'] must be within the input supportmask.")
+        source_center = (np.asarray(source_shape) - 1) / 2
+        output_center = (np.asarray(target_shape) - 1) / 2
+        object_scale = np.asarray(cropped_shape, dtype=float) / np.asarray(source_shape)
+        for axis, bounds in enumerate(((0, 1), (2, 3))):
+            mapped = (roi[list(bounds)] - source_center[axis]) * object_scale[axis] + output_center[axis]
+            roi[list(bounds)] = np.rint(mapped).astype(int)
+            roi[list(bounds)] = np.clip(roi[list(bounds)], 0, target_shape[axis])
+        if roi[1] <= roi[0] or roi[3] <= roi[2]:
+            raise ValueError("recipe['roi'] falls outside the retrieved supportmask.")
 
-    # Baseline-subtract each helicity using the requested lower percentile,
-    # ignoring zeros because zeros usually represent invalid/masked pixels.
+    offset_spec = recipe["hologram_offset"]
+    if isinstance(offset_spec, dict):
+        unknown_offset_labels = set(offset_spec) - set(inputs)
+        if unknown_offset_labels:
+            raise ValueError(
+                "recipe['hologram_offset'] contains unknown label(s): "
+                f"{sorted(unknown_offset_labels)}"
+            )
+        offsets = {label: float(offset_spec.get(label, 0.0)) for label in inputs}
+    else:
+        offset = float(offset_spec)
+        offsets = {label: offset for label in inputs}
+    if not all(np.isfinite(value) for value in offsets.values()):
+        raise ValueError("recipe['hologram_offset'] values must be finite.")
+
+    data = {}
     vmin = recipe["hologram_intensity_cutoff_vmin"]
-    if vmin >= 0:
-        vals = pos_input[(pos_input != 0) & np.isfinite(pos_input)]
-        if vals.size:
-            mi = np.nanpercentile(vals, vmin)
-            pos_input = pos_input - mi
+    for label, intensity in inputs.items():
+        intensity = intensity - offsets[label] * binning**2
+        if vmin >= 0:
+            vals = intensity[(intensity != 0) & np.isfinite(intensity)]
+            if vals.size:
+                intensity = intensity - np.nanpercentile(vals, vmin)
+        intensity = np.where(np.isnan(intensity), 0, intensity)
+        bsmask = mask_pixel.copy()
+        bsmask[intensity <= 0] = 1
+        intensity = np.clip(intensity, 0, None)
+        data[label] = {
+            "amp": np.sqrt(intensity),
+            "input": intensity,
+            "bsmask": bsmask,
+        }
 
-        vals = neg_input[(neg_input != 0) & np.isfinite(neg_input)]
-        if vals.size:
-            mi = np.nanpercentile(vals, vmin)
-            neg_input = neg_input - mi
+    if recipe["recenter_modal_supports"] and supportmask.ndim == 2:
+        support_modes, mode_support_shifts = geometry.recenter_modal_supports(
+            supportmask, mode_labels, center=recipe["mode_support_center"],
+        )
+    else:
+        support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
+        mode_support_shifts = [(0, 0)] * Nmodes
+    retrieval_support = support_modes if Nmodes > 1 else support_modes[0]
 
-        
-    # Replace NaNs and negative intensities before taking square roots.
-    pos_input = np.where(np.isnan(pos_input), 0, pos_input)
-    neg_input = np.where(np.isnan(neg_input), 0, neg_input)
-
-    # Full-coherence masks inherit the external mask and mark nonpositive
-    # corrected intensities as unconstrained.
-    bsmask_p = mask_pixel.copy()
-    bsmask_n = mask_pixel.copy()
-    bsmask_p[pos_input <= 0] = 1
-    bsmask_n[neg_input <= 0] = 1
-
-
-    # clip positive intensities to zero to avoid NaNs in the square root.
-    pos_input = np.clip(pos_input, 0, None)
-    neg_input = np.clip(neg_input, 0, None)
-
-    pos_amp = np.sqrt(pos_input)
-    neg_amp = np.sqrt(neg_input)
-
-    # Initial Fourier-domain guess. The supportmask-based default follows the
-    # convention of the original implementation.
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
-        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+        Startimage_modes = np.empty_like(support_modes, dtype=np.complex128)
+        for mode_index in range(Nmodes):
+            Startimage_modes[mode_index] = np.fft.ifftshift(
+                np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
+            )
+        Startimage = _maybe_squeeze_modes(Startimage_modes, Nmodes)
     elif isinstance(first_startimage, np.ndarray):
-        Startimage = np.asarray(first_startimage).copy()
+        Startimage = _maybe_squeeze_modes(
+            _as_modes(
+                first_startimage,
+                Nmodes,
+                shape_2d,
+                "Startimage",
+                dtype=np.complex128,
+            ),
+            Nmodes,
+        )
     else:
         raise ValueError(
-            "The first Startimage entry cannot be 'pos' or 'neg' "
-            "because no reconstruction exists yet."
+            "The first Startimage entry cannot be a label because no "
+            "reconstruction exists yet."
         )
 
-    if Startimage.shape != pos_input.shape:
-        raise ValueError("Startimage must have the same shape as pos/neg.")
-
-    # Initial mutual-coherence estimate for RL-enabled steps.
     first_startgamma = recipe["Startgamma"][0]
-
     if first_startgamma is None:
-        Startgamma = np.ones(pos_input.shape, dtype=float) * 1e-6 * 2
-        Startgamma[pos_input.shape[0] // 2, pos_input.shape[1] // 2] = 0.7
-        # new startgamma
-        #xx,yy=np.meshgrid(pos_input.shape)-pos_input.shape[0]//2
-        #Startgamma = np.exp(-(xx*2+yy*2)/2)
+        Startgamma_modes = np.ones((Nmodes, *shape_2d), dtype=float) * 1e-6 * 2
+        Startgamma_modes[:, shape_2d[0] // 2, shape_2d[1] // 2] = 0.7
+        Startgamma = _maybe_squeeze_modes(Startgamma_modes, Nmodes)
     elif isinstance(first_startgamma, np.ndarray):
-        Startgamma = np.asarray(first_startgamma).copy()
+        Startgamma = _maybe_squeeze_modes(
+            _as_modes(
+                first_startgamma,
+                Nmodes,
+                shape_2d,
+                "Startgamma",
+                dtype=float,
+            ),
+            Nmodes,
+        )
     else:
         raise ValueError(
-            "The first Startgamma entry cannot be 'pos' or 'neg' "
-            "because no coherence estimate exists yet."
+            "The first Startgamma entry cannot be a label because no "
+            "coherence estimate exists yet."
         )
 
-
-    if Startgamma.shape != pos_input.shape:
-        raise ValueError("Startgamma must have the same shape as pos/neg.")
-
-
-    first_helicity = recipe["helicity"][0]
-
-    if first_helicity == "pos":
-        first_input = pos_input
-    else:
-        first_input = neg_input
-
-    valid_pix = (mask_pixel == 0) & (first_input > 0)
-
+    first_label = recipe["helicity"][0]
+    valid_pix = (mask_pixel == 0) & (data[first_label]["input"] > 0)
     if np.any(valid_pix):
-        x = np.sqrt(first_input[valid_pix]).ravel()
-        y = np.abs(Startimage[valid_pix]).ravel()
+        x = data[first_label]["amp"][valid_pix].ravel()
+        y = _modal_amplitude_numpy(Startimage)[valid_pix].ravel()
+        Startimage = _normalize_startimage_amplitude(
+            Startimage,
+            x,
+            y,
+        )
 
-        if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
-            res = stats.linregress(x, y)
-            if abs(res.slope) > 1e-12:
-                Startimage = Startimage / res.slope
-
-    data = {
-        "pos": {"amp": pos_amp, "input": pos_input, "bsmask": bsmask_p},
-        "neg": {"amp": neg_amp, "input": neg_input, "bsmask": bsmask_n},
-    }
-
-    retrieved = {"pos": None, "neg": None}
-    retrieved_fc = {"pos": None, "neg": None}
-    retrieved_pc = {"pos": None, "neg": None}
-    retrieved_gradient = {"pos": None, "neg": None}
-    gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+    retrieved = {label: None for label in labels}
+    retrieved_fc = {label: None for label in labels}
+    retrieved_pc = {label: None for label in labels}
+    retrieved_gradient = {label: None for label in labels}
+    gamma = {label: Startgamma.copy() for label in labels}
     pc_diffract = {}
-
-
     default_start_image = Startimage.copy()
     default_start_gamma = Startgamma.copy()
 
-
-    error = {"steps": [], "outputs": [], "outputs_by_helicity": {"pos": [], "neg": []}}
+    error = {
+        "steps": [],
+        "outputs": [],
+        "outputs_by_helicity": {label: [] for label in labels},
+    }
     start_time = time.time()
 
     for i, mode in enumerate(recipe["algorithm_list"]):
-        h = recipe["helicity"][i]
+        label = recipe["helicity"][i]
         Nit = recipe["number_iterations"][i]
         RL_it = int(recipe["RL_its"][i])
         RL_freq = recipe["RL_freqs"][i]
-
         use_RL = RL_it > 0 and RL_freq <= Nit
 
-        # Full-coherence steps use the measured amplitude and the beamstop mask.
-        # RL-enabled steps use the beamstop-filled intensity estimate and no
-        # Fourier-domain beamstop mask, matching the old partial-coherence logic.
         if use_RL:
-            if h not in pc_diffract:
-                source = retrieved_fc[h]
+            if label not in pc_diffract:
+                source = retrieved_fc[label]
                 if source is None:
-                    pc_input = data[h]["input"]
+                    pc_input = data[label]["input"]
                 else:
                     pc_input = (
-                        np.abs(source) ** 2 * data[h]["bsmask"]
-                        + data[h]["input"] * (1 - data[h]["bsmask"])
+                        _modal_intensity_numpy(source) * data[label]["bsmask"]
+                        + data[label]["input"] * (1 - data[label]["bsmask"])
                     )
-                pc_diffract[h] = np.sqrt(pc_input)
-            diffract = pc_diffract[h]
-            bsmask = np.zeros_like(data[h]["bsmask"])
+                pc_diffract[label] = np.sqrt(pc_input)
+            diffract = pc_diffract[label]
+            bsmask = np.zeros_like(data[label]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
                 default_start_gamma,
                 gamma,
                 name="Startgamma",
             )
-
         else:
-            diffract = data[h]["amp"]
-            bsmask = data[h]["bsmask"]
+            diffract = data[label]["amp"]
+            bsmask = data[label]["bsmask"]
             gamma_in = None
 
-
-        #### PHASE DEFINITION
         start_spec = recipe["Startimage"][i]
-
         Phase = _resolve_start_field(
             start_spec,
             default_start_image,
             retrieved,
             name="Startimage",
         )
-
-        if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
-            Phase = _scale_phase_between_helicities(
+        if (
+            recipe["normalize_startimage_between_holograms"]
+            and isinstance(start_spec, str)
+            and start_spec != label
+        ):
+            Phase = _scale_phase_between_holograms(
                 Phase,
-                source_helicity=start_spec,
-                target_helicity=h,
-                intensity_data={key: data[key]["input"] for key in ["pos", "neg"]},
-                bsmasks={key: data[key]["bsmask"] for key in ["pos", "neg"]},
+                source_label=start_spec,
+                target_label=label,
+                intensity_data={key: data[key]["input"] for key in labels},
+                bsmasks={key: data[key]["bsmask"] for key in labels},
             )
-            
 
         if mode == "gradient_descent":
             if use_RL:
@@ -675,38 +1204,60 @@ def phase_retrieval_algorithm(
                     "gradient_descent recipe stages do not support "
                     "Richardson-Lucy partial-coherence updates."
                 )
-
-            refined = gradient.refine_field_gradient(
-                Phase,
-                diffract,
-                supportmask=supportmask,
-                mask_pixel=bsmask,
-                n_steps=Nit,
-                learning_rate=make_beta_schedule(
-                    recipe["beta_mode"][i],
-                    Nit,
-                    recipe["beta_zero"][i],
-                ),
-                support_weight=make_alpha_schedule(
-                    recipe["alpha_mode"][i],
-                    Nit,
-                    recipe["alpha_zero"][i],
-                ),
-                loss_mode="amplitude",
-                support_projection=False,
-                fourier_projection=False,
-            )
-            result = refined.fields
-            if recipe["Fourier_last"][i]:
-                result = _apply_measured_amplitude(result, diffract, bsmask)
-            Error_diff = refined.diffraction_loss
-            Error_supp = refined.support_loss
+            if Nmodes == 1:
+                refined = gradient.refine_field_gradient(
+                    Phase,
+                    diffract,
+                    supportmask=retrieval_support,
+                    mask_pixel=bsmask,
+                    n_steps=Nit,
+                    learning_rate=make_beta_schedule(
+                        recipe["beta_mode"][i],
+                        Nit,
+                        recipe["beta_zero"][i],
+                    ),
+                    support_weight=make_alpha_schedule(
+                        recipe["alpha_mode"][i],
+                        Nit,
+                        recipe["alpha_zero"][i],
+                    ),
+                    loss_mode="amplitude",
+                    support_projection=False,
+                    fourier_projection=False,
+                )
+                result = refined.fields
+                if recipe["Fourier_last"][i]:
+                    result = _apply_measured_amplitude(result, diffract, bsmask)
+                Error_diff = refined.diffraction_loss
+                Error_supp = refined.support_loss
+                Error_loss = refined.loss
+            else:
+                result, Error_diff, Error_supp, Error_loss = _refine_modes_gradient(
+                    Phase,
+                    diffract,
+                    retrieval_support,
+                    bsmask,
+                    nmodes=Nmodes,
+                    image_shape=shape_2d,
+                    Nit=Nit,
+                    learning_rate=make_beta_schedule(
+                        recipe["beta_mode"][i],
+                        Nit,
+                        recipe["beta_zero"][i],
+                    ),
+                    support_weight=make_alpha_schedule(
+                        recipe["alpha_mode"][i],
+                        Nit,
+                        recipe["alpha_zero"][i],
+                    ),
+                    Fourier_last=recipe["Fourier_last"][i],
+                )
             gamma_out = None
-            extra_diagnostics = {"loss": refined.loss}
         else:
+            Error_loss = None
             result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
                 diffract=diffract,
-                mask=supportmask,
+                mask=retrieval_support,
                 mode=mode,
                 Nit=Nit,
                 beta_zero=recipe["beta_zero"][i],
@@ -724,28 +1275,25 @@ def phase_retrieval_algorithm(
                 RL_freq=RL_freq,
                 RL_it=RL_it,
                 TV_freq=recipe["TV_freqs"][i],
+                Nmodes=Nmodes,
             )
-            extra_diagnostics = {}
 
-        retrieved[h] = result
-
+        retrieved[label] = result
         if mode == "gradient_descent":
-            retrieved_gradient[h] = result
-            if retrieved_fc[h] is None:
-                retrieved_fc[h] = result
+            retrieved_gradient[label] = result
+            if retrieved_fc[label] is None:
+                retrieved_fc[label] = result
         elif use_RL:
-            retrieved_pc[h] = result
+            retrieved_pc[label] = result
         else:
-            retrieved_fc[h] = result
-            pc_diffract.pop(h, None)
-
-
+            retrieved_fc[label] = result
+            pc_diffract.pop(label, None)
         if gamma_out is not None:
-            gamma[h] = gamma_out
+            gamma[label] = gamma_out
 
         step_info = {
             "step": i,
-            "helicity": h,
+            "helicity": label,
             "mode": mode,
             "Nit": Nit,
             "RL_it": RL_it,
@@ -755,46 +1303,352 @@ def phase_retrieval_algorithm(
             "error": np.asarray(Error_diff),
             "support_error": np.asarray(Error_supp),
             "field_after": result.copy(),
-            **extra_diagnostics,
         }
+        if Error_loss is not None:
+            step_info["loss"] = np.asarray(Error_loss)
         error["steps"].append(step_info)
 
         if recipe["output"][i]:
             output_info = {
                 "step": i,
-                "helicity": h,
+                "helicity": label,
                 "mode": mode,
                 "coherence": step_info["coherence"],
                 "field": result.copy(),
             }
             error["outputs"].append(output_info)
-            error["outputs_by_helicity"][h].append(output_info)
+            error["outputs_by_helicity"][label].append(output_info)
 
         print(
-            f"Step {i}: helicity={h}, mode={mode}, Nit={Nit}, "
-            f"{'partial coherence' if use_RL else 'full coherence'}"
+            f"Step {i}: helicity={label}, mode={mode}, Nit={Nit}, "
+            f"{'partial coherence' if use_RL else 'full coherence'}, "
+            f"Nmodes={Nmodes}"
         )
 
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
 
-    error["latest"] = {
-        "full_coherence": retrieved_fc.copy(),
-        "partial_coherence": retrieved_pc.copy(),
-        "gradient_descent": retrieved_gradient.copy(),
+    result = {
+        "supportmask": retrieval_support.copy(),
+        "supportmask_used": retrieval_support.copy(),
+        "mode_support_shifts": mode_support_shifts,
+        "mask_pixel": mask_pixel.copy(),
+        "roi": roi,
+        "full_coherence": retrieved_fc,
+        "partial_coherence": retrieved_pc,
+        "gradient_descent": retrieved_gradient,
+        "bsmasks": {label: data[label]["bsmask"] for label in labels},
+        "gamma": gamma,
+        "error": error,
+        "recipe": recipe,
+        "hologram_offsets": offsets,
     }
 
-    return (
-        retrieved_fc["pos"],
-        retrieved_fc["neg"],
-        retrieved_pc["pos"],
-        retrieved_pc["neg"],
-        bsmask_p,
-        bsmask_n,
-        gamma["pos"],
-        gamma["neg"],
-        error,
+    return_format = recipe["return_format"]
+    if return_format == "legacy" or (return_format == "auto" and legacy_call):
+        return _legacy_tuple_from_result(result)
+    return result
+
+def PhaseRtrv_core_multimode(
+    diffract,
+    mask,
+    mode="ER",
+    Nit=500,
+    beta_zero=0.5,
+    beta_mode="const",
+    alpha_zero=0.0,
+    alpha_mode="const",
+    Phase=None,
+    seed=False,
+    plot_every=20,
+    bsmask=None,
+    real_object=False,
+    average_img=10,
+    Fourier_last=True,
+    gamma=None,
+    RL_freq=None,
+    RL_it=0,
+    TV_freq=2e9,
+    Nmodes=1,
+):
+    """
+    Unified single-mode / multimode full- and partial-coherence retrieval.
+
+    ``diffract`` is the measured 2D diffraction amplitude. For ``Nmodes > 1``,
+    ``Phase``, ``mask``, and ``gamma`` may be 3D arrays of shape
+    ``(Nmodes, nx, ny)``. The Fourier constraint is then applied to the
+    incoherent modal intensity sum:
+
+        ``diffract**2 ≈ sum_m |mode_m|**2``
+
+    or, with RL enabled,
+
+        ``diffract**2 ≈ sum_m convolution(|mode_m|**2, gamma_m)``.
+
+    For ``Nmodes == 1``, outputs are squeezed back to 2D to preserve the
+    previous API.
+
+    Context:
+    Single-observation multimode kernel. All modes contribute to the detector intensity, but
+    each has its own support. State-independent secondary-mode projection is a
+    responsibility of the universal driver.
+    """
+    diffract = np.asarray(diffract)
+    mask = np.asarray(mask)
+    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
+        raise ValueError("Nmodes must be a positive integer.")
+    Nmodes = int(Nmodes)
+    if Nmodes <= 0:
+        raise ValueError("Nmodes must be a positive integer.")
+    if diffract.ndim != 2:
+        raise ValueError("diffract must be a 2D measured diffraction amplitude.")
+    if Nit <= 0:
+        raise ValueError("Nit must be > 0.")
+    if average_img <= 0:
+        raise ValueError("average_img must be > 0.")
+    if plot_every <= 0:
+        raise ValueError("plot_every must be > 0.")
+    if RL_freq is not None and RL_freq <= 0:
+        raise ValueError("RL_freq must be > 0.")
+    if RL_it < 0:
+        raise ValueError("RL_it must be >= 0.")
+    if TV_freq <= 0:
+        raise ValueError("TV_freq must be > 0.")
+
+    l, n = diffract.shape
+    shape_2d = (l, n)
+
+    mask_modes = _as_modes(mask, Nmodes, shape_2d, "mask")
+
+    if bsmask is None:
+        bsmask = np.zeros(shape_2d, dtype=np.float32)
+    else:
+        bsmask = np.asarray(bsmask)
+        if bsmask.shape != shape_2d:
+            raise ValueError("bsmask must have same 2D shape as diffract.")
+
+    proj_fn = PROJECTIONS.get(mode)
+    if proj_fn is None:
+        raise ValueError(f"Invalid mode '{mode}'. Allowed: {sorted(PROJECTIONS)}")
+
+    Beta = make_beta_schedule(beta_mode, Nit, beta_zero)
+    Alpha = make_alpha_schedule(alpha_mode, Nit, alpha_zero)
+
+    if seed:
+        np.random.seed(0)
+
+    if Phase is None:
+        phase_random = np.exp(
+            1j * np.random.rand(Nmodes, l, n) * np.pi * 2
+        )
+        Phase = (
+            (1 - bsmask)[None, :, :]
+            * diffract[None, :, :]
+            / np.sqrt(Nmodes)
+            * phase_random
+            + phase_random * bsmask[None, :, :]
+        )
+
+    phase_modes = _as_modes(Phase, Nmodes, shape_2d, "Phase", dtype=np.complex128)
+
+    if RL_freq is None:
+        RL_freq = Nit + 1
+
+    use_RL = gamma is not None and RL_it > 0 and RL_freq <= Nit
+
+    if use_RL:
+        gamma_modes = _as_modes(gamma, Nmodes, shape_2d, "gamma", dtype=np.complex128)
+        gamma_modes = np.fft.fftshift(gamma_modes, axes=(-2, -1))
+    else:
+        gamma_modes = None
+
+    # Shift to corner convention. Modes are shifted only over the spatial axes.
+    bsmask = np.fft.fftshift(bsmask)
+    mask_modes = np.fft.fftshift(mask_modes, axes=(-2, -1))
+    diffract = np.fft.fftshift(diffract)
+    guess = np.fft.fftshift(phase_modes, axes=(-2, -1))
+
+    BSmask_cp = xp.asarray(bsmask).astype(xp.bool_)
+    obs = ~BSmask_cp
+
+    guess_cp = xp.asarray(guess)
+    mask_cp = xp.asarray(mask_modes)
+    diffract_cp = xp.asarray(diffract)
+
+    if use_RL:
+        gamma_cp = xp.asarray(gamma_modes)
+        for m in range(Nmodes):
+            gamma_sum = xp.sum(gamma_cp[m])
+            if not bool(xp.isfinite(gamma_sum)) or bool(xp.abs(gamma_sum) == 0):
+                raise ValueError(
+                    f"gamma mode {m} must have a finite, non-zero sum."
+                )
+            gamma_cp[m] /= gamma_sum
+    else:
+        gamma_cp = None
+
+    convolved = _modal_convolved_intensities(guess_cp, gamma_cp, Nmodes)
+    prev = xp.zeros_like(guess_cp, dtype=xp.complex128)
+    initial_constrained = _apply_modal_fourier_constraint(
+        guess_cp,
+        convolved,
+        diffract_cp,
+        obs,
+        BSmask_cp,
     )
+    for m in range(Nmodes):
+        prev[m] = fft2(initial_constrained[m])
+
+    if not use_RL:
+        guess_cp = initial_constrained
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+
+    Error_diffr_list = []
+    Error_supp_list = []
+
+    n_best = min(average_img, Nit)
+    Best_guess = xp.zeros((n_best, Nmodes, l, n), dtype=xp.complex128)
+    Best_error = xp.full((n_best,), xp.inf, dtype=xp.float64)
+
+    if use_RL:
+        Best_gamma = xp.zeros((n_best, Nmodes, l, n), dtype=xp.complex128)
+
+    start_best_at = max(0, Nit - n_best * 2)
+
+    for s in range(Nit):
+        beta = float(Beta[s])
+        alpha = float(Alpha[s])
+
+        # Apply one measured-intensity constraint jointly to all modes.
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+        guess_cp = _apply_modal_fourier_constraint(
+            guess_cp,
+            convolved,
+            diffract_cp,
+            obs,
+            BSmask_cp,
+        )
+
+        new_guess = xp.zeros_like(guess_cp)
+
+        # Update every mode independently in support space.
+        for m in range(Nmodes):
+            inv = fft2(guess_cp[m])
+
+            if (s % TV_freq == 0) and alpha > 0:
+                inv = inv + alpha * TV(inv, 1)
+
+            inv = proj_fn(inv, prev[m], mask_cp[m], beta, s, Nit)
+            prev[m] = inv.copy()
+            new_guess[m] = ifft2(inv)
+
+        # Update partial-coherence kernels only at the requested RL interval.
+        if use_RL and s > 2 and (s % RL_freq == 0):
+            for m in range(Nmodes):
+                convolved_new_m = ifft2(
+                    fft2(xp.abs(new_guess[m]) ** 2) * fft2(gamma_cp[m])
+                )
+                Idelta = 2 * xp.abs(new_guess[m]) ** 2 - xp.abs(guess_cp[m]) ** 2
+                I_exp = obs * (xp.abs(diffract_cp) ** 2) + convolved_new_m * BSmask_cp
+                gamma_cp[m] = RL(
+                    Idelta=Idelta,
+                    Iexp=I_exp,
+                    gamma_cp=gamma_cp[m],
+                    RL_it=RL_it,
+                )
+
+        guess_cp = new_guess
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+
+        total_intensity = xp.sum(convolved, axis=0)
+        if use_RL:
+            err_guess = obs * total_intensity
+            err_target = obs * xp.abs(diffract_cp) ** 2
+        else:
+            err_guess = obs * xp.sqrt(total_intensity)
+            err_target = obs * diffract_cp
+
+        # Record errors and retain the best late-iteration candidates.
+        if s <= 2 or (s % plot_every == 0) or (s >= start_best_at):
+            err = Error_diffract_cp(err_guess, err_target)
+            Error_diffr_list.append(err)
+
+            if s >= start_best_at:
+                j = int(xp.argmax(Best_error).item())
+                if err < Best_error[j]:
+                    Best_error[j] = err
+                    Best_guess[j, :, :, :] = guess_cp
+
+                    if use_RL:
+                        Best_gamma[j, :, :, :] = gamma_cp
+
+    guess_cp = xp.mean(Best_guess, axis=0)
+
+    if use_RL:
+        gamma_cp = xp.mean(Best_gamma, axis=0)
+
+    if Fourier_last:
+        convolved = _modal_convolved_intensities(
+            guess_cp,
+            gamma_cp,
+            Nmodes,
+        )
+        guess_cp = _apply_modal_fourier_constraint(
+            guess_cp,
+            convolved,
+            diffract_cp,
+            obs,
+            BSmask_cp,
+        )
+
+    guess = to_numpy(guess_cp, xp)
+    guess = np.fft.ifftshift(guess, axes=(-2, -1))
+    guess = _maybe_squeeze_modes(guess, Nmodes)
+
+    if use_RL:
+        gamma = to_numpy(gamma_cp, xp)
+        gamma = np.fft.ifftshift(gamma, axes=(-2, -1))
+        gamma = _maybe_squeeze_modes(gamma, Nmodes)
+    else:
+        gamma = None
+
+    return guess, Error_diffr_list, Error_supp_list, gamma
+
+def PhaseRtrv_core(*args, Nmodes=1, **kwargs):
+    """
+    Dispatch to the fast single-mode or full multimode phase-retrieval kernel.
+
+    ``Nmodes == 1`` uses :func:`PhaseRtrv_core_single`, the 2D implementation
+    from the standard core. ``Nmodes > 1`` uses
+    :func:`PhaseRtrv_core_multimode`, where the Fourier constraint is applied to
+    the summed modal intensity.
+
+    Context:
+    Public kernel dispatcher: select single/multimode implementation through Nmodes while
+    preserving the shared call contract expected by observation workers.
+    """
+    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
+        raise ValueError("Nmodes must be a positive integer.")
+    Nmodes = int(Nmodes)
+    if Nmodes <= 0:
+        raise ValueError("Nmodes must be a positive integer.")
+    if Nmodes == 1:
+        return PhaseRtrv_core_single(*args, **kwargs)
+    return PhaseRtrv_core_multimode(*args, Nmodes=Nmodes, **kwargs)
+
+
 
 def plot_phase_retrieval_errors(error, phase_retrieval_recipe=None, ax=None):
     """
@@ -1068,7 +1922,7 @@ PROJECTIONS = {
 
 # ----------------------------
 # Other Subprocesses
-# ---------------------------- 
+# ----------------------------
 def RL(Idelta, Iexp, gamma_cp, RL_it):
     """
     Richardson–Lucy update loop (CuPy).
@@ -1109,7 +1963,7 @@ def RL(Idelta, Iexp, gamma_cp, RL_it):
 # ############################################################
 
 
-def PhaseRtrv_core(
+def PhaseRtrv_core_single(
     diffract,
     mask,
     mode="ER",
@@ -1333,7 +2187,7 @@ def PhaseRtrv_core(
         guess = to_numpy(guess_cp, xp)
 
         return np.fft.ifftshift(guess), Error_diffr_list, Error_supp_list, None
-    
+
 
 #############################################################
 #    TOTAL VARIATION FUNCTION
@@ -1429,10 +2283,10 @@ def W(npx,npy,alpha=0.1):
     '''
     Simple generator of a gaussian, used for filtering in OSS
     INPUT:  npx,npy: number of pixels on the image
-            alpha: width of the gaussian 
-            
+            alpha: width of the gaussian
+
     OUTPUT: gaussian matrix
-    
+
     --------
     author: RB 2020
     '''
@@ -1446,11 +2300,11 @@ def W(npx,npy,alpha=0.1):
 
 def Error_diffract_cp(guess, diffract):
     '''
-    Error on the diffraction attern of retrieved data. 
-    INPUT:  guess, diffract: retrieved and experimental diffraction patterns 
-            
+    Error on the diffraction attern of retrieved data.
+    INPUT:  guess, diffract: retrieved and experimental diffraction patterns
+
     OUTPUT: Error between the two
-    
+
     --------
     author: RB 2020
     '''
@@ -5274,22 +6128,14 @@ def _run_update_schedule(
     if (recipe["Nmodes"] > 1 and phase_retrieval_kernel is None
             and recipe.get("observation_workers", 1) == 1
             and not has_rl and not recipe.get("partial_coherence", False)):
-        try:
-            from . import phase_retrieval_core_multienergy_multimode as modal
-        except ImportError:
-            import phase_retrieval_core_multienergy_multimode as modal
-        result = modal._run_energy_update_schedule(
+        result = _run_modal_energy_update_schedule(
             field, amplitude, supportmask, bsmask, schedule, recipe,
             nmodes=recipe["Nmodes"], image_shape=amplitude.shape,
         )
         return (*result, gamma) if return_gamma else result
     if recipe["Nmodes"] > 1:
         if phase_retrieval_kernel is None:
-            try:
-                from . import phase_retrieval_core_unified as unified
-            except ImportError:
-                import phase_retrieval_core_unified as unified
-            phase_retrieval_kernel = unified.PhaseRtrv_core
+            phase_retrieval_kernel = PhaseRtrv_core
     if phase_retrieval_kernel is None:
         phase_retrieval_kernel = PhaseRtrv_core
     stage_results = []
@@ -5519,11 +6365,7 @@ def _initialize_physical_modal_fields(supportmask, amplitudes, intensities,
             if np.isfinite(scale) and scale > 1e-12:
                 fields[observation] /= scale
         return fields
-    try:
-        from . import phase_retrieval_core_multienergy_multimode as modal
-    except ImportError:
-        import phase_retrieval_core_multienergy_multimode as modal
-    return modal._initialize_modal_fields(
+    return _initialize_modal_fields(
         supportmask, amplitudes, intensities, mask_stack, recipe["Nmodes"],
         recipe["mode_initialization_seed"],
     )
@@ -5792,11 +6634,7 @@ def general_phase_retrieval_algorithm(
                 supportmask, mode_factors,
             )
         else:
-            try:
-                from . import phase_retrieval_core_unified as unified
-            except ImportError:
-                import phase_retrieval_core_unified as unified
-            modal_supportmask = unified._mode_supports(
+            modal_supportmask = _mode_supports(
                 supportmask, mode_factors, (nx, ny),
             )
     else:
@@ -6691,12 +7529,6 @@ def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
     spectral driver on that grid. Its low-rank projection acts independently
     per mode; it does not assign magnetic meaning to a secondary mode.
     """
-    try:
-        from . import phase_retrieval_core_multienergy_multimode as modal
-        from . import phase_retrieval_core_unified as unified
-    except ImportError:
-        import phase_retrieval_core_multienergy_multimode as modal
-        import phase_retrieval_core_unified as unified
     factors = recipe["modes"] if recipe["modes"] is not None else [1] * recipe["Nmodes"]
     if not isinstance(factors, (list, tuple)) or not factors or any(
             isinstance(v, bool) or not isinstance(v, (int, float, np.number))
@@ -6711,7 +7543,7 @@ def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
         supports = _component_centered_modal_supports(support, factors)
         shifts = [(0, 0)] * len(factors)
     else:
-        supports = unified._mode_supports(support, factors, images.shape[-2:])
+        supports = _mode_supports(support, factors, images.shape[-2:])
         shifts = [(0, 0)] * len(factors)
     if starts is None:
         amplitudes, intensities, _ = _prepare_energy_amplitudes(
@@ -6721,12 +7553,12 @@ def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
         if local["startimage_radial_normalization"]:
             starts = np.stack([_radially_normalize_startimage(f, y, m)
                                for f, y, m in zip(starts, images, masks)])
-    translated = modal.default_multi_energy_phase_retrieval_recipe()
+    translated = default_multi_energy_multimode_phase_retrieval_recipe()
     translated.update({k: v for k, v in _energy_driver_recipe(local).items() if k in translated})
     translated.update(Nmodes=len(factors), mode_initialization_seed=local["mode_initialization_seed"],
                       crop=0, binning=1, roi=None, material_mask=None,
                       material_thickness=_recipe_material_thickness(local, geom))
-    result = modal.multi_energy_phase_retrieval_algorithm(
+    result = multi_energy_multimode_phase_retrieval_algorithm(
         images, mask, supports, multi_energy_recipe=translated, start_fields=starts,
         phase_retrieval_kernel=phase_retrieval_kernel)
     fields, warmup, components, masks, errors = result
@@ -6853,10 +7685,6 @@ def project_fourier_fields_universal(
             )
         projector = project_fourier_fields_multi_energy
         if fields.ndim == 4:
-            try:
-                from .phase_retrieval_core_multienergy_multimode import project_fourier_fields_multi_energy_multimode
-            except ImportError:
-                from phase_retrieval_core_multienergy_multimode import project_fourier_fields_multi_energy_multimode
             projector = project_fourier_fields_multi_energy_multimode
         result = projector(
             fields,
@@ -7039,3 +7867,636 @@ def universal_phase_retrieval_algorithm(
     errors["observation_metadata"] = metadata_summary
     errors["universal_settings"] = recipe.copy()
     return fields, fieldswarmup,components, bsmasks, errors
+
+
+
+# Public names used by notebooks that construct explicit modal supports.
+mode_supports = _mode_supports
+multimode_phase_retrieval_kernel = PhaseRtrv_core
+
+
+# Multimode spectral projections and retrieval use the same local kernels.
+def _validate_nmodes(nmodes):
+    """Validate and return a strictly positive integer mode count."""
+    if isinstance(nmodes, bool) or not isinstance(nmodes, (int, np.integer)):
+        raise ValueError("Nmodes must be a positive integer.")
+    nmodes = int(nmodes)
+    if nmodes <= 0:
+        raise ValueError("Nmodes must be a positive integer.")
+    return nmodes
+
+def _as_energy_mode_stack(fields, name="fields"):
+    """
+    Return fields as ``(nE, Nmodes, nx, ny)`` and report whether modes squeezed.
+    """
+    fields = np.asarray(fields)
+    if fields.ndim == 3:
+        return fields[:, None, :, :], True
+    if fields.ndim == 4:
+        return fields, False
+    raise ValueError(
+        f"{name} must have shape (nE, nx, ny) or (nE, Nmodes, nx, ny)."
+    )
+
+def _maybe_squeeze_energy_modes(fields, nmodes):
+    """Remove the singleton mode axis when reconstructing exactly one mode."""
+    if nmodes == 1 and np.asarray(fields).ndim == 4:
+        return fields[:, 0]
+    return fields
+
+def _modal_amplitude(fields):
+    """Return the square root of summed modal intensity at every energy."""
+    fields, _ = _as_energy_mode_stack(fields)
+    return np.sqrt(np.sum(np.abs(fields) ** 2, axis=1))
+
+def project_fourier_fields_multi_energy_multimode(
+    phase_stack,
+    projection_model="svd",
+    rank=1,
+    static_mode="mean",
+    weights=None,
+    relaxation=1.0,
+    log_floor=1e-12,
+    spectral_constraint="free",
+    energy_values=None,
+    known_beta_spectrum=None,
+    known_delta_spectrum=None,
+    absorption_part="real",
+    kk_sign=1.0,
+    kk_subtract_baseline=True,
+    kk_normalize_input=False,
+    known_beta_normalization="none",
+    fit_known_beta_scale=True,
+    fit_known_beta_offset=True,
+    projection_supportmask=None,
+    material_thickness=None,
+    fit_material_thickness=False,
+    return_components=False,
+):
+    """
+    Apply the selected cross-energy projection independently to each mode.
+
+    Mode indices must represent corresponding incoherent modes across energy.
+    The reconstruction driver preserves this ordering by propagating each
+    energy's modal fields between joint iterations.
+    """
+    modal_fields, squeezed = _as_energy_mode_stack(
+        phase_stack, name="phase_stack"
+    )
+    n_energy, nmodes, nx, ny = modal_fields.shape
+    if fit_material_thickness and nmodes > 1:
+        raise ValueError("Fitting one shared thickness across multiple modes is not supported; provide a fixed material map.")
+    if projection_supportmask is not None:
+        projection_supportmask = np.asarray(projection_supportmask) != 0
+        if projection_supportmask.ndim == 2:
+            if projection_supportmask.shape != (nx, ny):
+                raise ValueError(
+                    "projection_supportmask must have shape (nx, ny)."
+                )
+        elif projection_supportmask.ndim == 3:
+            if projection_supportmask.shape[1:] != (nx, ny):
+                raise ValueError(
+                    "modal projection_supportmask must have shape "
+                    "(Nmodes, nx, ny)."
+                )
+            if projection_supportmask.shape[0] not in {1, nmodes}:
+                raise ValueError(
+                    "projection_supportmask first axis must be 1 or Nmodes."
+                )
+        else:
+            raise ValueError("projection_supportmask must be 2D or 3D.")
+    projected = np.empty_like(modal_fields, dtype=np.complex128)
+    mode_components = []
+
+    for mode_index in range(nmodes):
+        if projection_supportmask is None or projection_supportmask.ndim == 2:
+            mode_projection_supportmask = projection_supportmask
+        elif projection_supportmask.shape[0] == 1:
+            mode_projection_supportmask = projection_supportmask[0]
+        else:
+            mode_projection_supportmask = projection_supportmask[mode_index]
+        result = project_fourier_fields_multi_energy(
+            modal_fields[:, mode_index],
+            projection_model=projection_model,
+            rank=rank,
+            static_mode=static_mode,
+            weights=weights,
+            relaxation=relaxation,
+            log_floor=log_floor,
+            spectral_constraint=spectral_constraint,
+            energy_values=energy_values,
+            known_beta_spectrum=known_beta_spectrum,
+            known_delta_spectrum=known_delta_spectrum,
+            absorption_part=absorption_part,
+            kk_sign=kk_sign,
+            kk_subtract_baseline=kk_subtract_baseline,
+            kk_normalize_input=kk_normalize_input,
+            known_beta_normalization=known_beta_normalization,
+            fit_known_beta_scale=fit_known_beta_scale,
+            fit_known_beta_offset=fit_known_beta_offset,
+            projection_supportmask=mode_projection_supportmask,
+            material_thickness=material_thickness,
+            fit_material_thickness=fit_material_thickness,
+            return_components=return_components,
+        )
+        if return_components:
+            projected[:, mode_index], components = result
+            mode_components.append(components)
+        else:
+            projected[:, mode_index] = result
+
+    output = projected[:, 0] if squeezed else projected
+    if not return_components:
+        return output
+
+    components = {
+        "projection_model": str(projection_model).lower(),
+        "Nmodes": nmodes,
+        "mode_components": mode_components,
+    }
+    if nmodes == 1 and mode_components:
+        components.update(mode_components[0])
+        components["Nmodes"] = 1
+        components["mode_components"] = mode_components
+    return output, components
+
+def default_multi_energy_multimode_phase_retrieval_recipe():
+    """Return defaults for joint multi-energy, multimode reconstruction."""
+    recipe = default_multi_energy_phase_retrieval_recipe()
+    recipe.update(
+        {
+            "Nmodes": 1,
+            "mode_initialization_seed": 0,
+        }
+    )
+    return recipe
+
+def _verify_multi_energy_multimode_recipe(recipe, n_energy):
+    """Validate multi-energy settings plus multimode-specific parameters."""
+    _verify_multi_energy_recipe(recipe, n_energy)
+    _validate_nmodes(recipe["Nmodes"])
+    seed = recipe["mode_initialization_seed"]
+    if seed is not None and (
+        isinstance(seed, bool) or not isinstance(seed, (int, np.integer))
+    ):
+        raise ValueError("mode_initialization_seed must be an integer or None.")
+
+def _initialize_modal_fields(
+    supportmask,
+    amplitudes,
+    intensities,
+    mask_stack,
+    nmodes,
+    random_seed,
+):
+    """Create normalized, nondegenerate modal fields at every energy."""
+    n_energy, nx, ny = amplitudes.shape
+    support_modes = _as_modes(
+        supportmask,
+        nmodes,
+        (nx, ny),
+        "supportmask",
+        dtype=np.asarray(supportmask).dtype,
+    )
+    base_modes = np.empty((nmodes, nx, ny), dtype=np.complex128)
+    for mode_index in range(nmodes):
+        base_modes[mode_index] = np.fft.ifftshift(
+            np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
+        )
+
+    if nmodes > 1:
+        rng = np.random.default_rng(random_seed)
+        modal_phase = np.exp(
+            1j
+            * rng.uniform(
+                -np.pi,
+                np.pi,
+                (nmodes, nx, ny),
+            )
+        )
+        return (
+            amplitudes[:, None, :, :]
+            * modal_phase[None, :, :, :]
+            / np.sqrt(nmodes)
+        )
+
+    fields = np.repeat(base_modes[None, :, :, :], n_energy, axis=0)
+
+    for energy_index in range(n_energy):
+        valid = (
+            (mask_stack[energy_index] == 0)
+            & (intensities[energy_index] > 0)
+        )
+        if not np.any(valid):
+            continue
+        measured = amplitudes[energy_index][valid].ravel()
+        current = np.sqrt(
+            np.sum(np.abs(fields[energy_index]) ** 2, axis=0)
+        )[valid].ravel()
+        if (
+            measured.size >= 2
+            and np.ptp(measured) > 0
+            and np.ptp(current) > 0
+        ):
+            fit = stats.linregress(measured, current)
+            if abs(fit.slope) > 1e-12:
+                fields[energy_index] /= fit.slope
+
+    return fields
+
+def _apply_measured_modal_amplitude(fields, amplitudes, bsmasks):
+    """Apply each measured amplitude to the summed modal intensity."""
+    constrained = fields.copy()
+    total_amplitude = np.sqrt(np.sum(np.abs(constrained) ** 2, axis=1))
+    safe_amplitude = np.where(total_amplitude > 1e-30, total_amplitude, 1e-30)
+    factor = amplitudes / safe_amplitude
+    for energy_index in range(fields.shape[0]):
+        observed = bsmasks[energy_index] == 0
+        for mode_index in range(fields.shape[1]):
+            constrained[energy_index, mode_index, observed] *= factor[
+                energy_index, observed
+            ]
+    return constrained
+
+def _run_modal_energy_update_schedule(
+    field,
+    amplitude,
+    supportmask,
+    bsmask,
+    schedule,
+    recipe,
+    nmodes,
+    image_shape,
+    phase_retrieval_kernel=None,
+):
+    """Run all scheduled multimode updates sequentially for one energy."""
+    stage_results = []
+    for stage_index, stage in enumerate(schedule):
+        mode = stage["mode"]
+        Nit = stage["Nit"]
+        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+            raise ValueError(
+                "This energy schedule does not support partial-coherence RL "
+                "updates because no coherence kernel is supplied."
+            )
+        if mode == "gradient_descent":
+            result, err_d, err_s, _ = _refine_modes_gradient(
+                field,
+                amplitude,
+                supportmask,
+                bsmask,
+                nmodes=nmodes,
+                image_shape=image_shape,
+                Nit=Nit,
+                learning_rate=make_beta_schedule(
+                    stage["beta_mode"],
+                    Nit,
+                    stage["beta_zero"],
+                ),
+                support_weight=make_alpha_schedule(
+                    stage["alpha_mode"],
+                    Nit,
+                    stage["alpha_zero"],
+                ),
+                Fourier_last=recipe["Fourier_last"],
+            )
+        else:
+            result, err_d, err_s, _ = (phase_retrieval_kernel or PhaseRtrv_core_multimode)(
+                diffract=amplitude,
+                mask=supportmask,
+                mode=mode,
+                Nit=Nit,
+                beta_zero=stage["beta_zero"],
+                beta_mode=stage["beta_mode"],
+                alpha_zero=stage["alpha_zero"],
+                alpha_mode=stage["alpha_mode"],
+                Phase=field,
+                seed=False,
+                plot_every=recipe["plot_every"],
+                bsmask=bsmask,
+                real_object=False,
+                average_img=min(max(1, recipe["average_img"]), Nit),
+                Fourier_last=recipe["Fourier_last"],
+                gamma=None,
+                RL_freq=stage["RL_freq"],
+                RL_it=stage["RL_it"],
+                TV_freq=stage["TV_freq"],
+                Nmodes=nmodes,
+            )
+        field = _as_modes(
+            result,
+            nmodes,
+            image_shape,
+            "retrieved fields",
+            dtype=np.complex128,
+        )
+        stage_results.append(
+            {
+                "schedule_stage": stage_index,
+                "mode": mode,
+                "Nit": Nit,
+                "beta_zero": stage["beta_zero"],
+                "beta_mode": stage["beta_mode"],
+                "alpha_zero": stage["alpha_zero"],
+                "alpha_mode": stage["alpha_mode"],
+                "TV_freq": stage["TV_freq"],
+                "RL_it": stage["RL_it"],
+                "RL_freq": stage["RL_freq"],
+                "Nmodes": nmodes,
+                "error": np.asarray(err_d),
+                "support_error": np.asarray(err_s),
+            }
+        )
+    return field, stage_results
+
+def multi_energy_multimode_phase_retrieval_algorithm(
+    holograms,
+    mask_pixel,
+    supportmask,
+    multi_energy_recipe=None,
+    start_fields=None,
+    phase_retrieval_kernel=None,
+):
+    """
+    Jointly reconstruct multiple energies and incoherent modes.
+
+    Parameters are the same as in
+    ``multi_energy_phase_retrieval_algorithm``
+    with two additions in the recipe:
+
+    ``Nmodes``
+        Number of incoherent modes. ``Nmodes=1`` returns ``(nE, nx, ny)``.
+        Larger values return ``(nE, Nmodes, nx, ny)``.
+    ``mode_initialization_seed``
+        Seed used to break modal degeneracy in the default initialization.
+
+    ``inner_mode`` / ``inner_Nit``
+        Parallel scalar-or-list settings defining the update stages performed
+        at every energy during each outer iteration. Stage-specific beta,
+        alpha, and TV controls use the same convention as the single-mode
+        multi-energy driver.
+
+    Returns
+    -------
+    retrieved : ndarray
+        Shape ``(nE, nx, ny)`` for one mode or
+        ``(nE, Nmodes, nx, ny)`` for multiple modes.
+    fieldswarmup : ndarray
+        Fields immediately after the independent warmup schedule, with the
+        same shape convention as ``retrieved``.
+    components : dict
+        Per-mode cross-energy projection results under ``mode_components``.
+    bsmasks : ndarray
+        Energy-dependent invalid-pixel masks with shape ``(nE, nx, ny)``.
+    errors : dict
+        Update and projection diagnostics.
+    """
+    recipe = default_multi_energy_multimode_phase_retrieval_recipe()
+    if multi_energy_recipe is not None:
+        if not isinstance(multi_energy_recipe, dict):
+            raise TypeError("multi_energy_recipe must be a dictionary.")
+        unknown_keys = set(multi_energy_recipe) - set(recipe)
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown multi-energy multimode recipe key(s): "
+                f"{sorted(unknown_keys)}"
+            )
+        recipe.update(multi_energy_recipe)
+
+    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
+        holograms, mask_pixel, supportmask, recipe, start_fields
+    )
+    holograms = _as_energy_stack(holograms)
+    n_energy, nx, ny = holograms.shape
+    nmodes = _validate_nmodes(recipe["Nmodes"])
+    _verify_multi_energy_multimode_recipe(recipe, n_energy)
+    if nmodes > 1 and recipe["fit_material_thickness"]:
+        raise ValueError("Fitting thickness requires Nmodes=1; a fixed material map works for multiple modes.")
+    material_thickness = None
+    if (recipe["material_mask"] is not None or
+            recipe["material_thickness"] is not None or
+            recipe["fit_material_thickness"]):
+        material_thickness = _recipe_material_thickness(
+            recipe, input_geometry,
+        )
+        material_thickness = np.fft.fftshift(material_thickness)
+
+    supportmask = np.asarray(supportmask)
+    if supportmask.ndim == 2:
+        if supportmask.shape != (nx, ny):
+            raise ValueError("supportmask must have shape (nx, ny).")
+    elif supportmask.ndim == 3:
+        if supportmask.shape[1:] != (nx, ny):
+            raise ValueError("modal supportmask must have shape (Nmodes, nx, ny).")
+        if supportmask.shape[0] not in {1, nmodes}:
+            raise ValueError("supportmask first axis must be 1 or Nmodes.")
+    else:
+        raise ValueError("supportmask must be 2D or 3D.")
+    projection_supportmask = (
+        np.fft.fftshift(supportmask, axes=(-2, -1))
+        if (
+            recipe["projection_constraints_inside_support_only"]
+            or recipe["physical_constraints_inside_support_only"]
+        )
+        else None
+    )
+
+    amplitudes, intensities, bsmasks = _prepare_energy_amplitudes(
+        holograms,
+        mask_pixel,
+        hologram_intensity_cutoff_vmin=recipe[
+            "hologram_intensity_cutoff_vmin"
+        ],
+    )
+    mask_stack = _as_energy_mask(
+        mask_pixel, nE=n_energy, image_shape=(nx, ny)
+    )
+
+    if start_fields is None:
+        fields = _initialize_modal_fields(
+            supportmask,
+            amplitudes,
+            intensities,
+            mask_stack,
+            nmodes,
+            recipe["mode_initialization_seed"],
+        )
+    else:
+        fields, _ = _as_energy_mode_stack(start_fields, name="start_fields")
+        fields = fields.astype(np.complex128, copy=True)
+        if fields.shape != (n_energy, nmodes, nx, ny):
+            raise ValueError(
+                "start_fields must have shape (nE, nx, ny) for Nmodes=1 or "
+                "(nE, Nmodes, nx, ny)."
+            )
+
+    rng = np.random.default_rng(recipe["random_seed"])
+    errors = {
+        "energy_steps": [],
+        "projection_steps": [],
+        "settings": recipe.copy(),
+    }
+    start_time = time.time()
+
+    warmup_schedule = _build_update_schedule(
+        recipe,
+        name="warmup",
+        allow_disabled=True,
+    )
+    if warmup_schedule:
+        for energy_index in range(n_energy):
+            fields[energy_index], stage_results = _run_modal_energy_update_schedule(
+                fields[energy_index],
+                amplitudes[energy_index],
+                supportmask,
+                bsmasks[energy_index],
+                warmup_schedule,
+                recipe,
+                nmodes,
+                (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
+            )
+            for stage_result in stage_results:
+                errors["energy_steps"].append({
+                    "outer": -1,
+                    "energy": energy_index,
+                    "stage": "warmup",
+                    **stage_result,
+                })
+
+    fieldswarmup = fields.copy()
+
+    outer_iterations = int(recipe["outer_iterations"])
+    inner_schedule = _build_update_schedule(
+        recipe,
+        name="inner",
+    )
+    projection_every, projection_start = _resolve_projection_cadence(
+        recipe,
+        default_every=n_energy,
+    )
+    completed_updates = 0
+    components = {
+        "projection_model": recipe["projection_model"],
+        "Nmodes": nmodes,
+    }
+
+    # Each energy update advances all incoherent modes together. Cross-energy
+    # projection then treats each mode index independently.
+    for outer in range(outer_iterations):
+        if recipe["shuffle_energies"]:
+            energy_order = rng.permutation(n_energy)
+        else:
+            energy_order = np.arange(n_energy)
+
+        for energy_index in energy_order:
+            fields[energy_index], stage_results = _run_modal_energy_update_schedule(
+                fields[energy_index],
+                amplitudes[energy_index],
+                supportmask,
+                bsmasks[energy_index],
+                inner_schedule,
+                recipe,
+                nmodes,
+                (nx, ny),
+                phase_retrieval_kernel=phase_retrieval_kernel,
+            )
+            for stage_result in stage_results:
+                errors["energy_steps"].append({
+                    "outer": outer,
+                    "energy": int(energy_index),
+                    "stage": "joint",
+                    **stage_result,
+                })
+
+            completed_updates += 1
+            if not _projection_is_due(
+                completed_updates,
+                projection_start,
+                projection_every,
+            ):
+                continue
+
+            fields, components = (
+                project_fourier_fields_multi_energy_multimode(
+                    fields,
+                    projection_model=recipe["projection_model"],
+                    rank=recipe["rank"],
+                    static_mode=recipe["projection_static_mode"],
+                    weights=recipe["energy_weights"],
+                    relaxation=recipe["projection_relaxation"],
+                    log_floor=recipe["log_floor"],
+                    spectral_constraint=recipe["spectral_constraint"],
+                    energy_values=recipe["energy_values"],
+                    known_beta_spectrum=recipe["known_beta_spectrum"],
+                    known_delta_spectrum=recipe["known_delta_spectrum"],
+                    absorption_part=recipe["absorption_part"],
+                    kk_sign=recipe["kk_sign"],
+                    kk_subtract_baseline=recipe["kk_subtract_baseline"],
+                    kk_normalize_input=recipe["kk_normalize_input"],
+                    known_beta_normalization=recipe[
+                        "known_beta_normalization"
+                    ],
+                    fit_known_beta_scale=recipe["fit_known_beta_scale"],
+                    fit_known_beta_offset=recipe["fit_known_beta_offset"],
+                    projection_supportmask=projection_supportmask,
+                    material_thickness=material_thickness,
+                    fit_material_thickness=recipe["fit_material_thickness"],
+                    return_components=True,
+                )
+            )
+            errors["projection_steps"].append(
+                {
+                    "outer": outer,
+                    "energy": int(energy_index),
+                    "completed_update": completed_updates,
+                    "projection_model": components.get("projection_model"),
+                    "Nmodes": nmodes,
+                    "rank": recipe["rank"],
+                    "spectral_constraint": recipe["spectral_constraint"],
+                    "relaxation": recipe["projection_relaxation"],
+                }
+            )
+
+    projected_fields, components = project_fourier_fields_multi_energy_multimode(
+        fields,
+        projection_model=recipe["projection_model"],
+        rank=recipe["rank"],
+        static_mode=recipe["projection_static_mode"],
+        weights=recipe["energy_weights"],
+        relaxation=recipe["final_projection_relaxation"],
+        log_floor=recipe["log_floor"],
+        spectral_constraint=recipe["spectral_constraint"],
+        energy_values=recipe["energy_values"],
+        known_beta_spectrum=recipe["known_beta_spectrum"],
+        known_delta_spectrum=recipe["known_delta_spectrum"],
+        absorption_part=recipe["absorption_part"],
+        kk_sign=recipe["kk_sign"],
+        kk_subtract_baseline=recipe["kk_subtract_baseline"],
+        kk_normalize_input=recipe["kk_normalize_input"],
+        known_beta_normalization=recipe["known_beta_normalization"],
+        fit_known_beta_scale=recipe["fit_known_beta_scale"],
+        fit_known_beta_offset=recipe["fit_known_beta_offset"],
+        projection_supportmask=projection_supportmask,
+        material_thickness=material_thickness,
+        fit_material_thickness=recipe["fit_material_thickness"],
+        return_components=True,
+    )
+    if recipe["final_projection_relaxation"] > 0:
+        fields = projected_fields
+    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
+    fields, _ = _as_energy_mode_stack(fields)
+
+    if recipe["final_fourier_constraint"]:
+        fields = _apply_measured_modal_amplitude(fields, amplitudes, bsmasks)
+        components["final_fourier_constraint_applied"] = True
+    else:
+        components["final_fourier_constraint_applied"] = False
+
+    components["Nmodes"] = nmodes
+    errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
+    return input_geometry.finish(
+        _maybe_squeeze_energy_modes(fields, nmodes),
+        _maybe_squeeze_energy_modes(fieldswarmup, nmodes),
+        components, bsmasks, errors,
+    )

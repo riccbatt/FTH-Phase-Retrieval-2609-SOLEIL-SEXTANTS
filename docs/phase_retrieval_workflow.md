@@ -2,7 +2,7 @@ For the current joint library, full option reference and repeated coherence tran
 
 # Phase retrieval API and workflow guide
 
-This guide covers the current unified and universal phase retrieval APIs. The
+This guide covers the universal public phase retrieval API. The
 Ajajas notebooks provide concrete two-image and hysteresis-loop examples; the
 MaxIV hyperspectral notebook uses the same universal recipe system for an
 energy series.
@@ -11,7 +11,7 @@ energy series.
 
 | Task | Driver | Example |
 | --- | --- | --- |
-| One related pair, including coherent, partially coherent, or multimode retrieval | `library.phase_retrieval_core_unified.phase_retrieval_algorithm` | `aperiodic_ajajas/01_phase_retrieval_2871_2872.ipynb` |
+| One related pair, including coherent, partially coherent, or multimode retrieval | `library.phase_retrieval_universal.phase_retrieval_algorithm` | `aperiodic_ajajas/01_phase_retrieval_2871_2872.ipynb` |
 | Many states, energies, helicities, or illuminations with a shared physical model | `library.phase_retrieval_universal.universal_phase_retrieval_algorithm` | `aperiodic_ajajas/02_universal_hysteresis_2871_2872.ipynb` |
 | Hyperspectral separation | Universal driver with energy labels and a spectral projection model | `maxiv_phase_test/05_maxiv_hyperspectral_phase_retrieval.ipynb` |
 

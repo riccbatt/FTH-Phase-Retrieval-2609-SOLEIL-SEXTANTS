@@ -31,11 +31,7 @@ def _configured_kernel(fallback):
         if nmodes > 1:
             if not fallback:
                 raise NotImplementedError("Multimode updates use the unified kernel; enable fallback")
-            try:
-                from .phase_retrieval_core_unified import PhaseRtrv_core
-            except ImportError:
-                from phase_retrieval_core_unified import PhaseRtrv_core
-            return PhaseRtrv_core(*args, Nmodes=nmodes, **kwargs)
+            return universal.PhaseRtrv_core(*args, Nmodes=nmodes, **kwargs)
         return jit_core.PhaseRtrv_core_jit(*args, fallback=fallback, **kwargs)
     return kernel
 

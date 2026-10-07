@@ -17,7 +17,7 @@ class AlternatingNotebookTests(unittest.TestCase):
         import matplotlib.pyplot as plt
         from library import phase_retrieval_geometry as geometry
         from library import phase_retrieval_universal as universal
-        from library import phase_retrieval_core_unified as pr
+        from library import phase_retrieval_universal as pr
         from scipy.fft import set_workers
         from library.retrieval_progress import retrieval_progress
         import h5py
@@ -33,7 +33,7 @@ class AlternatingNotebookTests(unittest.TestCase):
                     ns=dict(np=np,plt=plt,json=json,h5py=h5py,pr=pr,geometry=geometry,universal=universal,
                         set_workers=set_workers,retrieval_progress=retrieval_progress,
                         MODES=[1,1] if count==2 else [1,1,2],support=support,material_thickness=material,
-                        modal_supports=pr._mode_supports(support,[1,1] if count==2 else [1,1,2],support.shape),
+                        modal_supports=pr.mode_supports(support,[1,1] if count==2 else [1,1,2],support.shape),
                         OUTER_ITERATIONS=2,INNER_ITERATIONS=1,ALGORITHMS=['HAPRE','ER'],ITERATIONS=[2,1],
                         INITIALIZATION_SEED=0,PROJECTION_RELAXATION=.3,FFT_WORKERS=1,
                         USE_PHYSICAL_PROJECTION=True,USE_SATURATION_CONSTRAINT=True,SATURATED_SIGN=-1,

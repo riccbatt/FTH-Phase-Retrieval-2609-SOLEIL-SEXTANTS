@@ -6,8 +6,19 @@ Use `library/phase_retrieval_universal.py` for joint state, polarization, energy
 and illumination retrieval. Ajajas 02 and MAX IV 05 use this implementation.
 MAX IV's `library/phase_retrieval*.py` entries are relative symbolic links to the
 repository library. Keep the repository layout intact and restart kernels after
-editing imported modules. The historical core modules remain for compatibility;
-they are not separate copies of the universal physical workflow.
+editing imported modules. Active notebooks import this universal module for retrieval. Ordered-stage
+workflows use `phase_retrieval_algorithm` and `default_phase_retrieval_recipe`;
+these preserve legacy stage recipes and return formats within universal.
+`phase_retrieval_core_unified` is now a compatibility alias pointing to universal;
+universal never imports historical retrieval engines. Multimode spectral
+initialization, scheduling, and projections also live here;
+`phase_retrieval_core_multienergy_multimode` forwards its old API to universal.
+Both drivers share the same single/multimode kernel,
+iteration schedules, projections and coherence helpers. Metadata-driven joint workflows use
+`universal_phase_retrieval_algorithm` and `default_universal_phase_retrieval_recipe`.
+These recipe formats are distinct. `mode_supports` builds explicit modal supports;
+`multimode_phase_retrieval_kernel` exposes the modal kernel for custom driver hooks.
+The historical unified import remains available for older code.
 
 Main entry points:
 
@@ -901,10 +912,10 @@ increases working memory and FFT cost; there is no fixed two-mode limit.
 
 Initialization, supplied starts, gamma arrays, coherent masked-fill capture,
 refreshes and final amplitude projections retain the complete modal axis. The
-CUDA-JIT front end uses the unified multimode kernel when fallback is enabled;
+CUDA-JIT front end uses the universal multimode kernel when fallback is enabled;
 `fallback=False` explicitly rejects unsupported JIT multimode acceleration.
 Pure-energy SVD/rank-one runs dispatch to the existing multimode spectral driver,
-which applies the spectral projector separately to each mode. Its existing
+inside universal, which applies the spectral projector separately to each mode. Its existing
 spectral-driver feature limits still apply; it does not gain physical-driver
 coherence refresh or shared physical-thickness fitting simply by using more modes.
 
