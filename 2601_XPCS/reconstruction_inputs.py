@@ -257,6 +257,41 @@ def endpoint_magnetization(objects, positive, negative, material, reference_mask
     return estimate,valid,np.abs(residual)
 
 
+def relative_magnetic_contrast(objects, material, reference_mask, reference=0):
+    """Project phase-aligned log changes onto their dominant complex axis.
+
+    Returns contrast in log-transmission arbitrary units, a valid-pixel mask,
+    and the orthogonal residual magnitude. The reference state is zero; the
+    axis sign is a numerical convention, not an absolute magnetic direction.
+    No observed state is assumed to reach saturation.
+    """
+    aligned = np.asarray(objects, complex).copy()
+    material = np.asarray(material, bool)
+    reference_mask = np.asarray(reference_mask, bool)
+    if not np.any(reference_mask):
+        raise ValueError('Need reference-hole pixels for global phase alignment')
+    for i in range(len(aligned)):
+        phase = np.angle(np.vdot(aligned[reference][reference_mask], aligned[i][reference_mask]))
+        aligned[i] *= np.exp(-1j * phase)
+    floor = max(np.max(abs(aligned)) * 1e-10, 1e-30)
+    logs = np.log(np.maximum(abs(aligned), floor)) + 1j * np.unwrap(np.angle(aligned), axis=0)
+    relative = logs - logs[reference]
+    valid = material & np.all(np.isfinite(relative), axis=0)
+    contrast = np.full(relative.shape, np.nan)
+    residual = np.full(relative.shape, np.nan)
+    if np.any(valid):
+        values = relative[:, valid]
+        matrix = np.column_stack((values.real.ravel(), values.imag.ravel()))
+        _, _, axes = np.linalg.svd(matrix, full_matrices=False)
+        axis = axes[0]
+        if axis[np.argmax(abs(axis))] < 0:
+            axis = -axis
+        direction = axis[0] + 1j * axis[1]
+        contrast[:, valid] = np.real(values * direction.conjugate())
+        residual[:, valid] = abs(values - contrast[:, valid] * direction)
+    return contrast, valid, residual
+
+
 def roi_curves(maps, material, centers, radius):
     yy,xx=np.indices(material.shape); means=[]; spreads=[]; masks=[]
     for row,col in centers:

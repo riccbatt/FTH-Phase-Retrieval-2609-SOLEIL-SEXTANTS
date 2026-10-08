@@ -4640,6 +4640,13 @@ def default_general_phase_retrieval_recipe():
         "material_mask": None,
         "material_thickness": None,
         "fit_material_thickness": False,
+        # None preserves the legacy one-chemical/one-magnetic physical model.
+        # A list enables nonnegative chemical mixtures with optional magnetism
+        # and independent spectral constraints for each species.
+        "chemical_species": None,
+        "chemical_reference_mask": None,
+        "chemical_reference_alignment": True,
+        "chemical_initialization_seed": 0,
         "saturated_states": None,
         # If True, force the fitted magnetic state maps to zero outside the
         # real-space support used by the phase-retrieval kernel.
@@ -5072,6 +5079,19 @@ def project_log_objects_physical(
     clip_magnetization = recipe.get("clip_magnetization", True)
     if not isinstance(clip_magnetization, bool):
         raise ValueError("clip_magnetization must be bool.")
+    if recipe.get("chemical_species") is not None:
+        try:
+            from .phase_retrieval_species import project_species
+        except ImportError:
+            from phase_retrieval_species import project_species
+        if fit_material_thickness:
+            raise ValueError("With chemical_species, fit species density maps instead of fit_material_thickness.")
+        metadata = _normalize_metadata(state_labels, energy_labels,
+            polarization_coefficients, beam_labels, len(log_objects))
+        return project_species(log_objects, metadata, recipe,
+            _observation_weights(weights, len(log_objects)), material_thickness,
+            magnetization_supportmask, projection_supportmask, thickness_supportmask,
+            saturated_states, iterations, relaxation, return_components)
     if recipe.get("physical_projection_object_roi", False):
         if material_thickness is None:
             raise ValueError("Object-ROI physical projection requires a material thickness/aperture map.")
@@ -5804,6 +5824,21 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("nonphysical_modes_common_relaxation must be between 0 and 1.")
     if not isinstance(recipe["fit_material_thickness"], bool):
         raise ValueError("fit_material_thickness must be bool.")
+    if recipe.get("chemical_species") is not None:
+        try:
+            from .phase_retrieval_species import validate_species
+        except ImportError:
+            from phase_retrieval_species import validate_species
+        validate_species(recipe["chemical_species"])
+        if recipe["projection_model"] != "physical_factorized":
+            raise ValueError("chemical_species requires projection_model='physical_factorized'.")
+        if recipe["fit_material_thickness"]:
+            raise ValueError("With chemical_species, fit species density maps instead of fit_material_thickness.")
+    if not isinstance(recipe["chemical_reference_alignment"], bool):
+        raise ValueError("chemical_reference_alignment must be bool.")
+    seed = recipe["chemical_initialization_seed"]
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or seed < 0:
+        raise ValueError("chemical_initialization_seed must be a nonnegative integer.")
     focus_prop = recipe["projection_focus_prop_um"]
     focus_phase = recipe["projection_focus_phase_rad"]
     if (isinstance(focus_prop, bool) or not isinstance(focus_prop, (int, float, np.number))
@@ -6657,6 +6692,12 @@ def general_phase_retrieval_algorithm(
     material_thickness = _recipe_material_thickness(recipe, input_geometry)
     if material_thickness is not None:
         material_thickness = np.fft.fftshift(material_thickness)
+    if recipe.get("chemical_species") is not None:
+        try:
+            from .phase_retrieval_species import map_species_recipe
+        except ImportError:
+            from phase_retrieval_species import map_species_recipe
+        recipe = map_species_recipe(recipe, input_geometry=input_geometry)
     metadata = _normalize_metadata(
         state_labels,
         energy_labels,
@@ -7681,10 +7722,18 @@ def project_fourier_fields_universal(
         fields.shape[0],
     )
     model = _canonical_projection_model(recipe["projection_model"])
+    if recipe.get("chemical_species") is not None and model != "physical_factorized":
+        raise ValueError("chemical_species requires projection_model='physical_factorized'.")
 
     material_thickness = _material_thickness_on_grid(recipe, fields.shape[-2:])
     if material_thickness is not None:
         material_thickness = np.fft.fftshift(material_thickness)
+    if recipe.get("chemical_species") is not None:
+        try:
+            from .phase_retrieval_species import map_species_recipe
+        except ImportError:
+            from phase_retrieval_species import map_species_recipe
+        recipe = map_species_recipe(recipe, shape=fields.shape[-2:])
     thickness_supportmask = None
     if recipe["zero_thickness_outside_support"]:
         if model != "physical_factorized":
@@ -7874,6 +7923,8 @@ def universal_phase_retrieval_algorithm(
         holograms.shape[0],
     )
     model = _canonical_projection_model(recipe["projection_model"])
+    if recipe.get("chemical_species") is not None and model != "physical_factorized":
+        raise ValueError("chemical_species requires projection_model='physical_factorized'.")
     print(
         "Universal phase retrieval: dispatching "
         f"{holograms.shape[0]} observations with "
