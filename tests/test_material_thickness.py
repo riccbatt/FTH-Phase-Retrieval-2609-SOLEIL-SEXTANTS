@@ -18,6 +18,60 @@ class MaterialThicknessTests(unittest.TestCase):
         self.thickness[:2, :2] = 0
         self.beam = np.full((8, 8), 0.2 + 0.1j)
 
+    def test_binary_magnetization_is_optional_and_preserves_masks(self):
+        rng = np.random.default_rng(24)
+        logs = rng.normal(size=(4, 8, 8)) + 1j * rng.normal(size=(4, 8, 8))
+        support = np.ones((8, 8), dtype=bool)
+        support[-1] = False
+        args = (logs, ["sat", "sat", "sample", "sample"],
+                [780] * 4, [1, -1, 1, -1], ["beam"] * 4)
+        recipe = universal.default_universal_phase_retrieval_recipe()
+        self.assertFalse(recipe["binary_magnetization"])
+        options = dict(material_thickness=self.thickness,
+                       magnetization_supportmask=support,
+                       saturated_states={"sat": 1}, iterations=3,
+                       return_components=True)
+        baseline, _ = universal.project_log_objects_physical(*args, recipe=recipe, **options)
+        explicit, _ = universal.project_log_objects_physical(
+            *args, recipe=dict(recipe, binary_magnetization=False), **options)
+        np.testing.assert_array_equal(baseline, explicit)
+        _, components = universal.project_log_objects_physical(
+            *args, recipe=dict(recipe, binary_magnetization=True,
+                               clip_magnetization=False), **options)
+        mz = components["magnetization"]
+        self.assertTrue(np.isin(mz, [-1, 0, 1]).all())
+        np.testing.assert_array_equal(mz[:, ~support], 0)
+        np.testing.assert_array_equal(mz[:, self.thickness == 0], 0)
+        np.testing.assert_array_equal(mz[0, support & (self.thickness > 0)], 1)
+        self.assertTrue(components["binary_magnetization"])
+        with self.assertRaisesRegex(ValueError, "binary_magnetization must be bool"):
+            universal.project_log_objects_physical(
+                *args, recipe=dict(recipe, binary_magnetization=1), **options)
+
+    def test_configurable_binary_magnetization_values(self):
+        values = universal._binary_magnetization_values(
+            {"binary_magnetization_values": [-1, 1]})
+        np.testing.assert_array_equal(
+            universal._snap_magnetization(np.array([-2., -.2, 0., .2, 2.]), values),
+            [-1, -1, -1, 1, 1])
+        values = universal._binary_magnetization_values({})
+        np.testing.assert_array_equal(
+            universal._snap_magnetization(np.array([-.6, -.5, 0., .5, .6]), values),
+            [-1, 0, 0, 0, 1])
+        for invalid in ([], [np.nan], [np.inf], [-2, 1], [[-1, 1]], 1):
+            with self.assertRaisesRegex(ValueError, "binary_magnetization_values"):
+                universal._binary_magnetization_values(
+                    {"binary_magnetization_values": invalid})
+        rng = np.random.default_rng(25)
+        logs = rng.normal(size=(2, 8, 8)) + 1j * rng.normal(size=(2, 8, 8))
+        _, components = universal.project_log_objects_physical(
+            logs, ["sample"] * 2, [780] * 2, [1, -1], ["beam"] * 2,
+            recipe=dict(universal.default_universal_phase_retrieval_recipe(),
+                        binary_magnetization=True, binary_magnetization_values=[-1, 1]),
+            material_thickness=self.thickness, iterations=3, return_components=True)
+        self.assertTrue(np.isin(components["magnetization"][:, self.thickness > 0], [-1, 1]).all())
+        np.testing.assert_array_equal(components["magnetization"][:, self.thickness == 0], 0)
+
     def test_largest_aperture_binary_thickness(self):
         support = np.zeros((8, 8), dtype=np.uint8)
         support[1:5, 1:5] = 1

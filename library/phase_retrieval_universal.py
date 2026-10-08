@@ -4628,6 +4628,9 @@ def default_general_phase_retrieval_recipe():
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
         "clip_magnetization": True,
+        # Snap to the nearest of -1, 0, +1.
+        "binary_magnetization": False,
+        "binary_magnetization_values": [-1.0, 0.0, 1.0],
         "physical_projection_object_roi": False,
         "physical_phase_reference": False,
         "projection_diagnostic_observation": None,
@@ -5035,6 +5038,31 @@ def largest_support_component(supportmask):
     return (labels == np.argmax(sizes)).astype(np.uint8)
 
 
+def _binary_magnetization_values(recipe):
+    """Validate discrete reduced-magnetization values; prefer zero in ties."""
+    try:
+        values = np.asarray(recipe.get("binary_magnetization_values", [-1., 0., 1.]), dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("binary_magnetization_values must be a nonempty sequence of finite values in [-1, 1].") from exc
+    if (values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values))
+            or np.any(np.abs(values) > 1)):
+        raise ValueError("binary_magnetization_values must be a nonempty sequence of finite values in [-1, 1].")
+    values = np.unique(values)
+    return values[np.argsort(np.abs(values), kind="stable")]
+
+
+def _snap_magnetization(magnetization, values):
+    """Nearest allowed value, preferring smaller magnitude then negative ties."""
+    nearest = np.full_like(magnetization, values[0])
+    distance = np.abs(magnetization - values[0])
+    for value in values[1:]:
+        candidate_distance = np.abs(magnetization - value)
+        closer = candidate_distance < distance
+        nearest = np.where(closer, value, nearest)
+        distance = np.minimum(distance, candidate_distance)
+    return nearest
+
+
 def project_log_objects_physical(
     log_objects,
     state_labels,
@@ -5057,7 +5085,10 @@ def project_log_objects_physical(
     Fit ``L = C_beam + t(r)[q_charge(E) + p*q_magnetic(E)*mz_state(r)]``.
 
     ``mz_state`` is real and clipped to ``[-1, 1]`` by default. Set recipe
-    ``clip_magnetization=False`` to disable clipping. Saturated states, when
+    ``clip_magnetization=False`` to disable clipping. Set
+    ``binary_magnetization=True`` to snap to the nearest allowed value in
+    ``binary_magnetization_values`` (default [-1, 0, 1]). Ties prefer smaller
+    magnitude, then the negative value. This overrides clipping. Saturated states, when
     supplied, are fixed to +1 or -1. Charge and magnetic response spectra can
     be constrained through the local free/KK/known-beta spectral options,
     followed by optional rectangular value bounds.
@@ -5079,6 +5110,10 @@ def project_log_objects_physical(
     clip_magnetization = recipe.get("clip_magnetization", True)
     if not isinstance(clip_magnetization, bool):
         raise ValueError("clip_magnetization must be bool.")
+    binary_magnetization = recipe.get("binary_magnetization", False)
+    if not isinstance(binary_magnetization, bool):
+        raise ValueError("binary_magnetization must be bool.")
+    binary_values = _binary_magnetization_values(recipe) if binary_magnetization else None
     if recipe.get("chemical_species") is not None:
         try:
             from .phase_retrieval_species import project_species
@@ -5343,7 +5378,9 @@ def project_log_objects_physical(
                      else np.zeros_like(numerator)),
                 where=denominator > 1e-30,
             )
-            if clip_magnetization:
+            if binary_magnetization:
+                magnetization[state] = _snap_magnetization(magnetization[state], binary_values)
+            elif clip_magnetization:
                 magnetization[state] = np.clip(magnetization[state], -1.0, 1.0)
             if magnetization_supportmask is not None:
                 magnetization[state] *= magnetization_supportmask
@@ -5568,7 +5605,9 @@ def project_log_objects_physical(
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
         "charge_spectral_info": charge_spectral_info,
         "magnetic_spectral_info": magnetic_spectral_info,
-        "magnetization_bounds": (-1.0, 1.0) if clip_magnetization else None,
+        "magnetization_bounds": (-1.0, 1.0) if (clip_magnetization or binary_magnetization) else None,
+        "binary_magnetization": binary_magnetization,
+        "binary_magnetization_values": binary_values,
     }
     return projected, components
 
@@ -5979,6 +6018,10 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         )
     if not isinstance(recipe["clip_magnetization"], bool):
         raise ValueError("clip_magnetization must be bool.")
+    if not isinstance(recipe["binary_magnetization"], bool):
+        raise ValueError("binary_magnetization must be bool.")
+    if recipe["binary_magnetization"]:
+        _binary_magnetization_values(recipe)
     physical_iterations = recipe["physical_iterations"]
     if (
         isinstance(physical_iterations, bool)

@@ -700,6 +700,8 @@ apply to their corresponding stage or physical quantity.
 | `observation_weights` | `None` |
 | `rank_deficient` | `'error'` |
 | `physical_iterations` | `20` |
+| `binary_magnetization` | `False` |
+| `binary_magnetization_values` | `[-1, 0, 1]` |
 | `physical_projection_object_roi` | `False` |
 | `physical_phase_reference` | `False` |
 | `projection_diagnostic_observation` | `None` |
@@ -960,3 +962,5 @@ when separation of repeated-support modes matters. This breaks initial symmetry,
 but does not remove the intrinsic ambiguity of decomposing a measured intensity
 sum. The single-pair notebook already uses distinct seeded starts and now allows
 other mode lists as well, retaining `[1,1]` as its default experiment.
+
+Set `recipe["binary_magnetization"] = True` to snap fitted physical magnetization to the nearest of `-1`, `0`, and `+1` at each internal fit iteration. Set `recipe["binary_magnetization_values"] = [-1, 1]` for two allowed values, or provide another nonempty list of finite values in `[-1, 1]`. Ties prefer the value with smaller magnitude, then the negative value. Material/support masks still force zero outside the active region, and saturated states remain fixed to their specified ±1. This overrides `clip_magnetization=False` and applies to magnetic chemical species. Saturated states and material/support masks remain enforced. Projection relaxation controls blending of the fitted model with input fields.

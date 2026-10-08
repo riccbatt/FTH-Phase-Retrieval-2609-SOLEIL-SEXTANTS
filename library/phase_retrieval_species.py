@@ -85,6 +85,8 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                     magnetization_supportmask, projection_supportmask, thickness_supportmask,
                     saturated_states, iterations, relaxation, return_components):
     u = _engine()
+    binary_values = (u._binary_magnetization_values(recipe)
+                     if recipe.get('binary_magnetization', False) else None)
     entries = recipe['chemical_species']
     names = validate_species(entries)
     if not isinstance(recipe['chemical_reference_alignment'], bool):
@@ -347,7 +349,9 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                     numerator = np.sum(weights[obs, None, None]*np.real(coefficient.conj()*residual), axis=0)
                     denominator = np.sum(weights[obs, None, None]*abs(coefficient)**2, axis=0)
                     updated = np.divide(numerator, denominator, out=previous.copy(), where=denominator > 1e-30)
-                    if recipe['clip_magnetization']:
+                    if recipe.get('binary_magnetization', False):
+                        updated = u._snap_magnetization(updated, binary_values)
+                    elif recipe['clip_magnetization']:
                         updated = np.clip(updated, -1., 1.)
                     updated *= supports[i]
                 if magnetic_support is not None:
@@ -457,5 +461,7 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
         density_scale_anchored=scale_anchored, identifiable=False, ambiguity_notes=ambiguities,
         fit_residual_rms=history[-1], species_fit_history=np.asarray(history),
         fitted_log_objects=fitted, physical_projection_roi_mask=apply,
-        magnetization_bounds=(-1., 1.) if recipe['clip_magnetization'] else None)
+        binary_magnetization=recipe.get('binary_magnetization', False),
+        binary_magnetization_values=binary_values,
+        magnetization_bounds=(-1., 1.) if (recipe['clip_magnetization'] or recipe.get('binary_magnetization', False)) else None)
     return projected, components
