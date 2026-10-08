@@ -160,6 +160,18 @@ class ArbitraryModesTests(unittest.TestCase):
                 [1,1],['beam','beam'],universal_recipe=recipe,return_components=True)
             self.assertEqual(out.shape,fields.shape)
 
+    def test_general_projection_detects_single_beam_hysteresis_rank_deficiency(self):
+        log_objects = np.ones((3, 8, 8), dtype=np.complex128)
+        with self.assertRaisesRegex(ValueError, 'physical_factorized|single-beam|single-energy'):
+            u.project_log_objects_general(
+                log_objects,
+                state_labels=['s0', 's1', 's2'],
+                energy_labels=[780.0, 780.0, 780.0],
+                polarization_coefficients=[1.0, 1.0, 1.0],
+                beam_labels=['beam0', 'beam0', 'beam0'],
+                rank_deficient='error',
+            )
+
     def test_jit_multimode_fallback(self):
         from unittest.mock import patch
         with patch('library.phase_retrieval_core_unified.PhaseRtrv_core',return_value='ok') as core:

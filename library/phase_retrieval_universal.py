@@ -4900,6 +4900,27 @@ def project_log_objects_general(
     weighted_design = design * sqrt_weights[:, None]
     design_rank = np.linalg.matrix_rank(weighted_design)
     n_components = design.shape[1]
+    single_beam = len(metadata["beam_names"]) == 1
+    single_energy = len(metadata["energy_names"]) == 1
+    same_polarization = np.allclose(
+        metadata["polarizations"],
+        metadata["polarizations"][0],
+    )
+    if (
+        design_rank < n_components
+        and rank_deficient == "error"
+        and single_beam
+        and single_energy
+        and same_polarization
+    ):
+        raise ValueError(
+            "The general state/energy/polarization/beam design is rank "
+            "deficient for a single-beam, single-energy, same-polarization "
+            "scan. This is the standard hysteresis case: use "
+            "projection_model='physical_factorized' (shared charge + state "
+            "magnetization), or add beam/polarization diversity to make the "
+            "general model identifiable."
+        )
     if design_rank < n_components and rank_deficient == "error":
         raise ValueError(
             "The general state/energy/polarization/beam design is rank "
