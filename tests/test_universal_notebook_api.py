@@ -11,6 +11,19 @@ from library import phase_retrieval_core_unified as stage
 from library import phase_retrieval_universal as universal
 
 
+@pytest.mark.parametrize('every,start,total,expected', [
+    (3, 3, 9, [3, 6]),  # One projection per sweep, except the final sweep.
+    (2, 0, 6, [2, 4]),  # A cadence within a sweep also skips the final update.
+    (4, 2, 10, [2, 6]),  # Respect an explicitly offset cadence.
+    (4, 4, 9, [4, 8]),  # Keep the last boundary when retrieval follows it.
+    (3, 3, 3, []),       # One sweep leaves projection to the final setting.
+])
+def test_scheduled_projection_reserves_final_update(every, start, total, expected):
+    due = [i for i in range(1, total + 1)
+           if universal._projection_is_due(i, start, every, total_updates=total)]
+    assert due == expected
+
+
 @pytest.mark.parametrize('verify,defaults', [
     (universal._verify_recipe, universal.default_universal_phase_retrieval_recipe),
     (universal._verify_multi_energy_recipe,

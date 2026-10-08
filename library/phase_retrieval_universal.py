@@ -3983,12 +3983,16 @@ def _run_energy_update_schedule(
     return field, stage_results
 
 
-def _projection_is_due(completed_updates, projection_start, projection_every):
+def _projection_is_due(completed_updates, projection_start, projection_every,
+                       total_updates=None):
     """Return whether a joint projection is scheduled after this update.
 
     Both controls use completed observation or energy updates, not outer-loop
-    indices. A positive start value is itself an eligible boundary.
+    indices. A positive start value is itself an eligible boundary. The last
+    update is reserved for the separately controlled final projection.
     """
+    if total_updates is not None and completed_updates >= total_updates:
+        return False
     if completed_updates < projection_start:
         return False
     offset = (
@@ -4417,6 +4421,7 @@ def multi_energy_phase_retrieval_algorithm(
                 completed_updates,
                 projection_start,
                 projection_every,
+                total_updates=outer_iterations * nE,
             ):
                 continue
             if recipe["projection_relaxation"] == 0:
@@ -7176,6 +7181,7 @@ def general_phase_retrieval_algorithm(
                 completed_updates,
                 projection_start,
                 projection_every,
+                total_updates=outer_iterations * n_observations,
             ):
                 continue
             if recipe["projection_relaxation"] == 0:
@@ -8488,6 +8494,7 @@ def multi_energy_multimode_phase_retrieval_algorithm(
                 completed_updates,
                 projection_start,
                 projection_every,
+                total_updates=outer_iterations * n_energy,
             ):
                 continue
 

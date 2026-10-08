@@ -190,11 +190,11 @@ class ParallelRetrievalTests(unittest.TestCase):
             )
             results.append(self.run_recipe(recipe, unified.PhaseRtrv_core))
         np.testing.assert_allclose(results[0][0], results[1][0], rtol=1e-12, atol=1e-12)
-        self.assertEqual(len(results[1][4]["projection_steps"]), 2)
+        self.assertEqual(len(results[1][4]["projection_steps"]), 1)
         trace = results[1][4]["detector_constraint_diagnostics"]
         physical = [r for r in trace if r["stage"] == "physical_primary"]
         common = [r for r in trace if r["stage"] == "common_secondary"]
-        self.assertEqual(len(physical), 2)
+        self.assertEqual(len(physical), 1)
         for before, after in zip(physical, common):
             self.assertEqual(before["primary_outer_masked_mean"], after["primary_outer_masked_mean"])
         np.testing.assert_array_equal(results[1][0][0], results[1][1][0])

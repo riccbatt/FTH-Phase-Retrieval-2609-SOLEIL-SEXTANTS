@@ -31,4 +31,4 @@ class LiveRetrievalTests(unittest.TestCase):
          assert display.call_count==1
          assert view.handle.update.call_count==2
         np.testing.assert_array_equal(result[0],baseline[0])
-        assert events==[('physical_projection',1),('physical_projection',2),('final',2)],events
+        assert events==[('physical_projection',1),('final',2)],events

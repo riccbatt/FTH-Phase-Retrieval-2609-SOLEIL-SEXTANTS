@@ -186,7 +186,7 @@ class MaterialThicknessTests(unittest.TestCase):
         recipe.update(
             warmup_Nit=0, inner_mode=["ER"], inner_Nit=[1],
             outer_iterations=1, physical_iterations=1,
-            projection_every=3, final_projection_relaxation=0.0,
+            projection_every=2, final_projection_relaxation=0.0,
             final_fourier_constraint=False, shuffle_observations=False,
             saturated_states={"sat": 1},
             material_mask=(np.indices((8, 8))[0] >= 2).astype(np.uint8),
