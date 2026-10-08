@@ -85,7 +85,8 @@ class PlottingTests(unittest.TestCase):
                 for name in ['magnetization_maps.png','fth_field_differences_real.png',
                              'fth_field_differences_amplitude.png','data_diagnostics.png','local_hysteresis.png',
                              'warmup_field_difference_real.png','warmup_field_difference_amplitude.png',
-                             'final_field_difference_real.png','final_field_difference_amplitude.png']:
+                             'final_field_difference_real.png','final_field_difference_amplitude.png',
+                             'field_diagnostics_summary.png','mode_reconstructions_all.png']:
                     self.assertTrue((Path(folder)/name).is_file())
                 with h5py.File(ns['OUTPUT']) as h:
                     self.assertEqual(h['holograms'].shape,primary.shape)

@@ -4595,6 +4595,12 @@ def default_general_phase_retrieval_recipe():
         "roi": None,
         "Nmodes": 1,
         "modes": None,
+        "gaussian_mode_sigma_x": 4.0,
+        "gaussian_mode_sigma_y": 4.0,
+        "gaussian_mode_angle": 0.0,
+        "gaussian_mode_amplitude": 1.0,
+        "gaussian_mode_center": None,
+        "gaussian_mode_coherent": False,
         "mode_support_center": "image",
         "recenter_modal_supports": False,
         "mode_initialization": "random_phase",  # or "support_fft"
@@ -6585,13 +6591,31 @@ def general_phase_retrieval_algorithm(
 
     mode_factors = recipe["modes"]
     if mode_factors is not None:
-        if not isinstance(mode_factors, (list, tuple)) or not mode_factors:
-            raise ValueError("modes must be a nonempty list of positive support factors.")
-        if any(isinstance(value, bool) or not isinstance(value, (int, float, np.number))
-               or not np.isfinite(value) or value <= 0 for value in mode_factors):
-            raise ValueError("modes entries must be finite positive support factors.")
+        if isinstance(mode_factors, np.ndarray):
+            if mode_factors.ndim == 0:
+                mode_factors = [mode_factors.item()]
+            elif mode_factors.ndim != 1:
+                raise ValueError("modes must be a nonempty 1D list of nonnegative support factors.")
+            else:
+                mode_factors = list(mode_factors)
+        elif isinstance(mode_factors, (int, float, np.number)) and not isinstance(mode_factors, bool):
+            mode_factors = [mode_factors]
+        elif not isinstance(mode_factors, (list, tuple)):
+            try:
+                mode_factors = list(mode_factors)
+            except TypeError as exc:
+                raise ValueError("modes must be a nonempty list of nonnegative support factors.") from exc
+        if not mode_factors or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float, np.number))
+            or not np.isfinite(value)
+            or value < 0
+            for value in mode_factors
+        ):
+            raise ValueError("modes entries must be finite nonnegative support factors.")
         if float(mode_factors[0]) != 1.0:
             raise ValueError("The first physical mode must use support factor 1.")
+        recipe["modes"] = list(mode_factors)
         recipe["Nmodes"] = len(mode_factors)
     else:
         mode_factors = [1] * int(recipe["Nmodes"])
@@ -7530,11 +7554,25 @@ def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
     per mode; it does not assign magnetic meaning to a secondary mode.
     """
     factors = recipe["modes"] if recipe["modes"] is not None else [1] * recipe["Nmodes"]
-    if not isinstance(factors, (list, tuple)) or not factors or any(
+    if isinstance(factors, np.ndarray):
+        if factors.ndim == 0:
+            factors = [factors.item()]
+        elif factors.ndim != 1:
+            raise ValueError("modes must be a nonempty 1D list of nonnegative support factors")
+        else:
+            factors = list(factors)
+    elif isinstance(factors, (int, float, np.number)) and not isinstance(factors, bool):
+        factors = [factors]
+    elif not isinstance(factors, (list, tuple)):
+        try:
+            factors = list(factors)
+        except TypeError as exc:
+            raise ValueError("modes must be a nonempty list of nonnegative support factors") from exc
+    if not factors or any(
             isinstance(v, bool) or not isinstance(v, (int, float, np.number))
-            or not np.isfinite(v) or v <= 0 for v in factors):
-        raise ValueError("modes must be a nonempty list of positive support factors")
-    local = dict(recipe, Nmodes=len(factors))
+            or not np.isfinite(v) or v < 0 for v in factors):
+        raise ValueError("modes must be a nonempty list of nonnegative support factors")
+    local = dict(recipe, Nmodes=len(factors), modes=list(factors))
     images, mask, support, starts, geom = geometry.prepare(
         holograms, mask_pixel, supportmask, dict(local, Nmodes=1), start_fields)
     if local["recenter_modal_supports"]:
@@ -7773,10 +7811,25 @@ def universal_phase_retrieval_algorithm(
 
     if recipe["modes"] is not None:
         factors = recipe["modes"]
-        if not isinstance(factors, (list, tuple)) or not factors or any(
+        if isinstance(factors, np.ndarray):
+            if factors.ndim == 0:
+                factors = [factors.item()]
+            elif factors.ndim != 1:
+                raise ValueError("modes must be a nonempty 1D list of nonnegative support factors")
+            else:
+                factors = list(factors)
+        elif isinstance(factors, (int, float, np.number)) and not isinstance(factors, bool):
+            factors = [factors]
+        elif not isinstance(factors, (list, tuple)):
+            try:
+                factors = list(factors)
+            except TypeError as exc:
+                raise ValueError("modes must be a nonempty list of nonnegative support factors") from exc
+        if not factors or any(
                 isinstance(v, bool) or not isinstance(v, (int, float, np.number))
-                or not np.isfinite(v) or v <= 0 for v in factors):
-            raise ValueError("modes must be a nonempty list of positive support factors")
+                or not np.isfinite(v) or v < 0 for v in factors):
+            raise ValueError("modes must be a nonempty list of nonnegative support factors")
+        recipe["modes"] = list(factors)
         recipe["Nmodes"] = len(factors)
     if (isinstance(recipe["Nmodes"], bool) or
             not isinstance(recipe["Nmodes"], (int, np.integer)) or recipe["Nmodes"] < 1):

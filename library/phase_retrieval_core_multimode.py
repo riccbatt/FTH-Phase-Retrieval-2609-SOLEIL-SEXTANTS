@@ -37,6 +37,7 @@ from numpy.typing import ArrayLike
 import matplotlib.pyplot as plt
 
 from scipy import stats
+from scipy.optimize import minimize
 
 try:
     from . import phase_retrieval_gradient as gradient
@@ -86,6 +87,248 @@ def to_numpy(array, xp):
     if xp.__name__ == "cupy":
         return array.get()
     return array
+
+
+def _gaussian_real_space_mode(shape_2d, sigma_x=4.0, sigma_y=4.0, angle=0.0,
+                             amplitude=1.0, center=None):
+    """Return a centered Gaussian field for the supportless zero mode."""
+    if isinstance(sigma_x, (list, tuple, np.ndarray)):
+        if len(sigma_x) != 1:
+            raise ValueError("sigma_x must be scalar-like or a length-1 sequence.")
+        sigma_x = float(sigma_x[0])
+    if isinstance(sigma_y, (list, tuple, np.ndarray)):
+        if len(sigma_y) != 1:
+            raise ValueError("sigma_y must be scalar-like or a length-1 sequence.")
+        sigma_y = float(sigma_y[0])
+    if isinstance(angle, (list, tuple, np.ndarray)):
+        if len(angle) != 1:
+            raise ValueError("angle must be scalar-like or a length-1 sequence.")
+        angle = float(angle[0])
+    if isinstance(amplitude, (list, tuple, np.ndarray)):
+        if len(amplitude) != 1:
+            raise ValueError("amplitude must be scalar-like or a length-1 sequence.")
+        amplitude = float(amplitude[0])
+    if center is not None:
+        center_array = np.asarray(center, dtype=object)
+        if center_array.shape == (1,) and center_array[0] is None:
+            center = None
+        else:
+            if isinstance(center, (list, tuple, np.ndarray)) and len(center) != 2:
+                raise ValueError("center must contain [row, column].")
+            center = tuple(float(value) for value in np.asarray(center, dtype=float))
+    sigma_x = float(sigma_x)
+    sigma_y = float(sigma_y)
+    angle = float(angle)
+    amplitude = float(amplitude)
+    if not np.isfinite(sigma_x) or sigma_x <= 0:
+        raise ValueError("sigma_x must be finite and > 0.")
+    if not np.isfinite(sigma_y) or sigma_y <= 0:
+        raise ValueError("sigma_y must be finite and > 0.")
+    if not np.isfinite(angle):
+        raise ValueError("angle must be finite.")
+    if not np.isfinite(amplitude) or amplitude <= 0:
+        raise ValueError("amplitude must be finite and > 0.")
+
+    rows, cols = np.indices(shape_2d, dtype=float)
+    if center is None:
+        center = ((np.asarray(shape_2d, dtype=float) - 1) / 2.0)
+    center = np.asarray(center, dtype=float)
+    y0, x0 = center
+    y = rows - y0
+    x = cols - x0
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    xr = x * cos_a + y * sin_a
+    yr = -x * sin_a + y * cos_a
+    return amplitude * np.exp(-0.5 * ((xr / sigma_x) ** 2 + (yr / sigma_y) ** 2))
+
+
+def _supportmask_center(mask):
+    """Return the centroid of a binary support mask, or the image center if empty."""
+    support = np.asarray(mask, dtype=float)
+    if support.ndim != 2:
+        raise ValueError("support mask must be 2D.")
+    rows, cols = np.nonzero(support)
+    if rows.size == 0:
+        return (float((support.shape[0] - 1) / 2.0), float((support.shape[1] - 1) / 2.0))
+    return (float(rows.mean()), float(cols.mean()))
+
+
+def _fit_gaussian_zero_mode_to_measurement(shape_2d, measured_amplitude, bsmask=None, center=None, coherent=False):
+    """Fit a supportless Gaussian zero mode to the measured hologram amplitude.
+
+    Incoherent zero modes are fit in reciprocal space; coherent zero modes are fit in object space
+    with an allowed center shift.
+    """
+    measured = np.asarray(measured_amplitude, dtype=float)
+    if measured.shape != tuple(shape_2d):
+        raise ValueError(f"measured_amplitude must have shape {shape_2d}, got {measured.shape}.")
+    if bsmask is None:
+        valid = np.ones_like(measured, dtype=bool)
+    else:
+        valid = np.asarray(bsmask) == 0
+    if not np.any(valid):
+        if center is None:
+            center = ((np.asarray(shape_2d, dtype=float) - 1) / 2.0)
+        return max(float(shape_2d[1]) / 8.0, 1.0), max(float(shape_2d[0]) / 8.0, 1.0), float(np.max(measured)), tuple(center)
+
+    target_pixels = 64
+    if max(shape_2d) > target_pixels:
+        bin_factor = max(2, int(np.ceil(max(shape_2d) / float(target_pixels))))
+        coarse = measured[::bin_factor, ::bin_factor]
+        coarse_shape = coarse.shape
+        coarse_center = None if center is None else tuple(float(value) / bin_factor for value in center)
+        coarse_bsmask = None if bsmask is None else np.asarray(bsmask)[::bin_factor, ::bin_factor]
+        sigma_x, sigma_y, amplitude, coarse_center = _fit_gaussian_zero_mode_to_measurement(
+            coarse_shape,
+            coarse,
+            bsmask=coarse_bsmask,
+            center=coarse_center,
+            coherent=coherent,
+        )
+        sigma_x = float(sigma_x) * bin_factor
+        sigma_y = float(sigma_y) * bin_factor
+        amplitude = float(amplitude)
+        if coherent and coarse_center is not None:
+            center = tuple(float(value) * bin_factor for value in coarse_center)
+        else:
+            center = tuple(float(value) for value in np.asarray(center, dtype=float)) if center is not None else tuple(float(value) for value in ((np.asarray(shape_2d, dtype=float) - 1) / 2.0))
+        return sigma_x, sigma_y, amplitude, center
+
+    image_center = ((np.asarray(shape_2d, dtype=float) - 1) / 2.0)
+    if center is None:
+        center = image_center
+    center = tuple(float(value) for value in np.asarray(center, dtype=float))
+
+    sigma0_x = max(float(shape_2d[1]) / 8.0, 1.0)
+    sigma0_y = max(float(shape_2d[0]) / 8.0, 1.0)
+    amp0 = float(np.max(measured[valid]))
+    amp0 = max(amp0, 1e-6)
+    amp_upper = max(amp0 * 1e3, 1e3)
+    sigma_upper = max(float(max(shape_2d)) / 2.0, 2.0)
+
+    if coherent:
+        rows = np.arange(shape_2d[0], dtype=float)[:, None]
+        cols = np.arange(shape_2d[1], dtype=float)[None, :]
+        ky = None
+        kx = None
+    else:
+        fy = np.fft.fftfreq(shape_2d[0], d=1.0 / shape_2d[0])
+        fx = np.fft.fftfreq(shape_2d[1], d=1.0 / shape_2d[1])
+        ky = fy[:, None]
+        kx = fx[None, :]
+        rows = None
+        cols = None
+
+    def model_from_params(params):
+        sigma_x = np.exp(params[0])
+        sigma_y = np.exp(params[1])
+        amplitude = np.exp(params[2])
+        if coherent:
+            center_y = params[3]
+            center_x = params[4]
+            y = rows - center_y
+            x = cols - center_x
+            return amplitude * np.exp(-0.5 * ((x / sigma_x) ** 2 + (y / sigma_y) ** 2))
+        return amplitude * np.exp(-0.5 * ((kx * sigma_x) ** 2 + (ky * sigma_y) ** 2))
+
+    def objective(log_params):
+        model = model_from_params(log_params)
+        residual = measured[valid] - model[valid]
+        return float(np.sum(residual ** 2))
+
+    if coherent:
+        y = rows - center[0]
+        x = cols - center[1]
+    else:
+        y = None
+        x = None
+
+    sigma_x_values = np.linspace(0.5, sigma_upper, 24)
+    sigma_y_values = np.linspace(0.5, sigma_upper, 24)
+    amplitude_values = np.geomspace(max(amp0 * 0.1, 1e-6), amp_upper, 12)
+    best_score = np.inf
+    best_params = (sigma0_x, sigma0_y, amp0, center)
+    for sigma_x in sigma_x_values:
+        for sigma_y in sigma_y_values:
+            for amplitude in amplitude_values:
+                if coherent:
+                    model = amplitude * np.exp(-0.5 * ((x / sigma_x) ** 2 + (y / sigma_y) ** 2))
+                else:
+                    model = amplitude * np.exp(-0.5 * ((kx * sigma_x) ** 2 + (ky * sigma_y) ** 2))
+                residual = measured[valid] - model[valid]
+                score = float(np.sum(residual ** 2))
+                if score < best_score:
+                    best_score = score
+                    best_params = (float(sigma_x), float(sigma_y), float(amplitude), tuple(center))
+    x0 = np.log([best_params[0], best_params[1], best_params[2]])
+    bounds = [
+        (np.log(0.5), np.log(sigma_upper)),
+        (np.log(0.5), np.log(sigma_upper)),
+        (np.log(1e-12), np.log(amp_upper)),
+    ]
+    if coherent:
+        x0 = np.concatenate([x0, [center[0], center[1]]])
+        bounds.extend([
+            (0.0, float(shape_2d[0] - 1)),
+            (0.0, float(shape_2d[1] - 1)),
+        ])
+    result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds)
+    if result.success:
+        sigma_x, sigma_y, amplitude = np.exp(result.x[:3])
+        if coherent:
+            center = (float(result.x[3]), float(result.x[4]))
+        refined = (float(sigma_x), float(sigma_y), float(amplitude), tuple(center))
+        if coherent:
+            refined_model = amplitude * np.exp(-0.5 * (((cols - center[1]) / sigma_x) ** 2 + ((rows - center[0]) / sigma_y) ** 2))
+        else:
+            refined_model = amplitude * np.exp(-0.5 * ((kx * sigma_x) ** 2 + (ky * sigma_y) ** 2))
+        refined_score = float(np.sum((refined_model[valid] - measured[valid]) ** 2))
+        if refined_score <= best_score:
+            return refined
+    return best_params
+
+
+def _gaussianize_zero_mode(field, shape_2d, measured_amplitude=None, bsmask=None, center=None, coherent=False, reference_support=None):
+    """Project a supportless zero mode back to a real Gaussian object profile.
+
+    Incoherent zero modes stay centered on the image center. Coherent zero modes initialize from
+    the positive-mode support center and are allowed to shift during the fit.
+    """
+    field = np.asarray(field)
+    if field.shape != tuple(shape_2d):
+        raise ValueError(f"field must have shape {shape_2d}, got {field.shape}.")
+
+    if center is None:
+        center = ((np.asarray(shape_2d, dtype=float) - 1) / 2.0)
+    if reference_support is not None and coherent and center == ((np.asarray(shape_2d, dtype=float) - 1) / 2.0).tolist():
+        center = _supportmask_center(reference_support)
+    if measured_amplitude is None:
+        amplitude = float(np.max(np.abs(np.real(field)))) if field.size else 1.0
+        amplitude = max(amplitude, 1e-12)
+        return _gaussian_real_space_mode(
+            shape_2d,
+            sigma_x=max(float(shape_2d[1]) / 8.0, 1.0),
+            sigma_y=max(float(shape_2d[0]) / 8.0, 1.0),
+            amplitude=amplitude,
+            center=center,
+        ).astype(np.complex128)
+
+    sigma_x, sigma_y, amplitude, center = _fit_gaussian_zero_mode_to_measurement(
+        shape_2d,
+        measured_amplitude=measured_amplitude,
+        bsmask=bsmask,
+        center=center,
+        coherent=coherent,
+    )
+    gaussian = _gaussian_real_space_mode(
+        shape_2d,
+        sigma_x=sigma_x,
+        sigma_y=sigma_y,
+        amplitude=amplitude,
+        center=center,
+    )
+    return gaussian.astype(np.complex128)
 
 
 #############################################################
@@ -1415,8 +1658,20 @@ def PhaseRtrv_core(
 
         new_guess = xp.zeros_like(guess_cp)
 
-        # Update every mode independently in support space.
+        # Update every mode independently in support space. Supportless zero modes are kept
+        # as a real Gaussian object term rather than as a complex support-constrained field.
         for m in range(Nmodes):
+            if bool(xp.all(mask_cp[m])):
+                gaussian_field = _gaussianize_zero_mode(
+                    to_numpy(guess_cp[m], xp),
+                    shape_2d,
+                    measured_amplitude=to_numpy(diffract_cp, xp),
+                    bsmask=to_numpy(BSmask_cp, xp),
+                )
+                new_guess[m] = xp.asarray(gaussian_field)
+                prev[m] = fft2(new_guess[m])
+                continue
+
             inv = fft2(guess_cp[m])
 
             if (s % TV_freq == 0) and alpha > 0:

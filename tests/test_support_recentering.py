@@ -102,6 +102,33 @@ class SupportRecenteringTests(unittest.TestCase):
             ratio = captured[0][mode_index][nonzero] / expected[nonzero]
             np.testing.assert_allclose(ratio, ratio[0], rtol=1e-6, atol=1e-6)
 
+    def test_gaussian_real_space_mode_is_supported(self):
+        rng = np.random.default_rng(7)
+        hologram = 1 + rng.uniform(size=(28, 28))
+        recipe = unified.default_phase_retrieval_recipe()
+        recipe.update(
+            algorithm_list=["ER"], number_iterations=[1], helicity=["field"],
+            beta_zero=[0.5], beta_mode=["const"], alpha_zero=[0.0],
+            alpha_mode=["const"], RL_its=[0], RL_freqs=[1e9],
+            TV_freqs=[1e9], plot_every=[1e9], average_img=[1],
+            Fourier_last=[True], output=[True], Startimage=[None],
+            Startgamma=[None], modes=[0, 1], recenter_modal_supports=False,
+            gaussian_mode_sigma_x=[5.0], gaussian_mode_sigma_y=[4.0],
+            gaussian_mode_angle=[0.25 * np.pi], gaussian_mode_amplitude=[1.5],
+            gaussian_mode_center=[None], gaussian_mode_coherent=[False],
+            return_format="dict",
+        )
+        support = np.zeros((28, 28), dtype=np.uint8)
+        support[10:18, 10:18] = 1
+        with patch.object(unified, "PhaseRtrv_core", return_value=(np.ones((2, 28, 28), dtype=complex), np.zeros(1), np.zeros(1), None)):
+            result = unified.phase_retrieval_algorithm(
+                {"field": hologram}, np.zeros((28, 28), dtype=np.uint8),
+                support, recipe,
+            )
+        self.assertEqual(result["supportmask"].shape, (2, 28, 28))
+        self.assertGreater(np.count_nonzero(result["supportmask"][0]), 0)
+        self.assertGreater(np.count_nonzero(result["supportmask"][1]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
