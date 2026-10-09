@@ -42,6 +42,18 @@ class PhaseRetrievalHandoffTests(unittest.TestCase):
             fields,
         )
 
+    def test_focus_transform_accepts_one_observation(self):
+        field = np.ones((1, 8, 8), dtype=complex)
+        setup = {"ccd_dist": .125, "px_size": 11e-6}
+        for distance in (0., 2.):
+            single = universal._projection_focus_transform(
+                field, [780.], distance, .3, setup)
+            pair = universal._projection_focus_transform(
+                np.repeat(field, 2, axis=0), [780., 780.], distance, .3, setup)
+            self.assertEqual(single.shape, field.shape)
+            np.testing.assert_allclose(single[0], pair[0])
+            np.testing.assert_array_equal(field, 1.)
+
     def test_nonphysical_mode_can_be_common_across_states(self):
         rng = np.random.default_rng(22)
         fields = (rng.normal(size=(3, 2, 8, 8))

@@ -240,6 +240,11 @@ def endpoint_magnetization(objects, positive, negative, material, reference_mask
     two reconstructed saturated endpoints to set the affine magnetic scale.
     Endpoints themselves are calibration, NOT independent validation.
     """
+    objects = np.asarray(objects)
+    material = np.asarray(material, bool)
+    reference_mask = np.asarray(reference_mask, bool)
+    if objects.ndim != 3 or material.shape != objects.shape[-2:] or reference_mask.shape != objects.shape[-2:]:
+        raise ValueError('Expected (states, rows, columns) objects and matching 2D masks')
     aligned=np.asarray(objects,complex).copy()
     if not np.any(reference_mask): raise ValueError('Need reference-hole pixels for global phase alignment')
     for i in range(len(aligned)):
@@ -265,9 +270,12 @@ def relative_magnetic_contrast(objects, material, reference_mask, reference=0):
     axis sign is a numerical convention, not an absolute magnetic direction.
     No observed state is assumed to reach saturation.
     """
-    aligned = np.asarray(objects, complex).copy()
+    objects = np.asarray(objects)
     material = np.asarray(material, bool)
     reference_mask = np.asarray(reference_mask, bool)
+    if objects.ndim != 3 or material.shape != objects.shape[-2:] or reference_mask.shape != objects.shape[-2:]:
+        raise ValueError('Expected (states, rows, columns) objects and matching 2D masks')
+    aligned = np.asarray(objects, complex).copy()
     if not np.any(reference_mask):
         raise ValueError('Need reference-hole pixels for global phase alignment')
     for i in range(len(aligned)):

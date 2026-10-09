@@ -4633,6 +4633,8 @@ def default_general_phase_retrieval_recipe():
         "binary_magnetization_values": [-1.0, 0.0, 1.0],
         "physical_projection_object_roi": False,
         "physical_phase_reference": False,
+        # Shared spatial least-squares weights from mean anchor |exit wave|^2.
+        "physical_spatial_weighting": None,
         "projection_diagnostic_observation": None,
         # Optional reversible focus transform around every object-space
         # physical projection. Zero propagation skips propagation and phase.
@@ -5115,6 +5117,8 @@ def project_log_objects_physical(
         raise ValueError("binary_magnetization must be bool.")
     binary_values = _binary_magnetization_values(recipe) if binary_magnetization else None
     if recipe.get("chemical_species") is not None:
+        if recipe.get("physical_spatial_weighting") is not None:
+            raise ValueError("physical_spatial_weighting currently supports the single-species physical model only.")
         try:
             from .phase_retrieval_species import project_species
         except ImportError:
@@ -5221,6 +5225,23 @@ def project_log_objects_physical(
     n_states = len(metadata["state_names"])
     n_energies = len(metadata["energy_names"])
     n_beams = len(metadata["beam_names"])
+    spatial_weighting = recipe.get("physical_spatial_weighting")
+    if spatial_weighting not in (None, "exit_wave_intensity"):
+        raise ValueError("physical_spatial_weighting must be None or 'exit_wave_intensity'.")
+    spatial_weights = np.ones((nx, ny), dtype=float)
+    if spatial_weighting == "exit_wave_intensity":
+        anchors = [a for a, state in enumerate(metadata["states"]) if state in saturated]
+        selected = anchors or list(range(n_observations))
+        # Scale before exponentiating to avoid overflow; normalize to mean 1
+        # inside material. Use one map across states to avoid magnetic-state bias.
+        log_intensity = 2 * log_objects[selected].real
+        peak = np.max(log_intensity[:, allowed_material])
+        spatial_weights = np.mean(np.exp(np.minimum(log_intensity - peak, 0.)), axis=0)
+        spatial_weights[~allowed_material] = 0.
+        scale = np.mean(spatial_weights[allowed_material])
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("Exit-wave intensity weights require nonzero finite material intensity.")
+        spatial_weights /= scale
     if magnetization_supportmask is not None:
         magnetization_supportmask = np.asarray(magnetization_supportmask) != 0
         if magnetization_supportmask.shape != (nx, ny):
@@ -5302,8 +5323,8 @@ def project_log_objects_physical(
             centered = coefficients - np.average(coefficients, weights=anchor_weights)
             for a, weight, coefficient in zip(anchors, anchor_weights, centered):
                 basis = coefficient * anchor_thickness
-                anchor_rhs += weight * np.vdot(basis, log_objects[a])
-                anchor_norm += weight * float(np.vdot(basis, basis).real)
+                anchor_rhs += weight * np.vdot(basis, spatial_weights * log_objects[a])
+                anchor_norm += weight * float(np.vdot(basis, spatial_weights * basis).real)
         if anchor_norm > 1e-30:
             magnetic[energy] = anchor_rhs / anchor_norm
 
@@ -5405,11 +5426,11 @@ def project_log_objects_physical(
                 )
                 residual = log_objects[observation] - common[beam]
                 weight = weights[observation]
-                gram[0, 0] += weight * np.vdot(thickness, thickness)
-                gram[0, 1] += weight * np.vdot(thickness, magnetic_basis)
-                gram[1, 1] += weight * np.vdot(magnetic_basis, magnetic_basis)
-                rhs[0] += weight * np.vdot(thickness, residual)
-                rhs[1] += weight * np.vdot(magnetic_basis, residual)
+                gram[0, 0] += weight * np.vdot(thickness, spatial_weights * thickness)
+                gram[0, 1] += weight * np.vdot(thickness, spatial_weights * magnetic_basis)
+                gram[1, 1] += weight * np.vdot(magnetic_basis, spatial_weights * magnetic_basis)
+                rhs[0] += weight * np.vdot(thickness, spatial_weights * residual)
+                rhs[1] += weight * np.vdot(magnetic_basis, spatial_weights * residual)
             gram[1, 0] = np.conj(gram[0, 1])
             coefficients = np.linalg.pinv(gram) @ rhs
             charge[energy], magnetic[energy] = coefficients
@@ -5569,6 +5590,11 @@ def project_log_objects_physical(
     )
     components = {
         "projection_model": "physical_factorized",
+        "physical_spatial_weighting": spatial_weighting,
+        "physical_spatial_weights": spatial_weights,
+        "weighted_fit_residual_rms": float(np.sqrt(
+            np.sum(weights[:, None, None] * spatial_weights * abs(residual)**2)
+            / (np.sum(weights) * np.sum(spatial_weights)))),
         "common_log_objects": common,
         "common_log_objects_by_beam": {
             name: common[index]
@@ -5629,7 +5655,11 @@ def _projection_focus_transform(
     plane and undo that transform afterward. This operation still needs a full Fourier grid
     even when the subsequent physical fit uses only an aperture.
     """
-    array = _as_energy_stack(fields, name="fields").astype(np.complex128, copy=True)
+    # Focusing acts independently on each field, including a single observation.
+    array = np.asarray(fields)
+    if array.ndim != 3 or array.shape[0] < 1:
+        raise ValueError("fields must have shape (n_observations, nx, ny) with at least one observation.")
+    array = array.astype(np.complex128, copy=True)
     if float(propagation_um) == 0:
         return array
     if not isinstance(setup, dict):
