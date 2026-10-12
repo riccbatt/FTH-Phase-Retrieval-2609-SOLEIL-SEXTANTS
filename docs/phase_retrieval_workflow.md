@@ -318,3 +318,5 @@ the physical model. If warmup already differs, inspect recipe stages,
 start-image handoffs, masks, crop/bin geometry, intensity normalization, and
 partial coherence. If warmup agrees but final fields diverge, inspect the inner
 schedule and projection settings.
+
+For measurements with spatially isolated object/reference and reference/reference holographic lobes, optional [CIDI preprocessing](cidi.md) separates reference-coherent and reference-incoherent intensities before the usual CDI workflow. It requires at least two coherent RHs and checks the supplied geometry for lobe overlap.

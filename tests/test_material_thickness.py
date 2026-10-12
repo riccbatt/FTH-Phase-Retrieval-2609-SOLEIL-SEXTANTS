@@ -103,7 +103,7 @@ class MaterialThicknessTests(unittest.TestCase):
         )
 
     def test_fitted_thickness_can_recover_after_reaching_zero(self):
-        rng = np.random.default_rng(12)
+        rng = np.random.default_rng(49)
         logs = (rng.normal(size=(3, 4, 4))
                 + 1j * rng.normal(size=(3, 4, 4)))
         args = (logs, ["sat", "a", "b"], [780] * 3, [1] * 3, ["beam"] * 3)
@@ -119,10 +119,10 @@ class MaterialThicknessTests(unittest.TestCase):
 
         first = fit(1)
         second = fit(2)
-        self.assertEqual(first["material_thickness"][1, 2], 0)
-        self.assertEqual(first["magnetization"][0, 1, 2], 0)
-        self.assertGreater(second["material_thickness"][1, 2], 0)
-        self.assertEqual(second["magnetization"][0, 1, 2], 1)
+        self.assertEqual(first["material_thickness"][1, 0], 0)
+        self.assertEqual(first["magnetization"][0, 1, 0], 0)
+        self.assertGreater(second["material_thickness"][1, 0], 0)
+        self.assertEqual(second["magnetization"][0, 1, 0], 1)
 
     def test_standalone_physical_projector_uses_fixed_thickness(self):
         logs = np.stack([

@@ -722,6 +722,11 @@ apply to their corresponding stage or physical quantity.
 | `observation_weights` | `None` |
 | `rank_deficient` | `'error'` |
 | `physical_iterations` | `20` |
+| `align_global_phase` | `False` |
+| `fit_aperture_illumination` | `False` |
+| `object_illumination_mode` | `"pooled"` |
+| `aperture_factor_type` | `"complex"` |
+| `initial_binary_magnetization` | `False` |
 | `binary_magnetization` | `False` |
 | `binary_magnetization_values` | `[-1, 0, 1]` |
 | `physical_projection_object_roi` | `False` |
@@ -985,4 +990,61 @@ but does not remove the intrinsic ambiguity of decomposing a measured intensity
 sum. The single-pair notebook already uses distinct seeded starts and now allows
 other mode lists as well, retaining `[1,1]` as its default experiment.
 
+Set `recipe["initial_binary_magnetization"] = True` to initialize the first single-species physical fit at the nearest of −1 and +1 to the measured-contrast guess, pixel by pixel. Exact zero chooses −1. This affects initialization only: subsequent iterations fit continuous values, and successive projections reuse the previous fitted values without snapping them again. Material/support masks retain zero outside the active region and saturation anchors retain their assigned signs. The XPCS notebook exposes this as `INITIAL_BINARY_MAGNETIZATION`, enabled by default; set it to `False` to keep the continuous measured guess. This option requires the single-species model.
+
 Set `recipe["binary_magnetization"] = True` to snap fitted physical magnetization to the nearest of `-1`, `0`, and `+1` at each internal fit iteration. Set `recipe["binary_magnetization_values"] = [-1, 1]` for two allowed values, or provide another nonempty list of finite values in `[-1, 1]`. Ties prefer the value with smaller magnitude, then the negative value. Material/support masks still force zero outside the active region, and saturated states remain fixed to their specified ±1. This overrides `clip_magnetization=False` and applies to magnetic chemical species. Saturated states and material/support masks remain enforced. Projection relaxation controls blending of the fitted model with input fields.
+
+### Reference phase and aperture illumination correction
+
+For the single-energy, single-beam physical-factorized workflow, set `align_global_phase=True` to align arbitrary observation phases from complex overlap of focused primary-mode fields in material-free support pixels. This is separate from `physical_phase_reference`, which only selects equivalent logarithm branches. The measured phase offsets are removed before fitting and restored afterward, preserving the observation phase gauge and detector intensity.
+
+Set `fit_aperture_illumination=True` for one gain per connected reference aperture in the prepared support. RH gains use complex least-squares overlap with `illumination_intensity_reference_observation`. `aperture_factor_type="complex"` retains local amplitude and phase; `"amplitude"` retains amplitude only. `align_global_phase` is an independent switch; with it disabled, amplitude-only gains do not align phase. Complex illumination gains inherently include their measured local phase even when global gauge alignment is disabled.
+
+`object_illumination_mode` controls the OH gain:
+
+- `"none"`: no OH illumination factor; only the separately requested global phase alignment applies.
+- `"pooled"`: OH amplitude follows pooled RH power and its phase follows pooled overlap for complex gains.
+- `"linear_plane"`: least-squares affine planes in RH log amplitude and pooled-gauge-relative phase versus centered x/y positions, evaluated at the OH centroid. Requires at least three non-collinear RHs; raises an error for degenerate geometry. Weights may be negative, particularly when extrapolating outside the RH convex hull. Phase differences must be on a consistent branch (relative to the pooled gauge); spatial phase gradients spanning more than a full turn are ambiguous. This predicts one scalar per OH, not an intra-aperture ramp.
+- `"distance_weighted"`: average RH log amplitudes and gauge-relative phases with inverse squared distance from each RH centroid to the OH centroid.
+- `"nearest"`: use the nearest RH, with equal weights for equal-distance ties.
+
+Positions are measured in centered object-grid coordinates before shifting into the physical-fit frame. These interpolation rules do not recover the beam profile. OH factors are never fitted from magnetic transmission. Correction/restoration apply to all modes in focused object space. Disable both factor switches and phase alignment for no correction, or enable phase alignment alone for gauge-only handling. The notebook defaults to RH-only factors with fixed OH illumination and explicit phase alignment.
+
+The returned/exported components include `global_phase_offsets_rad`, `aperture_illumination_factors` (observations by apertures), `aperture_illumination_labels` (physical object frame), `aperture_illumination_kinds`, `aperture_centroids_yx`, and `object_reference_weights`. Reference-aperture shape changes are not modeled. No beam profile is recovered, and estimating OH illumination from RH changes remains an assumption. Reference apertures must have finite nonzero overlap; corrections reject missing or unmeasurable references rather than estimating phase from magnetic material.
+
+With aperture fitting enabled, the primary-mode reference holes are also projected to a shared normalized complex spatial profile per RH, with fitted per-state factors restored afterward. The update uses projection relaxation and observation/gain precision weights. `reference_aperture_profile_residual_rms` reports the pre-update shape mismatch. Factors close to one do not imply identical RH profiles. This reference constraint influences subsequent detector updates; the OH factor remains governed by its selected rule.
+
+### Compact hysteresis histories and aperture HSV previews
+
+The XPCS notebook records summaries through `HysteresisHistory` at each joint physical projection and the final physical fit. `DIAGNOSTIC_MAX_STEPS` caps recent records (default 256). Each record contains sampled unblurred detector intensity errors, physical/RH fit residuals, complex aperture factors, OH histogram counts, tail counts, full-OH means, and sampled 10/50/90 percentiles. No fields or component maps are retained. Histograms use chunks of at most 65536 OH pixels; detector errors sample at most 8192 usable pixels per state and quantiles at most 4096 OH pixels. Detector-error curves do not include the partial-coherence kernel. Histories are saved in `histories/physical_step_history`; historical curves require rerunning the physical stage.
+
+`plot_complex_apertures` labels apertures from the centered support, shows OH first, and crops a padded window around each aperture. `HSV_MAX_PATCH_SIZE` bounds RGB patch dimensions (default 256); `HSV_STATES` chooses observations and `HSV_NORM` selects a shared brightness scale (`None` estimates a common 99th percentile from bounded samples). RGB hue follows phase and brightness follows amplitude. Figures are closed after display/saving and no full-frame RGB arrays are built.
+
+### Independent magnetic and illumination sharing across modes
+
+`magnetization_mode_groups` and `illumination_mode_groups` are optional lists of groups of **zero-based** mode indices. Both `None` retain primary-only physical fitting. Setting either option selects physical modes; the unspecified component then defaults to one independent group per selected mode. Explicit partitions must cover the same modes without duplicates, include mode 0, and use valid indices. The single-species `physical_factorized` model is required.
+
+For three equivalent modes:
+
+```python
+modes = [1, 1, 1]
+# One magnetic map per state, three independent illumination fields:
+magnetization_mode_groups = [[0, 1, 2]]
+illumination_mode_groups = [[0], [1], [2]]
+# Alternatively: independent magnetization, shared illumination:
+magnetization_mode_groups = [[0], [1], [2]]
+illumination_mode_groups = [[0, 1, 2]]
+# Mixed partitions:
+magnetization_mode_groups = [[0, 1], [2]]
+illumination_mode_groups = [[0], [1, 2]]
+```
+
+The fit uses `L[s,k] = C[beam,illumination_group(k)] + t*(q_charge + p*q_magnetic*m[state,magnetic_group(k)])`. Thickness and spectral responses are common; magnetic maps and nonmagnetic complex fields follow their independent partitions. Reference gain changes are tied within illumination groups when corrections are enabled, while arbitrary modal global phases are aligned independently, including across modes that share illumination. Selected magnetic modes are excluded from residual-mode common averaging. Unselected modes preserve the existing residual behavior.
+
+The notebook exposes uppercase versions of these options. Existing plots/component names refer to mode 0's magnetic/illumination group. All group maps and fields are available under `modal_physical_fit` in packed OH coordinates; `modal_physical_fit_aperture` maps them back to the physical object grid. The joint fit packs only active material pixels and processes full-grid Fourier transforms one observation/mode at a time. Successive projections reuse the packed joint fit. Changing sharing groups starts a new physical run; changing `MODES` also requires new warmup fields.
+
+When multiple support factors equal 1, the notebook renders warmup/final amplitude, phase, and HSV aperture views for every such mode. Final magnetization maps are labeled by mode and sharing group; residual modes are explicitly identified as having no assigned magnetic map. Histories include each magnetic group and each corrected mode's aperture factors. Additional group maps are sampled directly from packed OH coordinates, and field previews cache only one full object plane while building bounded patches per mode.
+
+### Optional CIDI intensity separation
+
+Use [`library.cidi.cidi_separate`](cidi.md) before reconstruction to separate reference-coherent intensity from reference-incoherent intensity using isolated holographic cross-correlations. The existing driver accepts its `reconstruction_inputs()` intensity/mask pair. See [CIDI usage, assumptions, missing pixels, and references](cidi.md) for the complete example. This optional path implements the analytic CIDI identities of [Sarkar and Johnson (2024)](https://doi.org/10.1039/D4MA00154K) and their [nonlinear CDI application (2025)](https://arxiv.org/abs/2512.15457); it does not replace physical mode grouping or turn on automatically.

@@ -4612,9 +4612,15 @@ def default_general_phase_retrieval_recipe():
         "mode_initialization_seed": 0,
         # Optional incident-power ratios from zero-thickness reference apertures.
         "fit_illumination_intensity": False,
+        "align_global_phase": False,
+        "fit_aperture_illumination": False,
+        "object_illumination_mode": "pooled",
+        "aperture_factor_type": "complex",
         "illumination_intensity_reference_observation": 0,
         # Optionally remove state dependence from support-factor modes other
         # than 1 by projecting them to one common object per energy/beam.
+        "magnetization_mode_groups": None,
+        "illumination_mode_groups": None,
         "constrain_nonphysical_modes_common": False,
         "nonphysical_modes_common_relaxation": 1.0,
         # General log-object projection settings.
@@ -4632,6 +4638,7 @@ def default_general_phase_retrieval_recipe():
         "physical_iterations": 20,
         "clip_magnetization": True,
         # Snap to the nearest of -1, 0, +1.
+        "initial_binary_magnetization": False,
         "binary_magnetization": False,
         "binary_magnetization_values": [-1.0, 0.0, 1.0],
         "physical_projection_object_roi": False,
@@ -5090,6 +5097,10 @@ def project_log_objects_physical(
     """
     Fit ``L = C_beam + t(r)[q_charge(E) + p*q_magnetic(E)*mz_state(r)]``.
 
+    Recipe ``initial_binary_magnetization=True`` snaps the first measured guess
+    to the nearest of -1 and +1 (exact zero chooses -1), without constraining
+    later fitting or snapping a reused fit.
+
     ``initial_components`` reuses a previous fit on the same state/energy/beam
     grid. Arrays are copied; saturated signs and support constraints still apply.
 
@@ -5128,8 +5139,13 @@ def project_log_objects_physical(
     binary_magnetization = recipe.get("binary_magnetization", False)
     if not isinstance(binary_magnetization, bool):
         raise ValueError("binary_magnetization must be bool.")
+    initial_binary = recipe.get("initial_binary_magnetization", False)
+    if not isinstance(initial_binary, bool):
+        raise ValueError("initial_binary_magnetization must be bool.")
     binary_values = _binary_magnetization_values(recipe) if binary_magnetization else None
     if recipe.get("chemical_species") is not None:
+        if initial_binary:
+            raise ValueError("initial_binary_magnetization currently supports the single-species physical model only.")
         if recipe.get("physical_spatial_weighting") is not None:
             raise ValueError("physical_spatial_weighting currently supports the single-species physical model only.")
         try:
@@ -5364,6 +5380,51 @@ def project_log_objects_physical(
         if anchor_norm > 1e-30:
             magnetic[energy] = anchor_rhs / anchor_norm
 
+    if initial_components is None:
+        # Seed free states from measured contrast before the first common-field
+        # update can absorb it. Saturated observations determine the baseline
+        # independently of the number/sign of free states in the scan.
+        numerator = np.zeros_like(magnetization)
+        denominator = np.zeros_like(magnetization)
+        for energy in range(n_energies):
+            for beam in range(n_beams):
+                observations = np.flatnonzero(
+                    (metadata["energy_indices"] == energy)
+                    & (metadata["beam_indices"] == beam))
+                if not len(observations):
+                    continue
+                anchors = [a for a in observations if metadata["states"][a] in saturated]
+                baseline = common[beam]
+                if anchors:
+                    anchor_weights = pixel_weights[anchors]
+                    anchor_signs = np.asarray([
+                        metadata["polarizations"][a] * saturated[metadata["states"][a]]
+                        for a in anchors])
+                    baseline = np.sum(anchor_weights * (
+                        log_objects[anchors] - anchor_signs[:, None, None]
+                        * magnetic[energy] * thickness), axis=0) / np.sum(anchor_weights, axis=0)
+                for observation in observations:
+                    state = metadata["state_indices"][observation]
+                    coefficient = metadata["polarizations"][observation] * magnetic[energy] * thickness
+                    weight = pixel_weights[observation]
+                    numerator[state] += weight * np.real(
+                        np.conj(coefficient) * (log_objects[observation] - baseline))
+                    denominator[state] += weight * abs(coefficient)**2
+        for state, name in enumerate(metadata["state_names"]):
+            if name not in saturated:
+                magnetization[state] = np.divide(
+                    numerator[state], denominator[state],
+                    out=np.zeros((nx, ny)), where=denominator[state] > 1e-30)
+        if initial_binary:
+            magnetization = _snap_magnetization(magnetization, np.array([-1., 1.]))
+        if binary_magnetization:
+            magnetization = _snap_magnetization(magnetization, binary_values)
+        elif clip_magnetization:
+            magnetization = np.clip(magnetization, -1., 1.)
+        magnetization *= allowed_material
+        if magnetization_supportmask is not None:
+            magnetization *= magnetization_supportmask
+
     reused_fit = initial_components is not None
     if reused_fit:
         for key in ("state_names", "energy_names", "beam_names"):
@@ -5387,6 +5448,8 @@ def project_log_objects_physical(
         magnetization *= allowed_material
         if magnetization_supportmask is not None:
             magnetization *= magnetization_supportmask
+
+    initial_magnetization = magnetization.copy()
 
     charge_spectral_info = {}
     magnetic_spectral_info = {}
@@ -5651,6 +5714,9 @@ def project_log_objects_physical(
     components = {
         "projection_model": "physical_factorized",
         "physical_fit_reused": reused_fit,
+        "initial_magnetization": initial_magnetization,
+        "magnetization_initialization": ("previous_fit" if reused_fit else
+                                         "nearest_sign" if initial_binary else "measured_contrast"),
         "physical_spatial_weighting": spatial_weighting,
         "physical_spatial_weights": spatial_weights,
         "weighted_fit_residual_rms": float(np.sqrt(
@@ -5950,6 +6016,19 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("fit_illumination_intensity must be bool.")
     if recipe["fit_illumination_intensity"] and recipe["projection_model"] != "physical_factorized":
         raise ValueError("Intensity fitting requires physical_factorized projection.")
+    for key in ("align_global_phase", "fit_aperture_illumination"):
+        if not isinstance(recipe[key], bool):
+            raise ValueError(f"{key} must be bool.")
+        if recipe[key] and recipe["projection_model"] != "physical_factorized":
+            raise ValueError(f"{key} requires physical_factorized projection.")
+    if recipe["object_illumination_mode"] not in {"none", "pooled", "distance_weighted", "nearest", "linear_plane"}:
+        raise ValueError("object_illumination_mode must be none, pooled, distance_weighted, nearest, or linear_plane.")
+    if recipe["aperture_factor_type"] not in {"complex", "amplitude"}:
+        raise ValueError("aperture_factor_type must be complex or amplitude.")
+    if recipe.get("magnetization_mode_groups") is not None or recipe.get("illumination_mode_groups") is not None:
+        if recipe["projection_model"] != "physical_factorized" or recipe.get("chemical_species") is not None:
+            raise ValueError("Physical mode groups require the single-species physical_factorized model.")
+        _physical_mode_groups(recipe, recipe["Nmodes"])
     if not isinstance(recipe["constrain_nonphysical_modes_common"], bool):
         raise ValueError("constrain_nonphysical_modes_common must be bool.")
     common_relaxation = recipe["nonphysical_modes_common_relaxation"]
@@ -6115,6 +6194,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         )
     if not isinstance(recipe["clip_magnetization"], bool):
         raise ValueError("clip_magnetization must be bool.")
+    if not isinstance(recipe["initial_binary_magnetization"], bool):
+        raise ValueError("initial_binary_magnetization must be bool.")
     if not isinstance(recipe["binary_magnetization"], bool):
         raise ValueError("binary_magnetization must be bool.")
     if recipe["binary_magnetization"]:
@@ -6584,6 +6665,7 @@ def _project_nonphysical_modes_common(
     beam_labels,
     recipe,
     weights=None,
+    mode_indices=None,
 ):
     """
     Remove state dependence from modes outside the physical model.
@@ -6596,6 +6678,11 @@ def _project_nonphysical_modes_common(
     array = np.asarray(fields)
     if array.ndim != 4 or array.shape[1] < 2:
         return array.copy(), []
+    if mode_indices is None:
+        physical_groups = _physical_mode_groups(recipe, array.shape[1])
+        if physical_groups is not None:
+            physical_modes = {mode for group in physical_groups[0] for mode in group}
+            mode_indices = sorted(set(range(array.shape[1])) - physical_modes)
     n_observations = array.shape[0]
     energies = np.asarray(energy_labels)
     beams = np.asarray(beam_labels)
@@ -6616,7 +6703,7 @@ def _project_nonphysical_modes_common(
     groups = {}
     for observation, key in enumerate(zip(energies.tolist(), beams.tolist())):
         groups.setdefault(key, []).append(observation)
-    for mode_index in range(1, array.shape[1]):
+    for mode_index in (range(1, array.shape[1]) if mode_indices is None else mode_indices):
         for key, indices in groups.items():
             group_weights = observation_weights[indices]
             total = float(np.sum(group_weights))
@@ -6647,6 +6734,321 @@ def _project_nonphysical_modes_common(
     return output, group_records
 
 
+def _reference_illumination_correction(fields, energy_labels, beam_labels, recipe, thickness, support, factor_override=None, phase_gauge_offset=0.):
+    """Estimate scalar/aperture complex gains from material-free support only.
+
+    The object aperture uses a selected reference estimate or no gain, never
+    its magnetic transmission. Corrections act in focused object space on all modes. Global
+    phase remains a gauge: undo the correction after fitting to retain each
+    observation's detector-equivalent phase.
+    """
+    from scipy.ndimage import label
+    aperture_fit = recipe.get("fit_aperture_illumination", False)
+    phase_fit = recipe.get("align_global_phase", False)
+    object_mode = recipe.get("object_illumination_mode", "pooled")
+    factor_type = recipe.get("aperture_factor_type", "complex")
+    if object_mode not in {"none", "pooled", "distance_weighted", "nearest", "linear_plane"}:
+        raise ValueError("object_illumination_mode must be none, pooled, distance_weighted, nearest, or linear_plane.")
+    if factor_type not in {"complex", "amplitude"}:
+        raise ValueError("aperture_factor_type must be complex or amplitude.")
+    intensity_fit = recipe.get("fit_illumination_intensity", False) or aperture_fit
+    if thickness is None or support is None:
+        raise ValueError("Reference illumination correction requires material thickness and support.")
+    reference_mask = (np.asarray(thickness) == 0) & (np.asarray(support) != 0)
+    if not np.any(reference_mask):
+        raise ValueError("Reference illumination correction requires material-free reference pixels inside the support.")
+    reference = recipe.get("illumination_intensity_reference_observation", 0)
+    if (isinstance(reference, bool) or not isinstance(reference, (int, np.integer))
+            or not 0 <= reference < len(fields)):
+        raise ValueError("illumination_intensity_reference_observation must index an observation.")
+    # Mixing energies or beams would turn physical reference changes into gains.
+    if len(set(energy_labels)) != 1 or len(set(beam_labels)) != 1:
+        raise ValueError("Reference illumination correction currently requires one energy and one beam.")
+    array = np.asarray(fields)
+    modes = array[:, None] if array.ndim == 3 else array
+    def focus(value, inverse=False):
+        return np.stack([_projection_focus_transform(
+            value[:, m], energy_labels, recipe.get("projection_focus_prop_um", 0.),
+            recipe.get("projection_focus_phase_rad", 0.), recipe.get("projection_focus_setup"),
+            inverse=inverse, integer_wavelength=recipe.get("projection_focus_integer_wavelength", True))
+            for m in range(value.shape[1])], axis=1)
+    objects = np.fft.fft2(np.fft.fftshift(focus(modes), axes=(-2,-1)))
+    primary = objects[:, 0]
+    powers = np.sum(abs(primary[:, reference_mask])**2, axis=1)
+    if np.any(~np.isfinite(powers)) or np.any(powers <= 0):
+        raise ValueError("Reference apertures require finite positive reconstructed power in every observation.")
+    overlap = np.sum(primary[reference, reference_mask].conj()[None] * primary[:, reference_mask], axis=1)
+    if (phase_fit or (aperture_fit and factor_type == "complex")) and (np.any(~np.isfinite(overlap)) or np.any(abs(overlap) <= 1e-12*np.sqrt(powers*powers[reference]))):
+        raise ValueError("Reference overlap is too small for global phase alignment.")
+    phases = np.angle(overlap)+phase_gauge_offset if phase_fit else np.zeros(len(array))
+    gains = powers/powers[reference] if intensity_fit else np.ones(len(array))
+    pooled = np.sqrt(gains)*np.exp(1j*phases)
+    # Scalar correction applies everywhere; aperture corrections override it
+    # inside reference holes while the material aperture retains pooled gains.
+    correction = np.broadcast_to(pooled[:, None, None], primary.shape).copy()
+    details = dict(illumination_intensity_factors=gains,
+                   illumination_intensity_reference_observation=int(reference),
+                   illumination_intensity_reference_pixels=int(reference_mask.sum()),
+                   illumination_intensity_fit="primary reference-aperture power ratio",
+                   global_phase_offsets_rad=phases,
+                   pooled_reference_phase_offsets_rad=np.angle(overlap),
+                   global_phase_aligned=bool(phase_fit))
+    if aperture_fit:
+        # Label and measure centroids in centered coordinates; physical-frame
+        # FFT boundaries can split a hole and corrupt distances.
+        centered_labels, count = label(np.fft.fftshift(np.asarray(support) != 0))
+        labels = np.fft.ifftshift(centered_labels)
+        centroids = np.asarray([np.mean(np.argwhere(centered_labels == k), axis=0)
+                                for k in range(1, count+1)])
+        object_ids = [k for k in range(1, count+1)
+                      if np.any(np.asarray(thickness)[labels == k] > 0)]
+        reference_ids = [k for k in range(1, count+1) if k not in object_ids]
+        if not reference_ids:
+            raise ValueError("Aperture correction requires separate material-free reference apertures.")
+        gauge = np.exp(1j*phases)
+        factors = np.broadcast_to(gauge[:, None], (len(array), count)).copy()
+        kinds = ["reference" if k in reference_ids else "object_"+object_mode
+                 for k in range(1, count+1)]
+        # RH factors are measured independently; the OH is never used to fit a gain.
+        for aperture in reference_ids:
+            mask = labels == aperture
+            reference_values = primary[reference, mask]
+            norm = np.sum(abs(reference_values)**2)
+            if norm <= 0 or not np.isfinite(norm):
+                raise ValueError("Each reference aperture requires finite positive reference power.")
+            factor = np.sum(reference_values.conj()[None]*primary[:, mask], axis=1)/norm
+            if np.any(~np.isfinite(factor)) or np.any(abs(factor) < 1e-12):
+                raise ValueError("Reference aperture overlap is too small for a complex factor.")
+            factors[:, aperture-1] = factor*np.exp(1j*phase_gauge_offset) if factor_type == "complex" else abs(factor)*gauge
+        object_weights = np.zeros((len(object_ids), len(reference_ids)))
+        reference_factors = factors[:, np.asarray(reference_ids)-1]
+        for j, aperture in enumerate(object_ids):
+            if object_mode == "none":
+                factor = gauge  # Phase gauge only, no OH illumination freedom.
+            elif object_mode == "pooled":
+                reference_power = np.asarray([np.sum(abs(primary[reference, labels == k])**2)
+                                              for k in reference_ids])
+                object_weights[j] = reference_power/reference_power.sum()
+                pooled_phase = np.angle(overlap)+phase_gauge_offset if factor_type == "complex" else phases
+                factor = np.sqrt(gains)*np.exp(1j*pooled_phase)
+            else:
+                distance = np.linalg.norm(centroids[np.asarray(reference_ids)-1]
+                                          - centroids[aperture-1], axis=1)
+                if object_mode == "linear_plane":
+                    # Fit intercept and two spatial slopes using every RH.
+                    # Center at the OH so the intercept is its predicted log gain.
+                    offsets = centroids[np.asarray(reference_ids)-1] - centroids[aperture-1]
+                    scale = max(float(np.max(abs(offsets))), 1.)
+                    design = np.column_stack((np.ones(len(reference_ids)), offsets/scale))
+                    if np.linalg.matrix_rank(design) < 3:
+                        raise ValueError("linear_plane OH factors require at least three non-collinear reference apertures.")
+                    spatial_weights = np.linalg.pinv(design)[0]
+                elif object_mode == "nearest":
+                    spatial_weights = (distance == np.min(distance)).astype(float)
+                else:
+                    spatial_weights = 1./np.maximum(distance, 1.)**2
+                spatial_weights /= spatial_weights.sum()
+                object_weights[j] = spatial_weights
+                # Interpolate log amplitude and phase on the pooled gauge branch.
+                # This prevents +/-pi phase wrapping from cancelling complex gains.
+                branch_phase = np.angle(overlap)+phase_gauge_offset if factor_type == "complex" else phases
+                relative_phase = np.angle(reference_factors*np.exp(-1j*branch_phase[:, None]))
+                factor = np.exp(np.sum(spatial_weights[None]*(np.log(abs(reference_factors))
+                                + 1j*relative_phase), axis=1) + 1j*branch_phase)
+            factors[:, aperture-1] = factor
+        correction = np.broadcast_to(gauge[:, None, None], primary.shape).copy()
+        for aperture in range(1, count+1):
+            correction[:, labels == aperture] = factors[:, aperture-1, None]
+        # Single OH workflows use this actual gain in endpoint/export diagnostics.
+        oh_factor = factors[:, object_ids[0]-1] if object_ids else gauge
+        details.update(illumination_intensity_factors=abs(oh_factor)**2,
+                       pooled_reference_intensity_factors=gains,
+                       aperture_illumination_factors=factors,
+                       aperture_illumination_labels=labels,
+                       aperture_illumination_kinds=kinds,
+                       aperture_centroids_yx=centroids,
+                       object_aperture_ids=np.asarray(object_ids),
+                       reference_aperture_ids=np.asarray(reference_ids),
+                       object_reference_weights=object_weights,
+                       object_illumination_constraint=object_mode,
+                       aperture_factor_type=factor_type)
+    if factor_override is not None:
+        if aperture_fit:
+            factors = np.asarray(factor_override, complex)
+            if factors.shape != details['aperture_illumination_factors'].shape:
+                raise ValueError('Shared aperture factors have incompatible shape.')
+            for aperture in range(1,count+1):
+                correction[:,labels==aperture] = factors[:,aperture-1,None]
+            details['aperture_illumination_factors'] = factors.copy()
+            details['illumination_intensity_factors'] = abs(factors[:,object_ids[0]-1])**2
+        else:
+            shared_gain = np.asarray(factor_override, float)
+            correction = np.broadcast_to(np.sqrt(shared_gain)[:,None,None]
+                         * np.exp(1j*phases)[:,None,None],primary.shape).copy()
+            details['illumination_intensity_factors'] = shared_gain.copy()
+    def to_fields(value):
+        result = focus(np.fft.ifftshift(np.fft.ifft2(value), axes=(-2,-1)), inverse=True)
+        return result[:, 0] if array.ndim == 3 else result
+    normalized = to_fields(objects/correction[:, None])
+    def restore(value, reference_relaxation=0., weights=None):
+        value = value[:, None] if array.ndim == 3 else value
+        focused_objects = np.fft.fft2(np.fft.fftshift(focus(value), axes=(-2,-1)))
+        if aperture_fit and reference_relaxation > 0:
+            # Actually constrain the primary RH fields: normalization alone
+            # cancels on restoration when the OH-only projector leaves RHs free.
+            # Estimate one normalized complex profile per RH using the original
+            # least-squares metric (precision scales with squared aperture gain).
+            observation_weights = _observation_weights(weights, len(array))
+            residual_norm = 0.
+            residual_pixels = 0
+            for aperture in reference_ids:
+                mask = labels == aperture
+                values = focused_objects[:, 0, mask]
+                precision = observation_weights*abs(factors[:, aperture-1])**2
+                common_reference = np.sum(precision[:, None]*values, axis=0)/precision.sum()
+                residual_norm += float(np.sum(abs(values-common_reference)**2))
+                residual_pixels += values.size
+                focused_objects[:, 0, mask] = ((1-reference_relaxation)*values
+                                              + reference_relaxation*common_reference)
+            details["reference_aperture_common_profile"] = True
+            details["reference_aperture_profile_residual_rms"] = float(
+                np.sqrt(residual_norm/max(residual_pixels, 1)))
+        return to_fields(focused_objects*correction[:, None])
+    return normalized, restore, details
+
+
+def _physical_mode_groups(recipe, n_modes):
+    """Resolve explicit zero-based partitions; None retains primary-only behavior."""
+    magnetic = recipe.get("magnetization_mode_groups")
+    illumination = recipe.get("illumination_mode_groups")
+    if magnetic is None and illumination is None:
+        return None
+    def validate(groups, name):
+        if not isinstance(groups, (list, tuple)) or not groups:
+            raise ValueError(f"{name} must contain nonempty lists of zero-based mode indices.")
+        result = []
+        used = set()
+        for group in groups:
+            if not isinstance(group, (list, tuple)) or not group:
+                raise ValueError(f"{name} contains an empty or invalid group.")
+            for mode in group:
+                if (isinstance(mode, bool) or not isinstance(mode, (int, np.integer))
+                        or not 0 <= mode < n_modes or mode in used):
+                    raise ValueError(f"{name} mode indices must be unique and within the mode count.")
+                used.add(mode)
+            result.append(list(group))
+        return result, used
+    if magnetic is not None:
+        magnetic, selected = validate(magnetic, "magnetization_mode_groups")
+    else:
+        illumination, selected = validate(illumination, "illumination_mode_groups")
+        magnetic = [[mode] for mode in sorted(selected)]
+    if illumination is None:
+        illumination = [[mode] for mode in sorted(selected)]
+    else:
+        illumination, illuminated = validate(illumination, "illumination_mode_groups")
+        if selected != illuminated:
+            raise ValueError("Magnetization and illumination groups must cover the same modes.")
+    if 0 not in selected:
+        raise ValueError("Physical mode groups must include primary mode 0.")
+    return magnetic, illumination
+
+
+def _project_grouped_physical_modes(fields, state_labels, energy_labels, polarizations, beam_labels,
+                                    groups, **kwargs):
+    """Joint physical fit with independent sharing of magnetic maps and beam fields.
+
+    Fit only packed material pixels. Full Fourier transforms are processed one
+    observation/mode at a time, never stored as a second full modal object stack.
+    """
+    recipe = kwargs['recipe']
+    if recipe.get('chemical_species') is not None:
+        raise ValueError('Physical mode groups currently support the single-species model only.')
+    if kwargs.get('projection_model', 'physical_factorized') != 'physical_factorized':
+        raise ValueError('Physical mode groups require physical_factorized projection.')
+    magnetic_groups, illumination_groups = groups
+    selected = sorted(mode for group in magnetic_groups for mode in group)
+    magnetic_id = {mode:i for i,group in enumerate(magnetic_groups) for mode in group}
+    illumination_id = {mode:i for i,group in enumerate(illumination_groups) for mode in group}
+    thickness = kwargs.get('material_thickness')
+    if thickness is None:
+        raise ValueError('Physical mode groups require a material thickness/aperture map.')
+    thickness = np.asarray(thickness)
+    aperture = thickness > 0
+    support = kwargs.get('projection_supportmask')
+    if support is not None:
+        aperture &= np.asarray(support) != 0
+    if not np.any(aperture):
+        raise ValueError('Physical mode aperture is empty.')
+    n_observations = len(fields)
+    metadata = _normalize_metadata(state_labels, energy_labels, polarizations, beam_labels, n_observations)
+    records = [(observation, mode) for observation in range(n_observations) for mode in selected]
+    def focus(field, observation, inverse=False):
+        return _projection_focus_transform(field[None], [energy_labels[observation]],
+            recipe.get('projection_focus_prop_um',0.), recipe.get('projection_focus_phase_rad',0.),
+            recipe.get('projection_focus_setup'), inverse=inverse,
+            integer_wavelength=recipe.get('projection_focus_integer_wavelength',True))[0]
+    logs = np.empty((len(records), int(aperture.sum()), 1),complex)
+    for index,(observation,mode) in enumerate(records):
+        obj = np.fft.fft2(np.fft.fftshift(focus(fields[observation,mode],observation)))
+        values = obj[aperture]
+        logs[index,:,0] = np.log(np.maximum(abs(values), kwargs.get('log_floor',1e-12))) + 1j*np.angle(values)
+    state_keys = [f's{metadata["state_indices"][obs]}_m{magnetic_id[mode]}' for obs,mode in records]
+    beam_keys = [f'b{metadata["beam_indices"][obs]}_i{illumination_id[mode]}' for obs,mode in records]
+    anchors = _normalize_saturated_states(kwargs.get('saturated_states'), metadata['state_names'])
+    joint_anchors = {f's{i}_m{group}':anchors[state] for i,state in enumerate(metadata['state_names'])
+                     if state in anchors for group in range(len(magnetic_groups))}
+    weights = _observation_weights(kwargs.get('weights'), n_observations)
+    initial = kwargs.get('initial_components')
+    previous = None if initial is None else initial.get('modal_physical_fit')
+    if previous is not None and (initial['magnetization_mode_groups'] != magnetic_groups
+                                or initial['illumination_mode_groups'] != illumination_groups):
+        raise ValueError('Physical mode sharing changed; start a new physical run.')
+    def pack(value):
+        return None if value is None else np.asarray(value)[aperture,None]
+    projected, fit = project_log_objects_physical(
+        logs, state_keys, [energy_labels[obs] for obs,_ in records],
+        [polarizations[obs] for obs,_ in records], beam_keys,
+        weights=np.asarray([weights[obs] for obs,_ in records]),
+        relaxation=kwargs.get('relaxation',1.), saturated_states=joint_anchors,
+        iterations=kwargs.get('physical_iterations',20),
+        recipe=dict(recipe, physical_projection_object_roi=False),
+        magnetization_supportmask=pack(kwargs.get('magnetization_supportmask')),
+        projection_supportmask=np.ones((int(aperture.sum()),1),bool),
+        material_thickness=pack(thickness), fit_material_thickness=kwargs.get('fit_material_thickness',False),
+        thickness_supportmask=pack(kwargs.get('thickness_supportmask')),
+        initial_components=previous, return_components=True)
+    output = np.asarray(fields).copy()
+    for index,(observation,mode) in enumerate(records):
+        obj = np.fft.fft2(np.fft.fftshift(focus(fields[observation,mode],observation)))
+        obj[aperture] = np.exp(projected[index,:,0])
+        output[observation,mode] = focus(np.fft.ifftshift(np.fft.ifft2(obj)),observation,inverse=True)
+    def expand(value):
+        full = np.zeros(np.shape(value)[:-2]+aperture.shape, dtype=np.asarray(value).dtype)
+        full[...,aperture] = np.asarray(value)[...,0]
+        return full
+    primary_states = [fit['state_names'].index(f's{i}_m{magnetic_id[0]}') for i in range(len(metadata['state_names']))]
+    primary_beams = [fit['beam_names'].index(f'b{i}_i{illumination_id[0]}') for i in range(len(metadata['beam_names']))]
+    components = dict(fit)
+    components.update(state_names=metadata['state_names'],beam_names=metadata['beam_names'],
+        magnetization=expand(fit['magnetization'][primary_states]),
+        initial_magnetization=expand(fit['initial_magnetization'][primary_states]),
+        common_log_objects=expand(fit['common_log_objects'][primary_beams]),
+        common_exit_waves=expand(fit['common_exit_waves'][primary_beams]),
+        material_thickness=expand(fit['material_thickness']), saturated_states=anchors,
+        modal_physical_fit=fit, modal_physical_fit_aperture=aperture,
+        magnetization_mode_groups=magnetic_groups, illumination_mode_groups=illumination_groups,
+        physical_model_modes=[mode+1 for mode in selected], Nmodes=fields.shape[1],
+        physical_components_frame='focused_object_plane' if recipe.get('projection_focus_prop_um',0.) else 'retrieval_object_plane')
+    components['magnetization_by_state'] = dict(zip(metadata['state_names'],components['magnetization']))
+    components['common_log_objects_by_beam'] = dict(zip(metadata['beam_names'],components['common_log_objects']))
+    # Additional magnetic groups remain packed; expand on demand for diagnostics.
+    components['magnetization_by_mode_group_packed'] = {
+        str(group):fit['magnetization'][[fit['state_names'].index(f's{i}_m{group}')
+                   for i in range(len(metadata['state_names']))]] for group in range(len(magnetic_groups))}
+    return output, components
+
+
 def _project_physical_modes(
     fields,
     state_labels,
@@ -6663,42 +7065,103 @@ def _project_physical_modes(
     secondary mode. The secondary field never enters the charge/magnetization fit.
     """
     recipe = kwargs.get("recipe")
-    if recipe is not None and recipe.get("fit_illumination_intensity", False):
-        # Estimate incident power from known vacuum/reference apertures. Never
-        # use sample transmission, which could absorb genuine magnetic changes.
-        thickness = kwargs.get("material_thickness")
-        support = kwargs.get("projection_supportmask")
-        if thickness is None or support is None:
-            raise ValueError("Intensity fitting requires material_thickness and a projection support containing reference holes.")
-        reference_mask = (np.asarray(thickness) == 0) & (np.asarray(support) != 0)
-        if not np.any(reference_mask):
-            raise ValueError("Intensity fitting requires material-free reference pixels inside the support.")
-        reference = recipe.get("illumination_intensity_reference_observation", 0)
-        if (isinstance(reference, bool) or not isinstance(reference, (int, np.integer))
-                or not 0 <= reference < len(fields)):
-            raise ValueError("illumination_intensity_reference_observation must index an observation.")
-        primary = fields[:, 0] if np.asarray(fields).ndim == 4 else fields
-        focused = _projection_focus_transform(
-            primary, energy_labels, recipe.get("projection_focus_prop_um", 0.),
-            recipe.get("projection_focus_phase_rad", 0.), recipe.get("projection_focus_setup"),
-            inverse=False, integer_wavelength=recipe.get("projection_focus_integer_wavelength", True))
-        objects = np.fft.fft2(np.fft.fftshift(focused, axes=(-2, -1)))
-        powers = np.sum(abs(objects[:, reference_mask]) ** 2, axis=1)
-        if np.any(~np.isfinite(powers)) or np.any(powers <= 0):
-            raise ValueError("Reference apertures must have finite positive reconstructed power in every observation.")
-        gains = powers / powers[reference]
-        scale = np.sqrt(gains).reshape((-1,) + (1,) * (np.asarray(fields).ndim - 1))
-        normalized_recipe = dict(recipe, fit_illumination_intensity=False)
+    groups = (_physical_mode_groups(recipe, np.asarray(fields).shape[1])
+              if recipe is not None and np.asarray(fields).ndim == 4 else None)
+    if groups is not None:
+        group_kwargs = dict(kwargs)
+        callback = group_kwargs.pop('diagnostic_callback', None)
+        corrections = {}
+        normalized = np.asarray(fields)
+        if any(recipe.get(key,False) for key in ('fit_illumination_intensity','align_global_phase','fit_aperture_illumination')):
+            normalized = normalized.copy()
+            mode_phase_offsets = {}
+            if recipe.get('align_global_phase'):
+                reference = recipe.get('illumination_intensity_reference_observation',0)
+                reference_mask = (np.asarray(kwargs['material_thickness'])==0) & (np.asarray(kwargs['projection_supportmask'])!=0)
+                def reference_object(mode):
+                    focused = _projection_focus_transform(fields[reference:reference+1,mode],
+                        [energy_labels[reference]],recipe.get('projection_focus_prop_um',0.),
+                        recipe.get('projection_focus_phase_rad',0.),recipe.get('projection_focus_setup'),
+                        integer_wavelength=recipe.get('projection_focus_integer_wavelength',True))[0]
+                    return np.fft.fft2(np.fft.fftshift(focused))[reference_mask]
+                for illumination_group in groups[1]:
+                    anchor = reference_object(illumination_group[0])
+                    for mode in illumination_group:
+                        overlap = np.vdot(anchor,reference_object(mode))
+                        if abs(overlap)==0:
+                            raise ValueError('Shared illumination modes require reference phase overlap.')
+                        mode_phase_offsets[mode] = np.angle(overlap)
+            for mode in sorted(m for group in groups[0] for m in group):
+                normalized[:,mode], restore, details = _reference_illumination_correction(
+                    fields[:,mode], energy_labels, beam_labels, recipe,
+                    kwargs.get('material_thickness'), kwargs.get('projection_supportmask'),
+                    phase_gauge_offset=mode_phase_offsets.get(mode,0.))
+                corrections[mode] = (restore, details)
+            # Shared illumination also ties relative gain changes across modes;
+            # arbitrary per-mode global phases remain independent gauge choices.
+            for illumination_group in groups[1]:
+                if len(illumination_group) < 2:
+                    continue
+                details_list = [corrections[mode][1] for mode in illumination_group]
+                if recipe.get('fit_aperture_illumination'):
+                    relative = np.stack([d['aperture_illumination_factors']
+                        * np.exp(-1j*d['global_phase_offsets_rad'])[:,None] for d in details_list])
+                    shared = np.exp(np.mean(np.log(abs(relative)),axis=0))
+                    phase_mean = np.mean(relative/abs(relative),axis=0)
+                    if np.any(abs(phase_mean)<1e-12):
+                        raise ValueError('Shared illumination modes have incompatible reference phases.')
+                    shared = shared*np.exp(1j*np.angle(phase_mean))
+                    overrides = [shared*np.exp(1j*d['global_phase_offsets_rad'])[:,None] for d in details_list]
+                else:
+                    shared = np.exp(np.mean(np.log([d['illumination_intensity_factors']
+                                                   for d in details_list]),axis=0))
+                    overrides = [shared]*len(illumination_group)
+                for mode,override in zip(illumination_group,overrides):
+                    normalized[:,mode],restore,details = _reference_illumination_correction(
+                        fields[:,mode],energy_labels,beam_labels,recipe,
+                        kwargs.get('material_thickness'),kwargs.get('projection_supportmask'),
+                        factor_override=override, phase_gauge_offset=mode_phase_offsets.get(mode,0.))
+                    corrections[mode] = (restore,details)
+            group_kwargs['recipe'] = dict(recipe, fit_illumination_intensity=False,
+                                         align_global_phase=False, fit_aperture_illumination=False)
+        output, components = _project_grouped_physical_modes(
+            normalized, state_labels, energy_labels, polarization_coefficients, beam_labels,
+            groups, **group_kwargs)
+        modal_corrections = {}
+        for mode,(restore,details) in corrections.items():
+            output[:,mode] = restore(output[:,mode], reference_relaxation=kwargs.get('relaxation',1.),
+                                    weights=kwargs.get('weights'))
+            modal_corrections[str(mode)] = details
+        if corrections:
+            components.update(corrections[0][1])
+            components['illumination_corrections_by_mode'] = modal_corrections
+        residual_modes = sorted(set(range(output.shape[1]))-set(m for group in groups[0] for m in group))
+        common_groups = []
+        if recipe.get('constrain_nonphysical_modes_common') and residual_modes:
+            output,common_groups = _project_nonphysical_modes_common(output,energy_labels,beam_labels,
+                recipe,weights=kwargs.get('weights'), mode_indices=residual_modes)
+        components['nonphysical_modes_common'] = bool(common_groups)
+        components['nonphysical_mode_common_groups'] = common_groups
+        if callback is not None:
+            callback('physical_primary',output)
+            callback('common_secondary',output)
+        return (output,components) if kwargs.get('return_components') else output
+
+    if recipe is not None and any(recipe.get(key, False) for key in (
+            "fit_illumination_intensity", "align_global_phase", "fit_aperture_illumination")):
+        normalized, restore, details = _reference_illumination_correction(
+            fields, energy_labels, beam_labels, recipe,
+            kwargs.get("material_thickness"), kwargs.get("projection_supportmask"))
+        normalized_recipe = dict(recipe, fit_illumination_intensity=False,
+                                 align_global_phase=False, fit_aperture_illumination=False)
         normalized_kwargs = dict(kwargs, recipe=normalized_recipe, return_components=True)
         callback = normalized_kwargs.pop("diagnostic_callback", None)
         output, components = _project_physical_modes(
-            np.asarray(fields) / scale, state_labels, energy_labels,
+            normalized, state_labels, energy_labels,
             polarization_coefficients, beam_labels, **normalized_kwargs)
-        output *= scale
-        components.update(illumination_intensity_factors=gains,
-                          illumination_intensity_reference_observation=int(reference),
-                          illumination_intensity_reference_pixels=int(reference_mask.sum()),
-                          illumination_intensity_fit="primary reference-aperture power ratio")
+        output = restore(output, reference_relaxation=kwargs.get("relaxation", 1.),
+                         weights=kwargs.get("weights"))
+        components.update(details)
         if callback is not None:
             callback("physical_primary", output)
             callback("common_secondary", output)
@@ -7491,6 +7954,11 @@ def general_phase_retrieval_algorithm(
         )
         fields = final_projected_fields
         restore_frozen_observations(fields)
+        if progress_callback is not None:
+            progress_callback(dict(stage="final_physical_projection", outer_round=outer_iterations,
+                fields=fields, components=components, recipe=recipe,
+                supportmask=supportmask, state_labels=metadata["states"],
+                energy_labels=metadata["energies"]))
     components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
     components["final_projection_skipped"] = bool(
         recipe["projection_model"] == "none"
