@@ -6026,8 +6026,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     if recipe["aperture_factor_type"] not in {"complex", "amplitude"}:
         raise ValueError("aperture_factor_type must be complex or amplitude.")
     if recipe.get("magnetization_mode_groups") is not None or recipe.get("illumination_mode_groups") is not None:
-        if recipe["projection_model"] != "physical_factorized" or recipe.get("chemical_species") is not None:
-            raise ValueError("Physical mode groups require the single-species physical_factorized model.")
+        if recipe["projection_model"] != "physical_factorized":
+            raise ValueError("Physical mode groups require the physical_factorized model.")
         _physical_mode_groups(recipe, recipe["Nmodes"])
     if not isinstance(recipe["constrain_nonphysical_modes_common"], bool):
         raise ValueError("constrain_nonphysical_modes_common must be bool.")
@@ -6962,8 +6962,7 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
     observation/mode at a time, never stored as a second full modal object stack.
     """
     recipe = kwargs['recipe']
-    if recipe.get('chemical_species') is not None:
-        raise ValueError('Physical mode groups currently support the single-species model only.')
+    species_model = recipe.get('chemical_species') is not None
     if kwargs.get('projection_model', 'physical_factorized') != 'physical_factorized':
         raise ValueError('Physical mode groups require physical_factorized projection.')
     magnetic_groups, illumination_groups = groups
@@ -6980,6 +6979,9 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
         aperture &= np.asarray(support) != 0
     if not np.any(aperture):
         raise ValueError('Physical mode aperture is empty.')
+    if species_model:
+        # Include vacuum pixels so species gauge alignment retains its reference.
+        aperture = (np.ones_like(aperture) if support is None else np.asarray(support) != 0)
     n_observations = len(fields)
     metadata = _normalize_metadata(state_labels, energy_labels, polarizations, beam_labels, n_observations)
     records = [(observation, mode) for observation in range(n_observations) for mode in selected]
@@ -7006,13 +7008,29 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
         raise ValueError('Physical mode sharing changed; start a new physical run.')
     def pack(value):
         return None if value is None else np.asarray(value)[aperture,None]
+    local_recipe = dict(recipe, physical_projection_object_roi=False)
+    if species_model:
+        local_recipe['chemical_species'] = []
+        for entry in recipe['chemical_species']:
+            entry = dict(entry)
+            for key in ('density_map', 'supportmask'):
+                if entry.get(key) is not None:
+                    entry[key] = pack(entry[key])
+            if entry.get('saturated_states') is not None:
+                species_anchors = _normalize_saturated_states(entry['saturated_states'], metadata['state_names'])
+                entry['saturated_states'] = {
+                    f's{i}_m{group}': species_anchors[state]
+                    for i,state in enumerate(metadata['state_names']) if state in species_anchors
+                    for group in range(len(magnetic_groups))}
+            local_recipe['chemical_species'].append(entry)
+        local_recipe['chemical_reference_mask'] = pack(recipe.get('chemical_reference_mask'))
     projected, fit = project_log_objects_physical(
         logs, state_keys, [energy_labels[obs] for obs,_ in records],
         [polarizations[obs] for obs,_ in records], beam_keys,
         weights=np.asarray([weights[obs] for obs,_ in records]),
         relaxation=kwargs.get('relaxation',1.), saturated_states=joint_anchors,
         iterations=kwargs.get('physical_iterations',20),
-        recipe=dict(recipe, physical_projection_object_roi=False),
+        recipe=local_recipe,
         magnetization_supportmask=pack(kwargs.get('magnetization_supportmask')),
         projection_supportmask=np.ones((int(aperture.sum()),1),bool),
         material_thickness=pack(thickness), fit_material_thickness=kwargs.get('fit_material_thickness',False),
@@ -7032,7 +7050,7 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
     components = dict(fit)
     components.update(state_names=metadata['state_names'],beam_names=metadata['beam_names'],
         magnetization=expand(fit['magnetization'][primary_states]),
-        initial_magnetization=expand(fit['initial_magnetization'][primary_states]),
+        initial_magnetization=expand(fit.get('initial_magnetization',fit['magnetization'])[primary_states]),
         common_log_objects=expand(fit['common_log_objects'][primary_beams]),
         common_exit_waves=expand(fit['common_exit_waves'][primary_beams]),
         material_thickness=expand(fit['material_thickness']), saturated_states=anchors,
@@ -7042,10 +7060,37 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
         physical_components_frame='focused_object_plane' if recipe.get('projection_focus_prop_um',0.) else 'retrieval_object_plane')
     components['magnetization_by_state'] = dict(zip(metadata['state_names'],components['magnetization']))
     components['common_log_objects_by_beam'] = dict(zip(metadata['beam_names'],components['common_log_objects']))
+    components['common_exit_waves_by_beam'] = dict(zip(metadata['beam_names'],components['common_exit_waves']))
     # Additional magnetic groups remain packed; expand on demand for diagnostics.
     components['magnetization_by_mode_group_packed'] = {
         str(group):fit['magnetization'][[fit['state_names'].index(f's{i}_m{group}')
                    for i in range(len(metadata['state_names']))]] for group in range(len(magnetic_groups))}
+    if species_model:
+        components['species'] = {}
+        for name,item in fit['species'].items():
+            item = dict(item)
+            item['magnetization_by_mode_group_packed'] = {
+                str(group): item['magnetization'][[
+                    fit['state_names'].index(f's{i}_m{group}')
+                    for i in range(len(metadata['state_names']))]]
+                for group in range(len(magnetic_groups))}
+            item['magnetization'] = expand(item['magnetization'][primary_states])
+            for key in ('density_map','supportmask'):
+                item[key] = expand(item[key])
+            item['magnetization_by_state'] = dict(zip(metadata['state_names'],item['magnetization']))
+            item['saturated_states'] = {
+                state: item['saturated_states'][f's{i}_m{magnetic_id[0]}']
+                for i,state in enumerate(metadata['state_names'])
+                if f's{i}_m{magnetic_id[0]}' in item['saturated_states']}
+            components['species'][name] = item
+        components['species_density_maps'] = expand(fit['species_density_maps'])
+        components['species_magnetization'] = expand(fit['species_magnetization'][:,primary_states])
+        components['chemical_reference_mask'] = expand(fit['chemical_reference_mask'])
+        components['physical_projection_roi_mask'] = expand(fit['physical_projection_roi_mask'])
+        primary_records = [index for index,(_,mode) in enumerate(records) if mode == 0]
+        components['fitted_log_objects'] = expand(fit['fitted_log_objects'][primary_records])
+        components['chemical_reference_offsets'] = fit['chemical_reference_offsets'][primary_records]
+        components['saturated_states'] = components['species'][fit['legacy_component_species']]['saturated_states']
     return output, components
 
 

@@ -4,6 +4,66 @@ from library import phase_retrieval_universal as u
 
 
 class PhysicalModeGroupTests(unittest.TestCase):
+    def test_species_share_density_and_response_across_modes(self):
+        material=np.zeros((6,6)); material[2:4,2:4]=1.
+        density_a=material.copy(); density_a[:,3:]=0
+        density_b=material-density_a
+        species=[dict(name='a',magnetic=True,density_map=density_a,
+                      charge_response=[.1+.02j],magnetic_response=[.08+.03j],
+                      saturated_states={'p':1.,'n':-1.}),
+                 dict(name='b',magnetic=True,density_map=density_b,
+                      charge_response=[.2-.04j],magnetic_response=[.03-.06j],
+                      saturated_states={'p':-1.,'n':1.})]
+        for magnetic_groups,illumination_groups in (([[0,1]],[[0],[1]]),
+                                                    ([[0],[1]],[[0],[1]]),
+                                                    ([[0,1]],[[0,1]])):
+            recipe=u.default_universal_phase_retrieval_recipe()
+            recipe.update(modes=[1,1,2],chemical_species=species,
+                          magnetization_mode_groups=magnetic_groups,
+                          illumination_mode_groups=illumination_groups,clip_magnetization=False)
+            logs=np.zeros((3,3,6,6),complex)
+            for mode in range(2):
+                ma=np.array([1.,.4 if mode==0 or len(magnetic_groups)==1 else -.2,-1.])
+                mb=np.array([-1.,-.6 if mode==0 or len(magnetic_groups)==1 else .3,1.])
+                illumination_index=mode if len(illumination_groups)==2 else 0
+                logs[:,mode]=(.2+.1j)*(illumination_index+1)+density_a*(.1+.02j+ma[:,None,None]*(.08+.03j))+density_b*(.2-.04j+mb[:,None,None]*(.03-.06j))
+            fields=np.stack([u.object_log_to_fourier_field(logs[:,mode]) for mode in range(3)],axis=1)
+            output,c=u._project_physical_modes(fields,['p','f','n'],[781.]*3,[1.]*3,['beam']*3,
+                recipe=recipe,material_thickness=material,projection_supportmask=np.ones((6,6)),
+                physical_iterations=200,return_components=True)
+            np.testing.assert_allclose(output,fields,atol=1e-8)
+            self.assertTrue(c['chemical_species_model'])
+            self.assertEqual(c['state_names'],['p','f','n'])
+            for name,density,value in [('a',density_a,.4),('b',density_b,-.6)]:
+                item=c['species'][name]
+                np.testing.assert_array_equal(item['density_map'],density)
+                np.testing.assert_allclose(item['magnetization'][1,density>0],value,atol=1e-8)
+                self.assertEqual(len(item['magnetization_by_mode_group_packed']),len(magnetic_groups))
+                self.assertEqual(item['magnetization'].shape,(3,6,6))
+                if len(magnetic_groups)==2:
+                    aperture=c['modal_physical_fit_aperture']
+                    expected=-.2 if name=='a' else .3
+                    np.testing.assert_allclose(
+                        item['magnetization_by_mode_group_packed']['1'][1,:,0][density[aperture]>0],
+                        expected,atol=1e-8)
+            self.assertTrue(c['chemical_reference_alignment_applied'])
+            import contextlib
+            import io
+            recipe.update(crop=0,binning=1,material_thickness=np.fft.fftshift(material),
+                          chemical_species=[dict(item,density_map=np.fft.fftshift(item['density_map']))
+                                            for item in species],
+                          warmup_Nit=0,outer_iterations=1,inner_Nit=1,physical_iterations=50,
+                          final_fourier_constraint=False,constrain_nonphysical_modes_common=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                result,_,driver_c,_,_=u.universal_phase_retrieval_algorithm(
+                    np.sum(abs(fields)**2,axis=1),np.zeros((3,6,6)),np.ones((6,6)),
+                    ['p','f','n'],[781.]*3,[1.]*3,['beam']*3,
+                    universal_recipe=recipe,start_fields=fields)
+            self.assertTrue(driver_c['chemical_species_model'])
+            self.assertEqual(driver_c['physical_model_modes'],[1,2])
+            self.assertEqual([g['mode_index'] for g in driver_c['nonphysical_mode_common_groups']],[2])
+            np.testing.assert_allclose(result[:,2],np.broadcast_to(result[0,2],result[:,2].shape))
+
     def test_final_common_cleanup_preserves_selected_physical_modes(self):
         recipe=u.default_universal_phase_retrieval_recipe()
         recipe.update(modes=[1,1,2],magnetization_mode_groups=[[0,1]],
