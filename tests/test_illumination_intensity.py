@@ -29,6 +29,15 @@ class IlluminationIntensityTests(unittest.TestCase):
                                    np.broadcast_to(self.signs[:, None], (3, 2)), atol=1e-8)
         np.testing.assert_allclose(result, observed, atol=1e-8)
 
+    def test_gain_fit_with_per_frame_spatial_weighting(self):
+        self.recipe['physical_spatial_weighting'] = 'exit_wave_intensity_per_frame'
+        observed = self.fields * np.sqrt(self.gains)[:, None, None]
+        result, components = self.project(observed)
+        np.testing.assert_allclose(components['illumination_intensity_factors'], self.gains)
+        np.testing.assert_allclose(components['magnetization'][:, self.thickness > 0],
+                                   np.broadcast_to(self.signs[:, None], (3, 2)), atol=1e-8)
+        np.testing.assert_allclose(result, observed, atol=1e-8)
+
     def test_common_secondary_modes_are_scaled_by_incident_flux(self):
         self.recipe['constrain_nonphysical_modes_common'] = True
         secondary = np.ones_like(self.fields) * (.02 + .01j)
