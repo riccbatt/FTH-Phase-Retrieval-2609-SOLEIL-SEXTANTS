@@ -280,6 +280,28 @@ spectral response scale remain coupled without external calibration.
 
 ## When the incoming illumination changes
 
+For scalar brightness changes, XPCS `01_physical_hysteresis_263.ipynb` provides
+`FIT_ILLUMINATION_INTENSITY=False`. Set it to `True` and rerun the physical stage
+from the cached warmup. The universal recipe keys are
+`fit_illumination_intensity` and `illumination_intensity_reference_observation`
+(default `0`). This option requires `physical_factorized`, known zero-thickness
+pixels inside the projection support, and stable reference transmission and beam
+shape. At every joint projection, focused primary-mode power in those pixels
+estimates a positive intensity ratio to the reference acquisition. All modes are
+normalized before their physical/common-mode projection and rescaled afterward:
+`psi[a] = sqrt(g[a]) * psi_normalized[a]`. The reference has `g=1`.
+Missing reference pixels or nonpositive reference power produce an error.
+This estimate uses reconstructed reference-aperture power, not a detector-wide
+intensity normalization or an independent flux measurement. Reference errors and
+changes in modal power allocation can bias it; it does not fit beam-shape drift.
+The normalized charge/magnetic components remain in the reference illumination
+scale. `components["illumination_intensity_factors"]` contains gains in observation
+order, and the notebook plots and exports them. A shared secondary mode is common
+after removal of these gains. Endpoint diagnostics likewise remove illumination
+factors before estimating magnetic contrast. Keep this option disabled in a
+warmup recipe with `projection_model="none"`.
+
+
 **Notebook switch:** set `ALLOW_VARIABLE_ILLUMINATION=True` and choose
 `ILLUMINATION_VARIATION="energy"`, `"state"`, or `"energy_state"`.
 MAX IV defaults to grouping by energy; ajajas defaults to grouping by state.

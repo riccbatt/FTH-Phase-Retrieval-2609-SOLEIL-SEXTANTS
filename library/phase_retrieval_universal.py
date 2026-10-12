@@ -4610,6 +4610,9 @@ def default_general_phase_retrieval_recipe():
         "recenter_modal_supports": False,
         "mode_initialization": "random_phase",  # or "support_fft"
         "mode_initialization_seed": 0,
+        # Optional incident-power ratios from zero-thickness reference apertures.
+        "fit_illumination_intensity": False,
+        "illumination_intensity_reference_observation": 0,
         # Optionally remove state dependence from support-factor modes other
         # than 1 by projecting them to one common object per energy/beam.
         "constrain_nonphysical_modes_common": False,
@@ -5883,6 +5886,10 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("mode_initialization_seed must be an integer or None.")
     if recipe["mode_initialization"] not in {"random_phase", "support_fft"}:
         raise ValueError("mode_initialization must be 'random_phase' or 'support_fft'.")
+    if not isinstance(recipe["fit_illumination_intensity"], bool):
+        raise ValueError("fit_illumination_intensity must be bool.")
+    if recipe["fit_illumination_intensity"] and recipe["projection_model"] != "physical_factorized":
+        raise ValueError("Intensity fitting requires physical_factorized projection.")
     if not isinstance(recipe["constrain_nonphysical_modes_common"], bool):
         raise ValueError("constrain_nonphysical_modes_common must be bool.")
     common_relaxation = recipe["nonphysical_modes_common_relaxation"]
@@ -6595,6 +6602,47 @@ def _project_physical_modes(
     Dispatch the primary mode to the physical model, then enforce the optional shared
     secondary mode. The secondary field never enters the charge/magnetization fit.
     """
+    recipe = kwargs.get("recipe")
+    if recipe is not None and recipe.get("fit_illumination_intensity", False):
+        # Estimate incident power from known vacuum/reference apertures. Never
+        # use sample transmission, which could absorb genuine magnetic changes.
+        thickness = kwargs.get("material_thickness")
+        support = kwargs.get("projection_supportmask")
+        if thickness is None or support is None:
+            raise ValueError("Intensity fitting requires material_thickness and a projection support containing reference holes.")
+        reference_mask = (np.asarray(thickness) == 0) & (np.asarray(support) != 0)
+        if not np.any(reference_mask):
+            raise ValueError("Intensity fitting requires material-free reference pixels inside the support.")
+        reference = recipe.get("illumination_intensity_reference_observation", 0)
+        if (isinstance(reference, bool) or not isinstance(reference, (int, np.integer))
+                or not 0 <= reference < len(fields)):
+            raise ValueError("illumination_intensity_reference_observation must index an observation.")
+        primary = fields[:, 0] if np.asarray(fields).ndim == 4 else fields
+        focused = _projection_focus_transform(
+            primary, energy_labels, recipe.get("projection_focus_prop_um", 0.),
+            recipe.get("projection_focus_phase_rad", 0.), recipe.get("projection_focus_setup"),
+            inverse=False, integer_wavelength=recipe.get("projection_focus_integer_wavelength", True))
+        objects = np.fft.fft2(np.fft.fftshift(focused, axes=(-2, -1)))
+        powers = np.sum(abs(objects[:, reference_mask]) ** 2, axis=1)
+        if np.any(~np.isfinite(powers)) or np.any(powers <= 0):
+            raise ValueError("Reference apertures must have finite positive reconstructed power in every observation.")
+        gains = powers / powers[reference]
+        scale = np.sqrt(gains).reshape((-1,) + (1,) * (np.asarray(fields).ndim - 1))
+        normalized_recipe = dict(recipe, fit_illumination_intensity=False)
+        normalized_kwargs = dict(kwargs, recipe=normalized_recipe, return_components=True)
+        callback = normalized_kwargs.pop("diagnostic_callback", None)
+        output, components = _project_physical_modes(
+            np.asarray(fields) / scale, state_labels, energy_labels,
+            polarization_coefficients, beam_labels, **normalized_kwargs)
+        output *= scale
+        components.update(illumination_intensity_factors=gains,
+                          illumination_intensity_reference_observation=int(reference),
+                          illumination_intensity_reference_pixels=int(reference_mask.sum()),
+                          illumination_intensity_fit="primary reference-aperture power ratio")
+        if callback is not None:
+            callback("physical_primary", output)
+            callback("common_secondary", output)
+        return (output, components) if kwargs.get("return_components") else output
     diagnostic_callback = kwargs.pop("diagnostic_callback", None)
     if np.asarray(fields).ndim == 3:
         result = project_fourier_fields_general(
@@ -7395,13 +7443,15 @@ def general_phase_retrieval_algorithm(
             and recipe["constrain_nonphysical_modes_common"]):
         # A final observation-specific amplitude projection can separate the
         # higher modes again. Finish on the requested common-mode constraint.
+        gain_scale = np.sqrt(components.get("illumination_intensity_factors", np.ones(len(fields))))[:, None, None, None]
         fields, common_groups = _project_nonphysical_modes_common(
-            fields,
+            fields / gain_scale,
             metadata["energies"],
             metadata["beams"],
             recipe,
             weights=recipe["observation_weights"],
         )
+        fields *= gain_scale
         restore_frozen_observations(fields)
         components["nonphysical_mode_common_groups"] = common_groups
         components["common_mode_applied_after_final_fourier"] = bool(
