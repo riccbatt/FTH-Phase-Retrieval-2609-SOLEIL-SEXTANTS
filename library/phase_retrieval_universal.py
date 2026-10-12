@@ -5085,9 +5085,13 @@ def project_log_objects_physical(
     fit_material_thickness=False,
     thickness_supportmask=None,
     return_components=False,
+    initial_components=None,
 ):
     """
     Fit ``L = C_beam + t(r)[q_charge(E) + p*q_magnetic(E)*mz_state(r)]``.
+
+    ``initial_components`` reuses a previous fit on the same state/energy/beam
+    grid. Arrays are copied; saturated signs and support constraints still apply.
 
     ``mz_state`` is real and clipped to ``[-1, 1]`` by default. Set recipe
     ``clip_magnetization=False`` to disable clipping. Set
@@ -5152,12 +5156,17 @@ def project_log_objects_physical(
         # without allocating observations × modes × the full detector area.
         def pack(array):
             return None if array is None else np.asarray(array)[aperture][:, None]
+        local_initial = None
+        if initial_components is not None:
+            local_initial = dict(initial_components)
+            for key in ("magnetization", "common_log_objects"):
+                local_initial[key] = np.asarray(initial_components[key])[..., aperture, None]
         local_recipe = dict(recipe, physical_projection_object_roi=False)
         local, components = project_log_objects_physical(
             log_objects[:, aperture, None], state_labels, energy_labels,
             polarization_coefficients, beam_labels, weights=weights,
             relaxation=relaxation, saturated_states=saturated_states,
-            iterations=iterations, recipe=local_recipe,
+            iterations=iterations, recipe=local_recipe, initial_components=local_initial,
             magnetization_supportmask=pack(magnetization_supportmask),
             projection_supportmask=np.ones((int(aperture.sum()), 1), dtype=bool),
             material_thickness=pack(material_thickness),
@@ -5354,6 +5363,30 @@ def project_log_objects_physical(
                 anchor_norm += float(np.vdot(basis, weight * basis).real)
         if anchor_norm > 1e-30:
             magnetic[energy] = anchor_rhs / anchor_norm
+
+    reused_fit = initial_components is not None
+    if reused_fit:
+        for key in ("state_names", "energy_names", "beam_names"):
+            if list(initial_components[key]) != list(metadata[key]):
+                raise ValueError(f"initial_components {key} must match the current fit.")
+        def initial_array(key, shape, dtype):
+            value = np.asarray(initial_components[key], dtype=dtype)
+            if value.shape != shape or not np.all(np.isfinite(value)):
+                raise ValueError(f"initial_components {key} must be finite with shape {shape}.")
+            return value.copy()
+        common = initial_array("common_log_objects", common.shape, complex)
+        charge = initial_array("charge_response", charge.shape, complex)
+        magnetic = initial_array("magnetic_response", magnetic.shape, complex)
+        magnetization = initial_array("magnetization", magnetization.shape, float)
+        if binary_magnetization:
+            magnetization = _snap_magnetization(magnetization, binary_values)
+        elif clip_magnetization:
+            magnetization = np.clip(magnetization, -1., 1.)
+        for state, sign in saturated.items():
+            magnetization[metadata["state_names"].index(state)].fill(sign)
+        magnetization *= allowed_material
+        if magnetization_supportmask is not None:
+            magnetization *= magnetization_supportmask
 
     charge_spectral_info = {}
     magnetic_spectral_info = {}
@@ -5617,6 +5650,7 @@ def project_log_objects_physical(
     )
     components = {
         "projection_model": "physical_factorized",
+        "physical_fit_reused": reused_fit,
         "physical_spatial_weighting": spatial_weighting,
         "physical_spatial_weights": spatial_weights,
         "weighted_fit_residual_rms": float(np.sqrt(
@@ -5746,6 +5780,7 @@ def project_fourier_fields_general(
     fit_material_thickness=False,
     thickness_supportmask=None,
     return_components=False,
+    initial_components=None,
 ):
     """
     Apply the selected general model to Fourier-domain fields.
@@ -5792,6 +5827,7 @@ def project_fourier_fields_general(
             material_thickness=material_thickness,
             fit_material_thickness=fit_material_thickness,
             thickness_supportmask=thickness_supportmask,
+            initial_components=initial_components,
             return_components=return_components,
         )
     else:
@@ -7394,6 +7430,9 @@ def general_phase_retrieval_algorithm(
                 material_thickness=material_thickness,
                 fit_material_thickness=recipe["fit_material_thickness"],
                 thickness_supportmask=thickness_supportmask,
+                initial_components=(components if "magnetization" in components
+                                    and recipe.get("chemical_species") is None
+                                    and recipe["projection_model"] == "physical_factorized" else None),
                 return_components=True,
                 diagnostic_callback=record_checkpoint,
             )
@@ -7445,6 +7484,9 @@ def general_phase_retrieval_algorithm(
             material_thickness=material_thickness,
             fit_material_thickness=recipe["fit_material_thickness"],
             thickness_supportmask=thickness_supportmask,
+            initial_components=(components if "magnetization" in components
+                                and recipe.get("chemical_species") is None
+                                and recipe["projection_model"] == "physical_factorized" else None),
             return_components=True,
         )
         fields = final_projected_fields
