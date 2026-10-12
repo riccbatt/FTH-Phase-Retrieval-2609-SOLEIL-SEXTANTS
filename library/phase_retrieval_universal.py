@@ -5097,7 +5097,13 @@ def project_log_objects_physical(
 
     Context:
     Physical-fit boundary: input is a stack of complex object logarithms, not detector
-    intensities. With object ROI enabled, pack only positive-thickness pixels before phase
+    intensities. physical_spatial_weighting selects uniform (None), a shared
+    saturation-anchor intensity mean ("exit_wave_intensity", all frames if no
+    anchors), or each observation's own intensity ("exit_wave_intensity_per_frame").
+    Intensity maps have mean one inside material and are held fixed during each
+    fit. Per-frame weights apply to all least-squares updates, with scalar
+    observation weights multiplying pixel weights. With object ROI enabled,
+    pack only positive-thickness pixels before phase
     adjustment and fitting, then scatter them back while preserving the exterior.
     """
     log_objects = _as_energy_stack(log_objects, name="log_objects")
@@ -5226,8 +5232,8 @@ def project_log_objects_physical(
     n_energies = len(metadata["energy_names"])
     n_beams = len(metadata["beam_names"])
     spatial_weighting = recipe.get("physical_spatial_weighting")
-    if spatial_weighting not in (None, "exit_wave_intensity"):
-        raise ValueError("physical_spatial_weighting must be None or 'exit_wave_intensity'.")
+    if spatial_weighting not in (None, "exit_wave_intensity", "exit_wave_intensity_per_frame"):
+        raise ValueError("physical_spatial_weighting must be None, 'exit_wave_intensity', or 'exit_wave_intensity_per_frame'.")
     spatial_weights = np.ones((nx, ny), dtype=float)
     if spatial_weighting == "exit_wave_intensity":
         anchors = [a for a, state in enumerate(metadata["states"]) if state in saturated]
@@ -5242,6 +5248,21 @@ def project_log_objects_physical(
         if not np.isfinite(scale) or scale <= 0:
             raise ValueError("Exit-wave intensity weights require nonzero finite material intensity.")
         spatial_weights /= scale
+    if spatial_weighting == "exit_wave_intensity_per_frame":
+        log_intensity = 2 * log_objects.real
+        peak = np.max(log_intensity[:, allowed_material], axis=1)
+        spatial_weights = np.exp(np.minimum(log_intensity - peak[:, None, None], 0.))
+        spatial_weights[:, ~allowed_material] = 0.
+        scale = np.mean(spatial_weights[:, allowed_material], axis=1)
+        if np.any(~np.isfinite(scale) | (scale <= 0)):
+            raise ValueError("Each frame requires nonzero finite material intensity.")
+        spatial_weights /= scale[:, None, None]
+    observation_spatial_weights = np.broadcast_to(spatial_weights, log_objects.shape)
+    # Preserve the exterior common-field estimate where intensity weights are zero.
+    pixel_weights = weights[:, None, None] * np.where(
+        allowed_material[None], np.maximum(observation_spatial_weights, 1e-30), 1.)
+    if spatial_weighting != "exit_wave_intensity_per_frame":
+        pixel_weights = np.broadcast_to(weights[:, None, None], log_objects.shape)
     if magnetization_supportmask is not None:
         magnetization_supportmask = np.asarray(magnetization_supportmask) != 0
         if magnetization_supportmask.shape != (nx, ny):
@@ -5257,12 +5278,12 @@ def project_log_objects_physical(
 
     # Initialize beam fields from weighted observation means.
     common = np.zeros((n_beams, nx, ny), dtype=np.complex128)
-    beam_weight = np.zeros(n_beams, dtype=float)
+    beam_weight = np.zeros((n_beams, nx, ny), dtype=float)
     for observation in range(n_observations):
         beam = metadata["beam_indices"][observation]
-        common[beam] += weights[observation] * log_objects[observation]
-        beam_weight[beam] += weights[observation]
-    common /= beam_weight[:, None, None]
+        common[beam] += pixel_weights[observation] * log_objects[observation]
+        beam_weight[beam] += pixel_weights[observation]
+    common /= beam_weight
 
     charge = np.zeros(n_energies, dtype=np.complex128)
     magnetic = np.ones(n_energies, dtype=np.complex128)
@@ -5315,16 +5336,19 @@ def project_log_objects_physical(
             ) if metadata["states"][a] in saturated]
             if len(anchors) < 2:
                 continue
-            anchor_weights = weights[anchors]
+            anchor_weights = weights[anchors, None, None] * np.maximum(observation_spatial_weights[anchors], 1e-30)
             coefficients = np.asarray([
                 metadata["polarizations"][a] * saturated[metadata["states"][a]]
                 for a in anchors
             ])
-            centered = coefficients - np.average(coefficients, weights=anchor_weights)
+            centered = coefficients[:, None, None] - (
+                np.sum(coefficients[:, None, None] * anchor_weights, axis=0)
+                / np.sum(anchor_weights, axis=0)
+            )
             for a, weight, coefficient in zip(anchors, anchor_weights, centered):
                 basis = coefficient * anchor_thickness
-                anchor_rhs += weight * np.vdot(basis, spatial_weights * log_objects[a])
-                anchor_norm += weight * float(np.vdot(basis, spatial_weights * basis).real)
+                anchor_rhs += np.vdot(basis, weight * log_objects[a])
+                anchor_norm += float(np.vdot(basis, weight * basis).real)
         if anchor_norm > 1e-30:
             magnetic[energy] = anchor_rhs / anchor_norm
 
@@ -5345,11 +5369,11 @@ def project_log_objects_physical(
                 * magnetic[energy]
                 * magnetization[state]
             )
-            common[beam] += weights[observation] * (
+            common[beam] += pixel_weights[observation] * (
                 log_objects[observation] - thickness * modeled_material
             )
-            beam_weight[beam] += weights[observation]
-        common /= beam_weight[:, None, None]
+            beam_weight[beam] += pixel_weights[observation]
+        common /= beam_weight
 
         # Probe zero-thickness pixels that are still allowed to contain
         # material. Using the exact zero there makes the magnetic update
@@ -5389,10 +5413,10 @@ def project_log_objects_physical(
                     - common[beam]
                     - thickness * charge[energy]
                 )
-                numerator += weights[observation] * np.real(
+                numerator += pixel_weights[observation] * np.real(
                     np.conj(coefficient) * residual
                 )
-                denominator += weights[observation] * abs(coefficient) ** 2
+                denominator += pixel_weights[observation] * abs(coefficient) ** 2
             magnetization[state] = np.divide(
                 numerator, denominator,
                 out=(magnetization[state].copy() if fit_material_thickness
@@ -5425,12 +5449,12 @@ def project_log_objects_physical(
                     * thickness
                 )
                 residual = log_objects[observation] - common[beam]
-                weight = weights[observation]
-                gram[0, 0] += weight * np.vdot(thickness, spatial_weights * thickness)
-                gram[0, 1] += weight * np.vdot(thickness, spatial_weights * magnetic_basis)
-                gram[1, 1] += weight * np.vdot(magnetic_basis, spatial_weights * magnetic_basis)
-                rhs[0] += weight * np.vdot(thickness, spatial_weights * residual)
-                rhs[1] += weight * np.vdot(magnetic_basis, spatial_weights * residual)
+                weight = weights[observation] * observation_spatial_weights[observation]
+                gram[0, 0] += np.vdot(thickness, weight * thickness)
+                gram[0, 1] += np.vdot(thickness, weight * magnetic_basis)
+                gram[1, 1] += np.vdot(magnetic_basis, weight * magnetic_basis)
+                rhs[0] += np.vdot(thickness, weight * residual)
+                rhs[1] += np.vdot(magnetic_basis, weight * residual)
             gram[1, 0] = np.conj(gram[0, 1])
             coefficients = np.linalg.pinv(gram) @ rhs
             charge[energy], magnetic[energy] = coefficients
@@ -5442,7 +5466,7 @@ def project_log_objects_physical(
             denominator = np.zeros((nx, ny), dtype=float)
             for beam in range(n_beams):
                 observations = np.flatnonzero(metadata["beam_indices"] == beam)
-                total_weight = np.sum(weights[observations])
+                total_weight = np.sum(pixel_weights[observations], axis=0)
                 responses = np.stack([
                     charge[metadata["energy_indices"][a]]
                     + metadata["polarizations"][a]
@@ -5451,19 +5475,19 @@ def project_log_objects_physical(
                     for a in observations
                 ])
                 mean_response = np.sum(
-                    responses * weights[observations, None, None], axis=0,
+                    responses * pixel_weights[observations], axis=0,
                 ) / total_weight
                 mean_log = np.sum(
                     log_objects[observations]
-                    * weights[observations, None, None], axis=0,
+                    * pixel_weights[observations], axis=0,
                 ) / total_weight
                 for index, observation in enumerate(observations):
                     direction = responses[index] - mean_response
                     residual = log_objects[observation] - mean_log
-                    numerator += weights[observation] * np.real(
+                    numerator += pixel_weights[observation] * np.real(
                         np.conj(direction) * residual
                     )
-                    denominator += weights[observation] * np.abs(direction) ** 2
+                    denominator += pixel_weights[observation] * np.abs(direction) ** 2
             if np.any(denominator[allowed_material] > 1e-30):
                 updated = np.maximum(
                     0, np.divide(numerator, denominator,
@@ -5538,11 +5562,11 @@ def project_log_objects_physical(
                 + metadata["polarizations"][observation]
                 * magnetic[energy] * magnetization[state]
             )
-            common[beam] += weights[observation] * (
+            common[beam] += pixel_weights[observation] * (
                 log_objects[observation] - material
             )
-            beam_weight[beam] += weights[observation]
-        common /= beam_weight[:, None, None]
+            beam_weight[beam] += pixel_weights[observation]
+        common /= beam_weight
 
     fitted = np.stack([
         common[metadata["beam_indices"][observation]]
@@ -5594,7 +5618,7 @@ def project_log_objects_physical(
         "physical_spatial_weights": spatial_weights,
         "weighted_fit_residual_rms": float(np.sqrt(
             np.sum(weights[:, None, None] * spatial_weights * abs(residual)**2)
-            / (np.sum(weights) * np.sum(spatial_weights)))),
+            / np.sum(weights[:, None, None] * observation_spatial_weights))),
         "common_log_objects": common,
         "common_log_objects_by_beam": {
             name: common[index]

@@ -13,9 +13,39 @@ def load_dataset(root=DEFAULT_DATA, source='detected_no_beamstop', helicity='CR'
 
     Support is already on the centered object grid, as expected by the solver.
     All selected states retain their original intensity scale; no state normalization.
+    helicity may be 'CR', 'CL', or a sequence such as ('CR', 'CL'). Joint
+    observations are interleaved per file and keep shared magnetic state labels.
+    CR/CL coefficients are +1/-1. truth_mean_mz follows unique state_names;
+    holograms, state_labels, and polarization_coefficients follow observations.
     """
     if source not in ('detected_no_beamstop', 'ideal', 'holograms_ideal'):
         raise ValueError('Choose detected_no_beamstop or ideal')
+    if not isinstance(helicity, str):
+        helicities = tuple(helicity)
+        if not helicities or len(set(helicities)) != len(helicities) or any(h not in ('CR', 'CL') for h in helicities):
+            raise ValueError('Choose CR, CL, or a sequence of distinct CR/CL helicities')
+        datasets = [load_dataset(root, source, h, indices, beamstop_threshold) for h in helicities]
+        first = datasets[0]
+        for other in datasets[1:]:
+            if (other['state_labels'] != first['state_labels'] or
+                    not np.array_equal(other['support'], first['support']) or
+                    other['setup'] != first['setup']):
+                raise ValueError('Helicities must share states, support, and geometry')
+        count = len(first['state_labels'])
+        result = dict(first)
+        for key in ('holograms', 'mask_pixel'):
+            result[key] = np.stack([d[key][i] for i in range(count) for d in datasets])
+        result['state_labels'] = [first['state_labels'][i] for i in range(count) for h in helicities]
+        result['observation_helicities'] = [h for i in range(count) for h in helicities]
+        result['observation_labels'] = [f'{state} / {h}' for state, h in zip(
+            result['state_labels'], result['observation_helicities'])]
+        result['polarization_coefficients'] = np.array([
+            1. if h == 'CR' else -1. for h in result['observation_helicities']])
+        result['records'] = [d['records'][i] for i in range(count) for d in datasets]
+        result['state_names'] = first['state_labels'].copy()
+        # Scalar truth is indexed by magnetic state, rather than observation.
+        result['truth_mean_mz'] = first['truth_mean_mz'].copy()
+        return result
     if helicity not in ('CR', 'CL'): raise ValueError('Choose CR or CL')
     if not 0 <= beamstop_threshold < 1: raise ValueError('Threshold must be in [0, 1)')
     paths = sorted(Path(root).glob('*.h5'))
@@ -57,10 +87,14 @@ def load_dataset(root=DEFAULT_DATA, source='detected_no_beamstop', helicity='CR'
             images.append(np.where(np.isfinite(image), np.maximum(image, 0), 0))
             labels.append(label); energies.append(float(f.attrs['energy_eV']))
             truth.append(float(f.attrs.get('object_mean_mz', np.nan)))
-            records.append(dict(index=i, path=str(path), dataset=key))
+            records.append(dict(index=i, path=str(path), dataset=key, helicity=helicity))
     if np.ptp(energies) > .25: raise ValueError('Expected single-energy dataset')
     return dict(holograms=np.stack(images), mask_pixel=np.stack(masks), support=support,
-                state_labels=labels, saturated=saturated, energy_ev=float(np.mean(energies)),
+                state_labels=labels, state_names=labels.copy(),
+                observation_helicities=[helicity]*len(labels),
+                observation_labels=[f'{label} / {helicity}' for label in labels],
+                polarization_coefficients=np.full(len(labels), 1. if helicity == 'CR' else -1.),
+                saturated=saturated, energy_ev=float(np.mean(energies)),
                 setup=setup, truth_mean_mz=np.asarray(truth), records=records)
 
 
@@ -121,7 +155,7 @@ def plot_input_diagnostics(data, positions=None, max_states=6):
             lo, hi = np.percentile(finite, [1, 99.8])
             im = ax.imshow(panel, cmap='gray', vmin=lo, vmax=hi, interpolation='nearest')
             fig.colorbar(im, ax=ax, shrink=.7)
-            ax.set_title(f'{data["state_labels"][i]}\n{title}', fontsize=9)
+            ax.set_title(f'{data.get("observation_labels", data["state_labels"])[i]}\n{title}', fontsize=9)
             ax.set(xlabel='Column', ylabel='Row')
         axes[row, 1].contour(invalid, levels=[.5], colors=['orange'], linewidths=.6)
         axes[row, 4].contour(expected, levels=[.5], colors=['cyan'], linewidths=.6)
@@ -134,7 +168,7 @@ def plot_input_diagnostics(data, positions=None, max_states=6):
     return dict(expected_fth_support=expected, component_count=count)
 
 
-def audit_saturation_reconstruction(fields, state_labels, saturated, material, *, energy_ev=781.1386599767951, iterations=100, spatial_weighting=None):
+def audit_saturation_reconstruction(fields, state_labels, saturated, material, *, energy_ev=781.1386599767951, iterations=100, spatial_weighting=None, polarization_coefficients=None):
     """Compare duplicate fields and constant-response vs local endpoint calibration.
 
     No fields or model settings are changed. Local endpoint maps are diagnostics,
@@ -143,6 +177,10 @@ def audit_saturation_reconstruction(fields, state_labels, saturated, material, *
     import matplotlib.pyplot as plt
     from scipy.ndimage import binary_erosion
     from library import phase_retrieval_universal as u
+    coefficients = (np.ones(len(state_labels)) if polarization_coefficients is None
+                    else np.asarray(polarization_coefficients, dtype=float))
+    if coefficients.shape != (len(state_labels),):
+        raise ValueError('Polarization coefficients must match audit observations')
     positive = next(i for i,s in enumerate(state_labels) if saturated.get(s) == 1.)
     negative = next(i for i,s in enumerate(state_labels) if saturated.get(s) == -1.)
     primary = fields[:, 0] if fields.ndim == 4 else fields
@@ -174,7 +212,7 @@ def audit_saturation_reconstruction(fields, state_labels, saturated, material, *
             if positive not in selected or negative not in selected: continue
             _, fit = u.project_log_objects_physical(
                 compact[selected], [state_labels[i] for i in selected], [energy_ev]*len(selected),
-                [1.]*len(selected), ['beam']*len(selected), recipe=recipe,
+                coefficients[selected], ['beam']*len(selected), recipe=recipe,
                 material_thickness=np.ones(compact.shape[1:]), saturated_states=saturated,
                 iterations=iterations, return_components=True)
             means=fit['magnetization'].mean(axis=(1,2))
