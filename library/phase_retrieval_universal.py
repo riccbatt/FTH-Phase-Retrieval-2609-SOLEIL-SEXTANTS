@@ -4637,6 +4637,7 @@ def default_general_phase_retrieval_recipe():
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
         "clip_magnetization": True,
+        "magnetization_trend": "none",
         # Snap to the nearest of -1, 0, +1.
         "initial_binary_magnetization": False,
         "binary_magnetization": False,
@@ -5050,6 +5051,93 @@ def largest_support_component(supportmask):
     return (labels == np.argmax(sizes)).astype(np.uint8)
 
 
+def _constrain_magnetization_trend(maps, active, names, saturated, trend,
+                                   clip=True, groups=None, discrete_values=None, preferences=None):
+    """Project state means onto a monotone sequence, preserving fixed anchors.
+
+    State order is first appearance in observation metadata. Each optional
+    modal group has its own sequence. Spatial texture is retained through a
+    constant shift (with bounded water filling when clipping is enabled).
+    Discrete maps instead adjust allowed-value counts; no pixel ordering
+    between states is imposed.
+    """
+    if trend == "none" or not np.any(active):
+        return
+    direction = 1. if trend == "increasing" else -1.
+    levels = None if discrete_values is None else np.sort(direction * discrete_values)
+    if levels is not None and len(levels) > 2 and not np.allclose(
+            np.diff(levels), levels[1] - levels[0], rtol=1e-12, atol=1e-14):
+        raise ValueError("magnetization_trend with discrete magnetization requires equally spaced values.")
+    sequences = [list(range(len(names)))] if groups is None else groups
+    for indices in sequences:
+        means = direction * np.array([maps[index][active].mean() for index in indices])
+        anchors = {i: direction * saturated[names[index]]
+                   for i, index in enumerate(indices) if names[index] in saturated}
+        positions = sorted(anchors)
+        if any(anchors[a] > anchors[b] for a, b in zip(positions, positions[1:])):
+            raise ValueError("magnetization_trend contradicts saturated_states in state order.")
+        targets = means.copy()
+        boundaries = [-1] + positions + [len(indices)]
+        for left, right in zip(boundaries, boundaries[1:]):
+            if levels is not None and right > left + 1 and (
+                    anchors.get(left, -np.inf) > levels[-1]
+                    or anchors.get(right, np.inf) < levels[0]):
+                raise ValueError("magnetization_trend anchors are incompatible with binary_magnetization_values.")
+            # Pool adjacent violators: least-squares isotonic state means.
+            blocks = []
+            for i in range(left + 1, right):
+                blocks.append([means[i], 1])
+                while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
+                    b, a = blocks.pop(), blocks.pop()
+                    count = a[1] + b[1]
+                    blocks.append([(a[0]*a[1] + b[0]*b[1])/count, count])
+            values = np.repeat([b[0] for b in blocks], [b[1] for b in blocks])
+            targets[left+1:right] = np.clip(values, anchors.get(left, -np.inf),
+                                          anchors.get(right, np.inf))
+        for i, index in enumerate(indices):
+            if i in anchors:
+                continue
+            values = maps[index][active]
+            target = direction * targets[i]
+            if levels is not None:
+                if len(levels) == 1:
+                    continue
+                # Means lie on a count lattice. Rounding isotonic targets to
+                # the same lattice preserves their order without ordering pixels.
+                spacing = levels[1] - levels[0]
+                ranks = np.rint((direction*values - levels[0])/spacing).astype(int)
+                target_count = int(np.rint((targets[i]-levels[0])*len(values)/spacing))
+                target_count = np.clip(target_count, 0, (len(levels)-1)*len(values))
+                delta = int(target_count - ranks.sum())
+                preferred = direction * (preferences.get(index, values)
+                                         if preferences is not None else values)
+                while delta:
+                    step = 1 if delta > 0 else -1
+                    candidates = np.flatnonzero(ranks < len(levels)-1 if step > 0 else ranks > 0)
+                    current = levels[ranks[candidates]]
+                    updated = levels[ranks[candidates]+step]
+                    cost = (updated-preferred[candidates])**2 - (current-preferred[candidates])**2
+                    count = min(abs(delta), len(candidates))
+                    chosen = candidates[np.argsort(cost, kind="stable")[:count]]
+                    ranks[chosen] += step
+                    delta -= step*count
+                maps[index][active] = direction * levels[ranks]
+                continue
+            if abs(target - values.mean()) < 1e-14:
+                continue
+            if clip:
+                lo, hi = -1. - values.max(), 1. - values.min()
+                for _ in range(60):
+                    shift = (lo + hi)/2
+                    if np.clip(values + shift, -1., 1.).mean() < target:
+                        lo = shift
+                    else:
+                        hi = shift
+                maps[index][active] = np.clip(values + (lo+hi)/2, -1., 1.)
+            else:
+                maps[index][active] = values + target - values.mean()
+
+
 def _binary_magnetization_values(recipe):
     """Validate discrete reduced-magnetization values; prefer zero in ties."""
     try:
@@ -5143,6 +5231,11 @@ def project_log_objects_physical(
     if not isinstance(initial_binary, bool):
         raise ValueError("initial_binary_magnetization must be bool.")
     binary_values = _binary_magnetization_values(recipe) if binary_magnetization else None
+    trend = recipe.get("magnetization_trend", "none")
+    if trend not in ("none", "increasing", "decreasing"):
+        raise ValueError("magnetization_trend must be 'none', 'increasing', or 'decreasing'.")
+    if trend != "none" and recipe.get("chemical_species") is not None:
+        raise ValueError("magnetization_trend currently supports the single-species physical model only.")
     if recipe.get("chemical_species") is not None:
         if initial_binary:
             raise ValueError("initial_binary_magnetization currently supports the single-species physical model only.")
@@ -5449,6 +5542,17 @@ def project_log_objects_physical(
         if magnetization_supportmask is not None:
             magnetization *= magnetization_supportmask
 
+    trend_preferences = {}
+    def constrain_trend():
+        active = thickness > 0
+        if magnetization_supportmask is not None:
+            active &= magnetization_supportmask
+        _constrain_magnetization_trend(
+            magnetization, active, metadata["state_names"], saturated, trend,
+            clip_magnetization, recipe.get("_magnetization_trend_groups"),
+            binary_values, trend_preferences)
+    constrain_trend()
+
     initial_magnetization = magnetization.copy()
 
     charge_spectral_info = {}
@@ -5485,6 +5589,7 @@ def project_log_objects_physical(
                 allowed_material & (thickness == 0), probe_thickness, thickness,
             )
 
+        trend_preferences.clear()
         # Fit real reduced-magnetization maps with optional |mz| <= 1 clipping.
         for state, state_name in enumerate(metadata["state_names"]):
             if state_name in saturated:
@@ -5523,11 +5628,18 @@ def project_log_objects_physical(
                 where=denominator > 1e-30,
             )
             if binary_magnetization:
+                if trend != "none":
+                    active = thickness > 0
+                    if magnetization_supportmask is not None:
+                        active &= magnetization_supportmask
+                    trend_preferences[state] = magnetization[state][active].copy()
                 magnetization[state] = _snap_magnetization(magnetization[state], binary_values)
             elif clip_magnetization:
                 magnetization[state] = np.clip(magnetization[state], -1.0, 1.0)
             if magnetization_supportmask is not None:
                 magnetization[state] *= magnetization_supportmask
+
+        constrain_trend()
 
         # Fit scalar charge and magnetic responses independently at each energy.
         for energy in range(n_energies):
@@ -5646,6 +5758,8 @@ def project_log_objects_physical(
     # A fitted thickness may have reached zero on the last iteration. Keep the
     # returned magnetic object consistent with the final material domain.
     magnetization *= thickness > 0
+    trend_preferences.clear()
+    constrain_trend()
 
     if fit_material_thickness:
         # Keep the illumination estimate consistent with the final fitted
@@ -5719,6 +5833,7 @@ def project_log_objects_physical(
                                          "nearest_sign" if initial_binary else "measured_contrast"),
         "physical_spatial_weighting": spatial_weighting,
         "physical_spatial_weights": spatial_weights,
+        "magnetization_trend": trend,
         "weighted_fit_residual_rms": float(np.sqrt(
             np.sum(weights[:, None, None] * spatial_weights * abs(residual)**2)
             / np.sum(weights[:, None, None] * observation_spatial_weights))),
@@ -7009,6 +7124,10 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
     def pack(value):
         return None if value is None else np.asarray(value)[aperture,None]
     local_recipe = dict(recipe, physical_projection_object_roi=False)
+    joint_names = list(dict.fromkeys(state_keys))
+    local_recipe['_magnetization_trend_groups'] = [
+        [joint_names.index(f's{i}_m{group}') for i in range(len(metadata['state_names']))]
+        for group in range(len(magnetic_groups))]
     if species_model:
         local_recipe['chemical_species'] = []
         for entry in recipe['chemical_species']:

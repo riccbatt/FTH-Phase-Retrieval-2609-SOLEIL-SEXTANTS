@@ -230,6 +230,15 @@ field. `freeze_saturated_fields=True` additionally freezes its field after warmu
 The data must distinguish the fitted components. Saturation anchors the magnetic
 scale, but absolute thickness and optical response still require calibration.
 
+For an ordered monotonic hysteresis branch, optionally set
+`physical_recipe["magnetization_trend"] = "increasing"` or `"decreasing"`.
+The default is `"none"`. This constrains only mean magnetization over the
+active material, independently for each magnetic mode group. Individual
+pixels can flip in either direction, including when `binary_magnetization=True`.
+Fixed saturation anchors must agree with the supplied state order. See
+[mean magnetization trend](universal_phase_retrieval.md#mean-magnetization-trend)
+for binary examples, allowed values, and interpretation with relaxation.
+
 `state_energy_beam` is a less restrictive alternative: it fits additive
 illumination and charge terms plus state-dependent magnetic terms in log-object
 space, without the shared scalar-spectrum × real-magnetization factorization.

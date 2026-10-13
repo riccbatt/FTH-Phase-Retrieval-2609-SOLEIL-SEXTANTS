@@ -1050,3 +1050,62 @@ When multiple support factors equal 1, the notebook renders warmup/final amplitu
 ### Optional CIDI intensity separation
 
 Use [`library.cidi.cidi_separate`](cidi.md) before reconstruction to separate reference-coherent intensity from reference-incoherent intensity using isolated holographic cross-correlations. The existing driver accepts its `reconstruction_inputs()` intensity/mask pair. See [CIDI usage, assumptions, missing pixels, and references](cidi.md) for the complete example. This optional path implements the analytic CIDI identities of [Sarkar and Johnson (2024)](https://doi.org/10.1039/D4MA00154K) and their [nonlinear CDI application (2025)](https://arxiv.org/abs/2512.15457); it does not replace physical mode grouping or turn on automatically.
+
+### Mean magnetization trend
+
+Set `magnetization_trend` to `"increasing"`, `"decreasing"`, or `"none"`
+(default) in the physical recipe. The hysteresis notebooks expose the same
+choice as `MAGNETIZATION_TREND`. States follow their first appearance in
+`state_labels`; field values are not automatically sorted. Use one monotonic
+hysteresis branch per reconstruction.
+
+The physical fit constrains the average reduced magnetization over positive
+material-thickness pixels intersected with the magnetization support. It does
+not require individual pixels to change monotonically. Isotonic regression
+pools violating state means, then shifts each spatial map to the resulting
+mean, preserving saturation anchors and optional `[-1, 1]` bounds. Each
+magnetization mode group is constrained independently. The constraint is
+applied during initialization, each physical fitting iteration, and after
+final thickness masking. Contradictory saturation anchors raise an error.
+
+Binary magnetization is supported: isotonic mean targets are rounded to the
+common discrete count lattice, then pixels are reassigned among the allowed
+values until the required counts are reached. This constrains only state means;
+individual pixels may reverse direction between states. Pixels are selected
+using their unsnapped fit values when available. Two-level binary values and
+equally spaced multilevel values (including the default `[-1, 0, 1]`) are
+supported. Saturation anchors remain fixed. This option currently supports the
+single-species model; `chemical_species` cannot be combined with an active
+trend. The default leaves the existing fit unchanged. A correct trend can
+reduce ambiguity and oscillations, but faster convergence is not guaranteed;
+a wrong state ordering or a branch reversal can bias the reconstruction.
+
+
+| Setting | Constraint on consecutive state means |
+| --- | --- |
+| `"none"` | No trend constraint (default) |
+| `"increasing"` | `mean[s + 1] >= mean[s]` |
+| `"decreasing"` | `mean[s + 1] <= mean[s]` |
+
+For example, enable an increasing branch with binary `-1/+1` pixels:
+
+```python
+physical_recipe.update(
+    magnetization_trend="increasing",
+    binary_magnetization=True,
+    binary_magnetization_values=[-1., 1.],
+)
+```
+
+Here `mean = 2 * fraction_positive - 1`. Only the positive-pixel fraction
+must be nondecreasing; domain walls can move and individual pixels can flip
+in either direction. Binary means have finite resolution: for `N` active
+pixels, adjacent attainable means differ by `2 / N`. Equal means are allowed.
+
+The constraint acts on fitted magnetization components. Projection relaxation
+still controls how much of the fitted physical target enters the reconstructed
+fields; a relaxed update or later Fourier constraint need not exactly satisfy
+the fitted target. Rerun the physical stage after changing the trend and use
+its history to compare detector and physical fit errors against `"none"`.
+The selected option is exported as `components["magnetization_trend"]` in the
+single-species physical fit (inside `modal_physical_fit` for grouped fits).
