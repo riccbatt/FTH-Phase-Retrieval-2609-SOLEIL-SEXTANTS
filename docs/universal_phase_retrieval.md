@@ -1109,3 +1109,5 @@ the fitted target. Rerun the physical stage after changing the trend and use
 its history to compare detector and physical fit errors against `"none"`.
 The selected option is exported as `components["magnetization_trend"]` in the
 single-species physical fit (inside `modal_physical_fit` for grouped fits).
+
+Physical fits default to `physical_spatial_weighting="exit_wave_intensity"`. Set it to `None` to use uniform spatial weighting.

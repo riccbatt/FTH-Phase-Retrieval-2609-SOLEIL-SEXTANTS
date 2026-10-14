@@ -38,7 +38,7 @@ class PermanentMagnetsWorkflowTests(unittest.TestCase):
                 exec(compile(source, "inline-averaging", "exec"), namespace)
                 if "OUTPUT = PROCESSED" in source:
                     namespace.update(RAW_ROOT=temp, PREFIX="test", SCAN_INDICES=[1], DARK_INDICES=[0],
-                                     ENERGIES_EV=[781.], POLARIZATIONS=[1.], OUTPUT=temp/"average.h5")
+                                     ENERGIES_EV=[781.], POLARIZATIONS=[1.], STATE_LABELS=["scan_1"], OUTPUT=temp/"average.h5")
             with h5py.File(temp/"average.h5") as h:
                 np.testing.assert_allclose(h["averages"][0], [[3., 6., 9., 8., np.nan, np.nan]], equal_nan=True)
                 np.testing.assert_array_equal(h["frame_counts"], [3])
@@ -78,10 +78,10 @@ class PermanentMagnetsWorkflowTests(unittest.TestCase):
                 rgb = np.zeros((*shape, 3), dtype=np.uint8); rgb[mask, 0] = 255
                 Image.fromarray(rgb).save(temp/name)
             configs = [
-                dict(RAW_ROOT=temp, PREFIX="test", SCAN_INDICES=[1, 2], DARK_INDICES=[0], ENERGIES_EV=[781., 781.], POLARIZATIONS=[1., 1.]),
+                dict(RAW_ROOT=temp, PREFIX="test", SCAN_INDICES=[1, 2], DARK_INDICES=[0], ENERGIES_EV=[781., 781.], POLARIZATIONS=[1., 1.], STATE_LABELS=["scan_1", "scan_2"]),
                 dict(MASK_PNG=temp/"mask.png", MAX_SHIFT=3., DETECTOR_CENTER=None, ALIGNMENT_ROI=(5, 75, 5, 75)),
-                dict(SUPPORT_PNG=temp/"support.png", MODES=[1, 2], WARMUP_ITERATIONS=[2, 1], DATA_MODE="single_polarization", XMCD_PAIRS=[]),
-                dict(SATURATED_SCAN_INDICES=[1, 2], SATURATION_SIGNS=[1., -1.], OUTER_ITERATIONS=1, INNER_ITERATIONS=1, PHYSICAL_ITERATIONS=2),
+                dict(SUPPORT_PNG=temp/"support.png", MODES=[1, 2], WARMUP_ITERATIONS=[2, 1]),
+                dict(SATURATED_SCAN_INDICES=[1, 2], SATURATION_SIGNS=[1., -1.], OUTER_ITERATIONS=1, INNER_ITERATIONS=1, PHYSICAL_ITERATIONS=2, FOCUS_PROP_UM=.3, FOCUS_PHASE_RAD=.1, DETECTOR_PIXEL_SIZE_M=13.5e-6, DETECTOR_DISTANCE_M=.2),
             ]
             notebooks = sorted(FOLDER.glob("0*.ipynb"))
             self.assertEqual(len(notebooks), 4)
@@ -118,6 +118,8 @@ class PermanentMagnetsWorkflowTests(unittest.TestCase):
                 self.assertEqual(physical["fields"].shape, warm["warmup_fields"].shape)
                 self.assertEqual(physical["magnetization"].shape, (2, *shape))
                 self.assertIn("fit_residual_rms", physical["components"])
+                self.assertEqual(physical.attrs["focus_prop_um"], .3)
+                self.assertEqual(physical.attrs["focus_phase_rad"], .1)
                 self.assertTrue(np.all(np.isfinite(physical["fields"][()])))
             # Rerun only notebook 4 in projection-only mode, still from disk.
             namespace["OUTER_ITERATIONS"] = 0
@@ -131,8 +133,9 @@ class PermanentMagnetsWorkflowTests(unittest.TestCase):
             # Reuse the same scans as an opposite-polarization pair, one state.
             with h5py.File(temp/"02_holograms.h5", "a") as h:
                 h["polarization"][...] = [1., -1.]
-            xmcd_configs = [dict(configs[2], DATA_MODE="xmcd", XMCD_PAIRS=[[0, 1]]),
-                            dict(configs[3], SATURATED_SCAN_INDICES=[], SATURATION_SIGNS=[], OUTER_ITERATIONS=1)]
+                h["state_labels"][...] = ["state_0", "state_0"]
+            xmcd_configs = [dict(configs[2]),
+                            dict(configs[3], SATURATED_SCAN_INDICES=[], SATURATION_SIGNS=[], OUTER_ITERATIONS=1, FOCUS_PROP_UM=None, FOCUS_PHASE_RAD=None, DETECTOR_PIXEL_SIZE_M=None, DETECTOR_DISTANCE_M=None)]
             with patch("matplotlib.pyplot.show", side_effect=lambda: plt.close("all")):
                 for notebook, config in zip(notebooks[2:], xmcd_configs):
                     namespace = {"__name__": "__main__"}

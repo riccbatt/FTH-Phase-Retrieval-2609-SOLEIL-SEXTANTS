@@ -4645,7 +4645,7 @@ def default_general_phase_retrieval_recipe():
         "physical_projection_object_roi": False,
         "physical_phase_reference": False,
         # Shared spatial least-squares weights from mean anchor |exit wave|^2.
-        "physical_spatial_weighting": None,
+        "physical_spatial_weighting": "exit_wave_intensity",
         "projection_diagnostic_observation": None,
         # Optional reversible focus transform around every object-space
         # physical projection. Zero propagation skips propagation and phase.

@@ -193,3 +193,19 @@ def object_differences(objects, pairs, reference_mask=None):
                 second *= np.exp(1j*np.angle(overlap))
         differences.append(first-second)
     return np.asarray(differences)
+
+
+def pairs_from_state_labels(state_labels, polarizations, energies):
+    """Derive plotting pairs from the same metadata the physical solver uses."""
+    p = np.asarray(polarizations)
+    if np.all(p > 0) or np.all(p < 0):
+        return "single_polarization", np.empty((0, 2), dtype=int)
+    pairs = []
+    for state in dict.fromkeys(state_labels):
+        indices = np.flatnonzero(np.asarray(state_labels) == state)
+        positive = indices[p[indices] > 0]
+        negative = indices[p[indices] < 0]
+        if len(positive) != 1 or len(negative) != 1:
+            raise ValueError(f"State {state}: opposite-helicity plotting requires one + and one - observation")
+        pairs.append([int(positive[0]), int(negative[0])])
+    return "xmcd", difference_pairs("xmcd", pairs, 0, polarizations, energies)
