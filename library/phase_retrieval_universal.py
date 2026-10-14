@@ -4638,6 +4638,9 @@ def default_general_phase_retrieval_recipe():
         "physical_iterations": 20,
         "clip_magnetization": True,
         "magnetization_trend": "none",
+        "magnetization_trend_intensity_cutoff": 0.01,
+        "magnetization_trend_correction": "offset",
+        "bound_magnetization_median": False,
         # Snap to the nearest of -1, 0, +1.
         "initial_binary_magnetization": False,
         "binary_magnetization": False,
@@ -5051,9 +5054,62 @@ def largest_support_component(supportmask):
     return (labels == np.argmax(sizes)).astype(np.uint8)
 
 
+def _two_domain_distribution(values, weights):
+    """Conservative two-population estimate, not an absolute calibration.
+
+    Both signs, >=10% weighted population per domain, and separation greater
+    than four within-population standard deviations are required. Reject
+    uniform/single broad populations rather than manufacturing domains.
+    """
+    values, weights = np.asarray(values, float), np.asarray(weights, float)
+    if len(values) < 32 or not np.all(np.isfinite(values)):
+        return None
+    centers = np.quantile(values, [.1, .9])
+    if centers[0] == centers[1]:
+        return None
+    for _ in range(40):
+        membership = values > centers.mean()
+        if not np.any(membership) or np.all(membership):
+            return None
+        updated = np.array([np.average(values[~membership], weights=weights[~membership]),
+                            np.average(values[membership], weights=weights[membership])])
+        if np.allclose(updated, centers, rtol=0, atol=1e-12):
+            centers = updated
+            break
+        centers = updated
+    membership = values > centers.mean()
+    masses = np.array([weights[~membership].sum(), weights[membership].sum()])
+    if masses.min() < .1*masses.sum() or not centers[0] < 0 < centers[1]:
+        return None
+    deviations = [np.sqrt(np.average((values[selection]-center)**2, weights=weights[selection]))
+                  for selection, center in zip([~membership, membership], centers)]
+    gap = centers[1]-centers[0]
+    if gap <= 4*max(deviations):
+        return None
+    # A real gap must have low probability density; two-means alone will split
+    # a single broad peak even when no domain populations are present.
+    valley = abs(values-centers.mean()) < .1*gap
+    if weights[valley].sum() > .05*weights.sum():
+        return None
+    return centers
+
+
+def _weighted_magnetization_median(values, weights):
+    """Interpolate the weighted CDF at its midpoint; equal weights give np.median."""
+    order = np.argsort(values)
+    values, weights = np.asarray(values)[order], np.asarray(weights)[order]
+    centers = (np.cumsum(weights)-.5*weights)/np.sum(weights)
+    return float(np.interp(.5, centers, values))
+
+
 def _constrain_magnetization_trend(maps, active, names, saturated, trend,
-                                   clip=True, groups=None, discrete_values=None, preferences=None):
+                                   clip=True, groups=None, discrete_values=None, preferences=None,
+                                   spatial_weights=None, state_weights=None, correction="offset", median_bounds=False):
     """Project state means onto a monotone sequence, preserving fixed anchors.
+
+    Continuous maps use weighted means; correction may offset or positively
+    scale retained pixels. Infeasible factors fall back to an offset. Equality
+    between neighbouring states is allowed.
 
     State order is first appearance in observation metadata. Each optional
     modal group has its own sequence. Spatial texture is retained through a
@@ -5061,39 +5117,82 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
     Discrete maps instead adjust allowed-value counts; no pixel ordering
     between states is imposed.
     """
-    if trend == "none" or not np.any(active):
+    if (trend == "none" and not median_bounds) or not np.any(active):
         return
-    direction = 1. if trend == "increasing" else -1.
+    if correction not in ("offset", "factor", "affine_domains"):
+        raise ValueError("magnetization_trend_correction must be 'offset', 'factor', or 'affine_domains'.")
+    spatial_weights = np.ones(active.shape) if spatial_weights is None else np.asarray(spatial_weights, float)
+    if spatial_weights.shape != active.shape or np.any(~np.isfinite(spatial_weights)) or np.any(spatial_weights < 0):
+        raise ValueError("Trend spatial weights must be finite nonnegative and match the maps")
+    active = active & (spatial_weights > 0)
+    if not np.any(active):
+        return
+    pixel_weights = spatial_weights[active]
+    def mean(values):
+        return float(np.average(values, weights=pixel_weights))
+    state_weights = np.ones(len(names)) if state_weights is None else np.asarray(state_weights, float)
+    if state_weights.shape != (len(names),) or np.any(~np.isfinite(state_weights)) or np.any(state_weights <= 0):
+        raise ValueError("Trend state weights must be finite and positive")
+    if discrete_values is not None and (correction != "offset" or not np.allclose(pixel_weights, pixel_weights[0])):
+        raise ValueError("Discrete trend correction requires offset mode and uniform retained-pixel weights")
+    if median_bounds and discrete_values is not None and np.any(abs(discrete_values) > 1):
+        raise ValueError("Median bounds require discrete magnetization values within [-1, 1]")
+    direction = -1. if trend == "decreasing" else 1.
     levels = None if discrete_values is None else np.sort(direction * discrete_values)
     if levels is not None and len(levels) > 2 and not np.allclose(
             np.diff(levels), levels[1] - levels[0], rtol=1e-12, atol=1e-14):
         raise ValueError("magnetization_trend with discrete magnetization requires equally spaced values.")
     sequences = [list(range(len(names)))] if groups is None else groups
     for indices in sequences:
-        means = direction * np.array([maps[index][active].mean() for index in indices])
+        means = direction * np.array([mean(maps[index][active]) for index in indices])
         anchors = {i: direction * saturated[names[index]]
                    for i, index in enumerate(indices) if names[index] in saturated}
-        positions = sorted(anchors)
+        if median_bounds and any(abs(value) > 1 for value in anchors.values()):
+            raise ValueError("Median bounds contradict saturated_states outside [-1, 1]")
+        positions = sorted(anchors) if trend != "none" else []
         if any(anchors[a] > anchors[b] for a, b in zip(positions, positions[1:])):
             raise ValueError("magnetization_trend contradicts saturated_states in state order.")
         targets = means.copy()
+        medians = direction*np.array([_weighted_magnetization_median(maps[index][active], pixel_weights)
+                                      for index in indices])
+        lower = means-1.-medians if median_bounds and levels is None else np.full(len(indices), -np.inf)
+        upper = means+1.-medians if median_bounds and levels is None else np.full(len(indices), np.inf)
+        if clip:
+            lower = np.maximum(lower, -1.)
+            upper = np.minimum(upper, 1.)
         boundaries = [-1] + positions + [len(indices)]
         for left, right in zip(boundaries, boundaries[1:]):
             if levels is not None and right > left + 1 and (
                     anchors.get(left, -np.inf) > levels[-1]
                     or anchors.get(right, np.inf) < levels[0]):
                 raise ValueError("magnetization_trend anchors are incompatible with binary_magnetization_values.")
-            # Pool adjacent violators: least-squares isotonic state means.
+            # Bounded isotonic regression: enforce the mean trend and median
+            # bounds jointly, rather than alternately undoing either correction.
             blocks = []
             for i in range(left + 1, right):
-                blocks.append([means[i], 1])
-                while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
+                lo = max(lower[i], anchors.get(left, -np.inf))
+                hi = min(upper[i], anchors.get(right, np.inf))
+                if lo > hi + 1e-12:
+                    raise ValueError("Median bounds and trend/anchors cannot be satisfied by offsets; revise the material mask or constraints")
+                weight = state_weights[indices[i]]
+                blocks.append([np.clip(means[i], lo, hi), weight, 1, lo, hi, means[i]*weight])
+                while trend != "none" and len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
                     b, a = blocks.pop(), blocks.pop()
-                    count = a[1] + b[1]
-                    blocks.append([(a[0]*a[1] + b[0]*b[1])/count, count])
-            values = np.repeat([b[0] for b in blocks], [b[1] for b in blocks])
-            targets[left+1:right] = np.clip(values, anchors.get(left, -np.inf),
-                                          anchors.get(right, np.inf))
+                    weight = a[1]+b[1]
+                    lo, hi = max(a[3], b[3]), min(a[4], b[4])
+                    if lo > hi + 1e-12:
+                        raise ValueError("Median bounds and trend cannot be satisfied by offsets; revise the material mask or constraints")
+                    total = a[5]+b[5]
+                    blocks.append([np.clip(total/weight, lo, hi), weight, a[2]+b[2], lo, hi, total])
+            targets[left+1:right] = np.repeat([b[0] for b in blocks], [b[2] for b in blocks])
+        domain_centers = {}
+        if correction == "affine_domains":
+            for index in indices:
+                centers = _two_domain_distribution(maps[index][active], pixel_weights)
+                if centers is not None:
+                    domain_centers[index] = centers
+        reference_gap = (np.median([centers[1]-centers[0] for centers in domain_centers.values()])
+                         if domain_centers else None)
         for i, index in enumerate(indices):
             if i in anchors:
                 continue
@@ -5123,19 +5222,43 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
                     delta -= step*count
                 maps[index][active] = direction * levels[ranks]
                 continue
-            if abs(target - values.mean()) < 1e-14:
+            current_mean = mean(values)
+            if abs(target - current_mean) < 1e-14:
                 continue
+            if correction == "affine_domains" and index in domain_centers:
+                centers = domain_centers[index]
+                factor = reference_gap/(centers[1]-centers[0])
+                offset = target-factor*current_mean
+                adjusted = factor*values+offset
+                # Preserve two signed populations and avoid clipping that
+                # would invalidate the required weighted mean.
+                adjusted_centers = factor*centers+offset
+                if (not median_bounds or abs(_weighted_magnetization_median(adjusted, pixel_weights)) <= 1.+1e-12) and adjusted_centers[0] < 0 < adjusted_centers[1] and (
+                        not clip or np.all(abs(adjusted) <= 1.)):
+                    maps[index][active] = adjusted
+                    continue
+                # Missing/ambiguous domains or infeasible bounds use offset.
+            if correction == "factor" and abs(current_mean) > 1e-14:
+                factor = target/current_mean
+                scaled = values*factor
+                # Positive factors preserve pixel signs. Clipping would change
+                # the target mean, so use an offset for infeasible factors.
+                if factor >= 0 and (not median_bounds or abs(_weighted_magnetization_median(scaled, pixel_weights)) <= 1.+1e-12) and (not clip or np.all(abs(scaled) <= 1.)):
+                    maps[index][active] = scaled
+                    continue
+            # Zero mean, a required sign reversal, or incompatible clipping
+            # cannot be corrected safely by a positive factor: offset fallback.
             if clip:
                 lo, hi = -1. - values.max(), 1. - values.min()
                 for _ in range(60):
                     shift = (lo + hi)/2
-                    if np.clip(values + shift, -1., 1.).mean() < target:
+                    if mean(np.clip(values + shift, -1., 1.)) < target:
                         lo = shift
                     else:
                         hi = shift
                 maps[index][active] = np.clip(values + (lo+hi)/2, -1., 1.)
             else:
-                maps[index][active] = values + target - values.mean()
+                maps[index][active] = values + target - current_mean
 
 
 def _binary_magnetization_values(recipe):
@@ -5234,7 +5357,16 @@ def project_log_objects_physical(
     trend = recipe.get("magnetization_trend", "none")
     if trend not in ("none", "increasing", "decreasing"):
         raise ValueError("magnetization_trend must be 'none', 'increasing', or 'decreasing'.")
-    if trend != "none" and recipe.get("chemical_species") is not None:
+    median_bounds = recipe.get("bound_magnetization_median", False)
+    if not isinstance(median_bounds, bool):
+        raise ValueError("bound_magnetization_median must be bool.")
+    trend_cutoff = recipe.get("magnetization_trend_intensity_cutoff", 0.01)
+    if not isinstance(trend_cutoff, (int, float, np.number)) or not np.isfinite(trend_cutoff) or not 0 <= trend_cutoff < 1:
+        raise ValueError("magnetization_trend_intensity_cutoff must be a fraction in [0, 1).")
+    trend_correction = recipe.get("magnetization_trend_correction", "offset")
+    if trend_correction not in ("offset", "factor", "affine_domains"):
+        raise ValueError("magnetization_trend_correction must be 'offset', 'factor', or 'affine_domains'.")
+    if (trend != "none" or median_bounds) and recipe.get("chemical_species") is not None:
         raise ValueError("magnetization_trend currently supports the single-species physical model only.")
     if recipe.get("chemical_species") is not None:
         if initial_binary:
@@ -5541,6 +5673,22 @@ def project_log_objects_physical(
             magnetization *= magnetization_supportmask
 
     trend_preferences = {}
+    trend_spatial_weights = np.ones((nx, ny), dtype=float)
+    if trend != "none" or median_bounds:
+        # A common intensity map and cutoff across states avoids state-dependent
+        # selection of the material. Normalize before exponentiating.
+        log_intensity = 2*log_objects.real
+        peak = np.max(log_intensity[:, allowed_material])
+        trend_spatial_weights = np.mean(np.exp(np.minimum(log_intensity-peak, 0.)), axis=0)
+        trend_spatial_weights[~allowed_material] = 0.
+        trend_spatial_weights[trend_spatial_weights < trend_cutoff*np.max(trend_spatial_weights)] = 0.
+        if binary_values is not None:
+            # Discrete counts require a common equal-weight lattice; retain the
+            # same intensity cutoff but use equal weights on surviving pixels.
+            trend_spatial_weights = (trend_spatial_weights > 0).astype(float)
+    if magnetization_supportmask is not None:
+        trend_spatial_weights[~magnetization_supportmask] = 0.
+    trend_state_weights = np.bincount(metadata["state_indices"], weights=weights, minlength=n_states)
     def constrain_trend():
         active = thickness > 0
         if magnetization_supportmask is not None:
@@ -5548,7 +5696,8 @@ def project_log_objects_physical(
         _constrain_magnetization_trend(
             magnetization, active, metadata["state_names"], saturated, trend,
             clip_magnetization, recipe.get("_magnetization_trend_groups"),
-            binary_values, trend_preferences)
+            binary_values, trend_preferences, trend_spatial_weights,
+            trend_state_weights, trend_correction, median_bounds)
     constrain_trend()
 
     initial_magnetization = magnetization.copy()
@@ -5630,6 +5779,7 @@ def project_log_objects_physical(
                     active = thickness > 0
                     if magnetization_supportmask is not None:
                         active &= magnetization_supportmask
+                    active &= trend_spatial_weights > 0
                     trend_preferences[state] = magnetization[state][active].copy()
                 magnetization[state] = _snap_magnetization(magnetization[state], binary_values)
             elif clip_magnetization:
@@ -5832,6 +5982,15 @@ def project_log_objects_physical(
         "physical_spatial_weighting": spatial_weighting,
         "physical_spatial_weights": spatial_weights,
         "magnetization_trend": trend,
+        "magnetization_trend_intensity_cutoff": float(trend_cutoff),
+        "magnetization_trend_correction": trend_correction,
+        "bound_magnetization_median": median_bounds,
+        "magnetization_trend_spatial_weights": trend_spatial_weights,
+        "magnetization_trend_means": np.array([
+            np.average(item[(thickness > 0) & (trend_spatial_weights > 0)],
+                       weights=trend_spatial_weights[(thickness > 0) & (trend_spatial_weights > 0)])
+            if np.any((thickness > 0) & (trend_spatial_weights > 0)) else np.nan
+            for item in magnetization]),
         "weighted_fit_residual_rms": float(np.sqrt(
             np.sum(weights[:, None, None] * spatial_weights * abs(residual)**2)
             / np.sum(weights[:, None, None] * observation_spatial_weights))),
