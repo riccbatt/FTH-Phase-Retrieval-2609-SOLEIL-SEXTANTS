@@ -18,3 +18,16 @@ Before warmup, the input-diagnostic cell displays support components and their c
 `USE_EXIT_WAVE_INTENSITY_WEIGHTS=True` enables spatial least-squares weighting in the single-species physical projector. At every projection it uses the mean squared exit-wave amplitude of the selected saturation references, normalized to mean 1 inside the material aperture. The same map applies to every state. This weights shared response estimation; common fields and individual magnetization maps are pixelwise fits, where a shared positive spatial weight cancels. It does not multiply magnetization or alter the detector constraint. Set it to `False` to recover the unweighted fit. The weight map and weighted residual are displayed and exported in `physical_components`.
 
 Intensity weighting changes the fitted target, while `PROJECTION_RELAXATION` still controls the update: `L_new=(1-r)*L_old+r*L_fit` in complex-log space. `FINAL_PROJECTION_RELAXATION` independently controls the final projection. Fitted component/magnetization maps describe the target before relaxation; displayed exit waves show the actual returned fields.
+
+
+`MAGNETIZATION_TREND` selects `"none"` (default), `"increasing"`, or
+`"decreasing"` for the physical projection. It constrains the mean reduced
+magnetization over the material aperture in loaded state order, preserving
+fixed saturation anchors. It does not constrain the direction of individual
+pixel changes. With `BINARY_MAGNETIZATION=True` and values `[-1, 1]`, it
+constrains the fraction of positive pixels, while domains remain free to move.
+Leave it at `"none"` for this dataset unless the selected states form a
+monotonic branch and the anchor order agrees with that direction. A correct
+trend can help convergence; a wrong one can bias the fit. See the
+[physical recipe guide](../docs/universal_phase_retrieval.md#mean-magnetization-trend)
+for examples and limitations.
