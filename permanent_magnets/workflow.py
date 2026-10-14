@@ -143,3 +143,53 @@ def save_tree(group, values):
                     group.attrs[key] = json.dumps(value, default=lambda x: np.asarray(x).tolist())
             except (TypeError, ValueError):
                 group.attrs[key] = json.dumps(value, default=str)
+
+
+def difference_pairs(data_mode, xmcd_pairs, reference_index, polarizations, energies):
+    """Choose +/- pairs or each observation versus a reference."""
+    n = len(polarizations)
+    if data_mode == "xmcd":
+        pairs = np.asarray(xmcd_pairs)
+        if pairs.ndim != 2 or pairs.shape[1] != 2 or not np.issubdtype(pairs.dtype, np.integer):
+            raise ValueError("XMCD_PAIRS must be [[positive_index, negative_index], ...]")
+        if sorted(pairs.ravel().tolist()) != list(range(n)):
+            raise ValueError("XMCD pairs must include every observation exactly once")
+        p = np.asarray(polarizations); e = np.asarray(energies)
+        if not np.all((p[pairs[:, 0]] > 0) & (p[pairs[:, 1]] < 0)):
+            raise ValueError("XMCD pairs must be ordered positive, negative polarization")
+        if not np.allclose(e[pairs[:, 0]], e[pairs[:, 1]]):
+            raise ValueError("Each XMCD pair must have the same energy")
+        return pairs
+    if data_mode != "single_polarization":
+        raise ValueError("DATA_MODE must be 'xmcd' or 'single_polarization'")
+    if not isinstance(reference_index, (int, np.integer)) or not 0 <= reference_index < n:
+        raise ValueError("REFERENCE_INDEX must select an observation")
+    if not (np.all(np.asarray(polarizations) > 0) or np.all(np.asarray(polarizations) < 0)):
+        raise ValueError("Single-polarization data must have one polarization sign")
+    return np.column_stack([np.arange(n), np.full(n, reference_index)])
+
+
+def focused_objects(fields, energies, propagation_um=0., phase_rad=0., setup=None):
+    """Focus all modes without modifying saved detector fields."""
+    from library import phase_retrieval_universal as u
+    fields = np.asarray(fields)
+    modes = fields[:, None] if fields.ndim == 3 else fields
+    objects = []
+    for mode in range(modes.shape[1]):
+        focused = u._projection_focus_transform(modes[:, mode], energies, propagation_um, 0., setup)
+        objects.append(np.stack([u.fourier_field_to_display_object(field) for field in focused]) * np.exp(1j*phase_rad))
+    return np.stack(objects, axis=1)
+
+
+def object_differences(objects, pairs, reference_mask=None):
+    """Subtract complex objects, optionally matching phase in reference holes."""
+    differences = []
+    for a, b in pairs:
+        first, second = objects[a], objects[b].copy()
+        if reference_mask is not None and np.any(reference_mask):
+            # One primary-mode phase gauge for every mode of the observation.
+            overlap = np.vdot(second[0][reference_mask], first[0][reference_mask])
+            if abs(overlap) > 1e-30:
+                second *= np.exp(1j*np.angle(overlap))
+        differences.append(first-second)
+    return np.asarray(differences)
