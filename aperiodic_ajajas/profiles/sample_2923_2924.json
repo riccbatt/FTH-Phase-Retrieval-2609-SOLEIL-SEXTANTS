@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_name": "baseline",
+  "shared": {
+    "SATURATED_SCAN": 2923,
+    "LOOP_SCAN": 2924,
+    "SUPPORTMASK_OVERRIDE_FILE": null
+  },
+  "preprocess": {
+    "RAW_ROOT": "/media/riccardo/EXT_16TB1/DATA/P04/11022228/raw",
+    "PREFIX": "2602_orbitronics",
+    "DARK_SCAN": 2926,
+    "DETECTOR_CENTER": [
+      1021,
+      891
+    ],
+    "SUPPORT_PNG": "supportmask_00_3.png",
+    "DETECTOR_MASK_PNG": null,
+    "REFERENCE_POLYGONS": "detector_mask_polygons_20260214.json",
+    "REFERENCE_MASK_SHIFT": [
+      2.5,
+      -2
+    ],
+    "REFERENCE_MASK_EROSION": 0,
+    "REFERENCE_MASK_DILATION": 0,
+    "LOOP_POINT_STEP": 1,
+    "LOOP_POINT_NUMBERS": null,
+    "SATURATED_POINT_NUMBERS": null,
+    "DARK_POINT_NUMBERS": null,
+    "LOOP_FRAME_INDICES": null,
+    "SATURATED_FRAME_INDICES": null,
+    "DARK_FRAME_INDICES": null,
+    "PHOTON_LEVEL": 5.0
+  },
+  "two_state": {
+    "STATE_POINT_NUMBER": 7
+  },
+  "universal": {
+    "MASK_REFERENCE_POINT_NUMBER": 7,
+    "LOOP_EXCLUDE_POINT_NUMBERS": [
+      0
+    ],
+    "RETRIEVAL_POINT_NUMBERS": null,
+    "MASK_COLUMNS": [
+      1350,
+      1485
+    ],
+    "SUPPORTMASK_OVERRIDE_FILE": "supportmask_tight.npy"
+  },
+  "sequential": {
+    "LOOP_EXCLUDE_POINT_NUMBERS": [
+      0
+    ],
+    "RETRIEVAL_POINT_NUMBERS": null,
+    "MASK_COLUMNS": [
+      1350,
+      1485
+    ],
+    "SUPPORTMASK_OVERRIDE_FILE": "supportmask_tight.npy"
+  }
+}
