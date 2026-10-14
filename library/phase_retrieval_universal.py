@@ -4637,10 +4637,12 @@ def default_general_phase_retrieval_recipe():
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
         "clip_magnetization": True,
+        "magnetization_clip_range": (-1.0, 1.0),
         "magnetization_trend": "none",
         "magnetization_trend_intensity_cutoff": 0.01,
         "magnetization_trend_correction": "offset",
         "bound_magnetization_median": False,
+        "magnetization_median_scope": "whole",
         # Snap to the nearest of -1, 0, +1.
         "initial_binary_magnetization": False,
         "binary_magnetization": False,
@@ -5104,7 +5106,8 @@ def _weighted_magnetization_median(values, weights):
 
 def _constrain_magnetization_trend(maps, active, names, saturated, trend,
                                    clip=True, groups=None, discrete_values=None, preferences=None,
-                                   spatial_weights=None, state_weights=None, correction="offset", median_bounds=False):
+                                   spatial_weights=None, state_weights=None, correction="offset", median_bounds=False,
+                                   clip_range=(-1.0, 1.0), median_scope="whole"):
     """Project state means onto a monotone sequence, preserving fixed anchors.
 
     Continuous maps use weighted means; correction may offset or positively
@@ -5137,7 +5140,27 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
         raise ValueError("Discrete trend correction requires offset mode and uniform retained-pixel weights")
     if median_bounds and discrete_values is not None and np.any(abs(discrete_values) > 1):
         raise ValueError("Median bounds require discrete magnetization values within [-1, 1]")
+    clip_low, clip_high = clip_range
+    def median_valid(values):
+        selections = [np.ones(values.shape, bool)] if median_scope == "whole" else [values < 0, values > 0]
+        return all(abs(_weighted_magnetization_median(values[mask], pixel_weights[mask])) <= 1.+1e-12
+                   for mask in selections if np.any(mask))
+    if median_scope not in ("whole", "domains"):
+        raise ValueError("magnetization_median_scope must be 'whole' or 'domains'.")
+    if median_bounds and median_scope == "domains" and discrete_values is None:
+        # Positive scaling within each sign preserves membership and texture.
+        for index, name in enumerate(names):
+            if name in saturated:
+                continue
+            values = maps[index][active].copy()
+            for mask in (values < 0, values > 0):
+                if np.any(mask):
+                    median = _weighted_magnetization_median(values[mask], pixel_weights[mask])
+                    if abs(median) > 1.:
+                        values[mask] /= abs(median)
+            maps[index][active] = values
     direction = -1. if trend == "decreasing" else 1.
+    directed_low, directed_high = sorted((direction*clip_low, direction*clip_high))
     levels = None if discrete_values is None else np.sort(direction * discrete_values)
     if levels is not None and len(levels) > 2 and not np.allclose(
             np.diff(levels), levels[1] - levels[0], rtol=1e-12, atol=1e-14):
@@ -5157,9 +5180,15 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
                                       for index in indices])
         lower = means-1.-medians if median_bounds and levels is None else np.full(len(indices), -np.inf)
         upper = means+1.-medians if median_bounds and levels is None else np.full(len(indices), np.inf)
+        if median_bounds and median_scope == "domains" and levels is None:
+            # Domain-wise scaling can leave no common admissible offset.
+            # For a trend, choose feasible means in [-1, 1] and permit a
+            # mean-preserving contraction when an offset violates a median.
+            lower = np.full(len(indices), -1. if trend != "none" else -np.inf)
+            upper = np.full(len(indices), 1. if trend != "none" else np.inf)
         if clip:
-            lower = np.maximum(lower, -1.)
-            upper = np.minimum(upper, 1.)
+            lower = np.maximum(lower, directed_low)
+            upper = np.minimum(upper, directed_high)
         boundaries = [-1] + positions + [len(indices)]
         for left, right in zip(boundaries, boundaries[1:]):
             if levels is not None and right > left + 1 and (
@@ -5233,8 +5262,8 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
                 # Preserve two signed populations and avoid clipping that
                 # would invalidate the required weighted mean.
                 adjusted_centers = factor*centers+offset
-                if (not median_bounds or abs(_weighted_magnetization_median(adjusted, pixel_weights)) <= 1.+1e-12) and adjusted_centers[0] < 0 < adjusted_centers[1] and (
-                        not clip or np.all(abs(adjusted) <= 1.)):
+                if (not median_bounds or median_valid(adjusted)) and adjusted_centers[0] < 0 < adjusted_centers[1] and (
+                        not clip or np.all((adjusted >= clip_low) & (adjusted <= clip_high))):
                     maps[index][active] = adjusted
                     continue
                 # Missing/ambiguous domains or infeasible bounds use offset.
@@ -5243,22 +5272,41 @@ def _constrain_magnetization_trend(maps, active, names, saturated, trend,
                 scaled = values*factor
                 # Positive factors preserve pixel signs. Clipping would change
                 # the target mean, so use an offset for infeasible factors.
-                if factor >= 0 and (not median_bounds or abs(_weighted_magnetization_median(scaled, pixel_weights)) <= 1.+1e-12) and (not clip or np.all(abs(scaled) <= 1.)):
+                if factor >= 0 and (not median_bounds or median_valid(scaled)) and (not clip or np.all((scaled >= clip_low) & (scaled <= clip_high))):
                     maps[index][active] = scaled
                     continue
             # Zero mean, a required sign reversal, or incompatible clipping
             # cannot be corrected safely by a positive factor: offset fallback.
             if clip:
-                lo, hi = -1. - values.max(), 1. - values.min()
+                lo, hi = clip_low - values.max(), clip_high - values.min()
                 for _ in range(60):
                     shift = (lo + hi)/2
-                    if mean(np.clip(values + shift, -1., 1.)) < target:
+                    if mean(np.clip(values + shift, clip_low, clip_high)) < target:
                         lo = shift
                     else:
                         hi = shift
-                maps[index][active] = np.clip(values + (lo+hi)/2, -1., 1.)
+                maps[index][active] = np.clip(values + (lo+hi)/2, clip_low, clip_high)
             else:
                 maps[index][active] = values + target - current_mean
+            if median_bounds and median_scope == "domains" and not median_valid(maps[index][active]):
+                adjusted = maps[index][active].copy()
+                # A constant at the target is feasible. Retain as much
+                # spatial contrast as possible while keeping that mean.
+                if abs(target) > 1.+1e-12:
+                    raise ValueError("Domain median bounds require a feasible trend target within [-1, 1].")
+                lo, hi = 0., 1.
+                for _ in range(60):
+                    factor = (lo+hi)/2
+                    candidate = target + factor*(adjusted-target)
+                    if median_valid(candidate):
+                        lo = factor
+                    else:
+                        hi = factor
+                maps[index][active] = target + lo*(adjusted-target)
+
+    if median_bounds and median_scope == "domains":
+        if any(not median_valid(maps[index][active]) for index in range(len(names))):
+            raise ValueError("Domain median bounds and trend/clipping cannot be satisfied by the selected correction; revise the constraints.")
 
 
 def _binary_magnetization_values(recipe):
@@ -5316,7 +5364,8 @@ def project_log_objects_physical(
     grid. Arrays are copied; saturated signs and support constraints still apply.
 
     ``mz_state`` is real and clipped to ``[-1, 1]`` by default. Set recipe
-    ``clip_magnetization=False`` to disable clipping. Set
+    ``magnetization_clip_range=(lower, upper)`` to choose finite clipping limits,
+    or ``clip_magnetization=False`` to disable clipping. Set
     ``binary_magnetization=True`` to snap to the nearest allowed value in
     ``binary_magnetization_values`` (default [-1, 0, 1]). Ties prefer smaller
     magnitude, then the negative value. This overrides clipping. Saturated states, when
@@ -5347,6 +5396,9 @@ def project_log_objects_physical(
     clip_magnetization = recipe.get("clip_magnetization", True)
     if not isinstance(clip_magnetization, bool):
         raise ValueError("clip_magnetization must be bool.")
+    clip_range = np.asarray(recipe.get("magnetization_clip_range", (-1., 1.)), dtype=float)
+    if clip_range.shape != (2,) or not np.all(np.isfinite(clip_range)) or clip_range[0] >= clip_range[1]:
+        raise ValueError("magnetization_clip_range must contain two finite values with lower < upper.")
     binary_magnetization = recipe.get("binary_magnetization", False)
     if not isinstance(binary_magnetization, bool):
         raise ValueError("binary_magnetization must be bool.")
@@ -5360,6 +5412,9 @@ def project_log_objects_physical(
     median_bounds = recipe.get("bound_magnetization_median", False)
     if not isinstance(median_bounds, bool):
         raise ValueError("bound_magnetization_median must be bool.")
+    median_scope = recipe.get("magnetization_median_scope", "whole")
+    if median_scope not in ("whole", "domains"):
+        raise ValueError("magnetization_median_scope must be 'whole' or 'domains'.")
     trend_cutoff = recipe.get("magnetization_trend_intensity_cutoff", 0.01)
     if not isinstance(trend_cutoff, (int, float, np.number)) or not np.isfinite(trend_cutoff) or not 0 <= trend_cutoff < 1:
         raise ValueError("magnetization_trend_intensity_cutoff must be a fraction in [0, 1).")
@@ -5643,7 +5698,7 @@ def project_log_objects_physical(
         if binary_magnetization:
             magnetization = _snap_magnetization(magnetization, binary_values)
         elif clip_magnetization:
-            magnetization = np.clip(magnetization, -1., 1.)
+            magnetization = np.clip(magnetization, *clip_range)
         magnetization *= allowed_material
         if magnetization_supportmask is not None:
             magnetization *= magnetization_supportmask
@@ -5665,7 +5720,7 @@ def project_log_objects_physical(
         if binary_magnetization:
             magnetization = _snap_magnetization(magnetization, binary_values)
         elif clip_magnetization:
-            magnetization = np.clip(magnetization, -1., 1.)
+            magnetization = np.clip(magnetization, *clip_range)
         for state, sign in saturated.items():
             magnetization[metadata["state_names"].index(state)].fill(sign)
         magnetization *= allowed_material
@@ -5697,7 +5752,9 @@ def project_log_objects_physical(
             magnetization, active, metadata["state_names"], saturated, trend,
             clip_magnetization, recipe.get("_magnetization_trend_groups"),
             binary_values, trend_preferences, trend_spatial_weights,
-            trend_state_weights, trend_correction, median_bounds)
+            trend_state_weights, trend_correction, median_bounds,
+            clip_range=(-1., 1.) if binary_magnetization else clip_range,
+            median_scope=median_scope)
     constrain_trend()
 
     initial_magnetization = magnetization.copy()
@@ -5783,7 +5840,7 @@ def project_log_objects_physical(
                     trend_preferences[state] = magnetization[state][active].copy()
                 magnetization[state] = _snap_magnetization(magnetization[state], binary_values)
             elif clip_magnetization:
-                magnetization[state] = np.clip(magnetization[state], -1.0, 1.0)
+                magnetization[state] = np.clip(magnetization[state], *clip_range)
             if magnetization_supportmask is not None:
                 magnetization[state] *= magnetization_supportmask
 
@@ -5985,6 +6042,7 @@ def project_log_objects_physical(
         "magnetization_trend_intensity_cutoff": float(trend_cutoff),
         "magnetization_trend_correction": trend_correction,
         "bound_magnetization_median": median_bounds,
+        "magnetization_median_scope": median_scope,
         "magnetization_trend_spatial_weights": trend_spatial_weights,
         "magnetization_trend_means": np.array([
             np.average(item[(thickness > 0) & (trend_spatial_weights > 0)],
@@ -6030,7 +6088,7 @@ def project_log_objects_physical(
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
         "charge_spectral_info": charge_spectral_info,
         "magnetic_spectral_info": magnetic_spectral_info,
-        "magnetization_bounds": (-1.0, 1.0) if (clip_magnetization or binary_magnetization) else None,
+        "magnetization_bounds": (float(binary_values.min()), float(binary_values.max())) if binary_magnetization else tuple(clip_range) if clip_magnetization else None,
         "binary_magnetization": binary_magnetization,
         "binary_magnetization_values": binary_values,
     }

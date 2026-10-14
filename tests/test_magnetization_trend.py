@@ -4,6 +4,15 @@ from library import phase_retrieval_universal as u
 
 
 class MagnetizationTrendTests(unittest.TestCase):
+    def test_custom_asymmetric_clipping_with_trend(self):
+        for trend, sign in [('increasing', 1), ('decreasing', -1)]:
+            maps = sign * np.array([[.8, .8], [-.4, -.4]])[:, None, :]
+            u._constrain_magnetization_trend(
+                maps, np.ones((1, 2), bool), ['a', 'b'], {}, trend,
+                clip_range=(-.5, .9))
+            self.assertTrue(np.all((maps >= -.5) & (maps <= .9)))
+            self.assertGreaterEqual(sign * np.diff(maps.mean(axis=(1, 2)))[0], -1e-12)
+
     def test_mean_projection_retains_texture_and_anchors(self):
         for trend, sign in [('increasing', 1), ('decreasing', -1)]:
             maps = sign * np.array([[-1., -1., 0.], [.8, .4, 0.],
@@ -177,6 +186,43 @@ class MagnetizationTrendTests(unittest.TestCase):
         u._constrain_magnetization_trend(maps, np.ones((1, 100), bool),
             ['a', 'b'], {}, 'increasing', correction='affine_domains')
         np.testing.assert_allclose(maps, .15)
+
+    def test_domain_median_trend_recovers_from_infeasible_offsets(self):
+        for trend, sign in [('increasing', 1), ('decreasing', -1)]:
+            maps = sign*np.array([[[-1., 1., 1., 1.]], [[-1., -1., -1., 1.]]])
+            u._constrain_magnetization_trend(
+                maps, np.ones((1, 4), bool), ['a', 'b'], {}, trend,
+                clip=True, clip_range=(-2., 2.), median_bounds=True,
+                median_scope='domains')
+            means = maps.mean(axis=(1, 2))
+            self.assertGreaterEqual(sign*(means[1]-means[0]), -1e-12)
+            np.testing.assert_allclose(means, 0., atol=1e-12)
+            for values in maps:
+                for mask in (values < 0, values > 0):
+                    if np.any(mask):
+                        self.assertLessEqual(abs(np.median(values[mask])), 1.+1e-12)
+            self.assertTrue(np.all(abs(maps) <= 2.))
+
+    def test_separate_domain_medians_preserve_signs_and_anchors(self):
+        maps = np.array([[[-3., -2., -.5, 0., .5, 2., 4.]],
+                         [[-1., -1., -1., -1., -1., -1., -1.]]])
+        before = maps.copy()
+        u._constrain_magnetization_trend(
+            maps, np.ones((1, 7), bool), ['a', 'anchor'], {'anchor': -1.},
+            'none', clip=False, median_bounds=True, median_scope='domains')
+        self.assertAlmostEqual(np.median(maps[0][maps[0] < 0]), -1.)
+        self.assertAlmostEqual(np.median(maps[0][maps[0] > 0]), 1.)
+        np.testing.assert_array_equal(np.sign(maps), np.sign(before))
+        np.testing.assert_array_equal(maps[1], before[1])
+        self.assertGreater(maps.max(), 1.)
+
+    def test_domain_medians_skip_empty_domains_and_excluded_pixels(self):
+        maps = np.array([[[2., 4., -100., 0.]]])
+        u._constrain_magnetization_trend(
+            maps, np.ones((1, 4), bool), ['a'], {}, 'none', clip=False,
+            median_bounds=True, median_scope='domains',
+            spatial_weights=np.array([[1., 1., 0., 1.]]))
+        np.testing.assert_allclose(maps, [[[2./3., 4./3., -100., 0.]]])
 
     def test_median_bounds_without_a_trend_and_without_pixel_clipping(self):
         maps = np.array([[[1.4, 1.6, 1.8, 2.]], [[.5, .5, .5, 3.]]])
