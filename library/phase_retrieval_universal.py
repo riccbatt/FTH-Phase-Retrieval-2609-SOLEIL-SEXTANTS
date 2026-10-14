@@ -162,7 +162,7 @@ def default_phase_retrieval_recipe():
         # modes=[1, 2] uses the original and a 2x spatially enlarged support.
         # A supplied 3-D modal support bypasses automatic enlargement.
         "modes": None,
-        "recenter_modal_supports": False,
+        "recenter_modal_supports": True,
         "mode_support_center": "image",
         # Remove this many pixels from every edge of returned spatial arrays.
         "crop": 0,
@@ -3379,7 +3379,7 @@ def default_multi_energy_phase_retrieval_recipe():
         "warmup_Nit": [700,50],
 
         "shuffle_energies": True,
-        "random_seed": None,
+        "random_seed": 0,
         # Scalars are broadcast to every stage; lists customize each stage.
         "beta_zero": 0.5,
         "beta_mode": "arctan",
@@ -3419,7 +3419,7 @@ def default_multi_energy_phase_retrieval_recipe():
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         # If True, apply cross-object projections only inside supportmask.
-        "projection_constraints_inside_support_only": False,
+        "projection_constraints_inside_support_only": True,
         # Backward-compatible alias for older recipes.
         "physical_constraints_inside_support_only": False,
         "projection_static_mode": "mean",
@@ -4561,7 +4561,7 @@ def default_general_phase_retrieval_recipe():
         # Shared scope only: calibrate gamma in reference warmup, then hold it.
         "freeze_coherence_after_reference": False,
         "shuffle_observations": True,
-        "random_seed": None,
+        "random_seed": 0,
         "beta_zero": 0.5,
         "beta_mode": "arctan",
         "alpha_zero": 0.0,
@@ -4607,7 +4607,7 @@ def default_general_phase_retrieval_recipe():
         "gaussian_mode_center": None,
         "gaussian_mode_coherent": False,
         "mode_support_center": "image",
-        "recenter_modal_supports": False,
+        "recenter_modal_supports": True,
         "mode_initialization": "random_phase",  # or "support_fft"
         "mode_initialization_seed": 0,
         # Optional incident-power ratios from zero-thickness reference apertures.
@@ -4666,13 +4666,13 @@ def default_general_phase_retrieval_recipe():
         "saturated_states": None,
         # If True, force the fitted magnetic state maps to zero outside the
         # real-space support used by the phase-retrieval kernel.
-        "zero_magnetization_outside_support": False,
+        "zero_magnetization_outside_support": True,
         # If True, force the material thickness to zero outside that support.
         # A supplied material mask can additionally mark holes inside it.
         "zero_thickness_outside_support": False,
         # If True, apply the selected joint log-object projection only inside
         # the real-space support; outside it, keep each observation unchanged.
-        "projection_constraints_inside_support_only": False,
+        "projection_constraints_inside_support_only": True,
         # Backward-compatible alias for older physical-only recipes.
         "physical_constraints_inside_support_only": False,
         "charge_spectral_constraint": "free",

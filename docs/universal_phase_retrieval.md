@@ -669,7 +669,7 @@ apply to their corresponding stage or physical quantity.
 | `preserve_warmup_masked_intensity` | `False` |
 | `freeze_coherence_after_reference` | `False` |
 | `shuffle_observations` | `True` |
-| `random_seed` | `None` |
+| `random_seed` | `0` |
 | `beta_zero` | `0.5` |
 | `beta_mode` | `'arctan'` |
 | `alpha_zero` | `0.0` |
@@ -709,7 +709,7 @@ apply to their corresponding stage or physical quantity.
 | `Nmodes` | `1` |
 | `modes` | `None` |
 | `mode_support_center` | `'image'` |
-| `recenter_modal_supports` | `False` |
+| `recenter_modal_supports` | `True` |
 | `mode_initialization` | `'random_phase'` |
 | `mode_initialization_seed` | `0` |
 | `constrain_nonphysical_modes_common` | `False` |
@@ -740,9 +740,9 @@ apply to their corresponding stage or physical quantity.
 | `material_thickness` | `None` |
 | `fit_material_thickness` | `False` |
 | `saturated_states` | `None` |
-| `zero_magnetization_outside_support` | `False` |
+| `zero_magnetization_outside_support` | `True` |
 | `zero_thickness_outside_support` | `False` |
-| `projection_constraints_inside_support_only` | `False` |
+| `projection_constraints_inside_support_only` | `True` |
 | `physical_constraints_inside_support_only` | `False` |
 | `charge_spectral_constraint` | `'free'` |
 | `magnetic_spectral_constraint` | `'free'` |

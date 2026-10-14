@@ -53,7 +53,9 @@ class PhysicalModeGroupTests(unittest.TestCase):
             np.testing.assert_array_equal(c['physical_spatial_weights'][material==0],0.)
             import contextlib
             import io
-            recipe.update(crop=0,binning=1,material_thickness=np.fft.fftshift(material),
+            # This full-grid fixture intentionally clips its doubled support.
+            recipe.update(crop=0,binning=1,recenter_modal_supports=False,
+                          material_thickness=np.fft.fftshift(material),
                           chemical_species=[dict(item,density_map=np.fft.fftshift(item['density_map']))
                                             for item in species],
                           warmup_Nit=0,outer_iterations=1,inner_Nit=1,physical_iterations=50,
