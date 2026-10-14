@@ -20,7 +20,8 @@ class PhysicalModeGroupTests(unittest.TestCase):
             recipe=u.default_universal_phase_retrieval_recipe()
             recipe.update(modes=[1,1,2],chemical_species=species,
                           magnetization_mode_groups=magnetic_groups,
-                          illumination_mode_groups=illumination_groups,clip_magnetization=False)
+                          illumination_mode_groups=illumination_groups,clip_magnetization=False,
+                          physical_spatial_weighting='exit_wave_intensity')
             logs=np.zeros((3,3,6,6),complex)
             for mode in range(2):
                 ma=np.array([1.,.4 if mode==0 or len(magnetic_groups)==1 else -.2,-1.])
@@ -47,6 +48,9 @@ class PhysicalModeGroupTests(unittest.TestCase):
                         item['magnetization_by_mode_group_packed']['1'][1,:,0][density[aperture]>0],
                         expected,atol=1e-8)
             self.assertTrue(c['chemical_reference_alignment_applied'])
+            self.assertEqual(c['physical_spatial_weights'].shape,material.shape)
+            self.assertAlmostEqual(c['physical_spatial_weights'][material>0].mean(),1.)
+            np.testing.assert_array_equal(c['physical_spatial_weights'][material==0],0.)
             import contextlib
             import io
             recipe.update(crop=0,binning=1,material_thickness=np.fft.fftshift(material),

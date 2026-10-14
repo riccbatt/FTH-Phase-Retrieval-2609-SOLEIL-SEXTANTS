@@ -5146,8 +5146,6 @@ def project_log_objects_physical(
     if recipe.get("chemical_species") is not None:
         if initial_binary:
             raise ValueError("initial_binary_magnetization currently supports the single-species physical model only.")
-        if recipe.get("physical_spatial_weighting") is not None:
-            raise ValueError("physical_spatial_weighting currently supports the single-species physical model only.")
         try:
             from .phase_retrieval_species import project_species
         except ImportError:
@@ -7090,6 +7088,9 @@ def _project_grouped_physical_modes(fields, state_labels, energy_labels, polariz
         primary_records = [index for index,(_,mode) in enumerate(records) if mode == 0]
         components['fitted_log_objects'] = expand(fit['fitted_log_objects'][primary_records])
         components['chemical_reference_offsets'] = fit['chemical_reference_offsets'][primary_records]
+        spatial_weights = fit['physical_spatial_weights']
+        components['physical_spatial_weights'] = expand(
+            spatial_weights[primary_records] if np.asarray(spatial_weights).ndim == 3 else spatial_weights)
         components['saturated_states'] = components['species'][fit['legacy_component_species']]['saturated_states']
     return output, components
 

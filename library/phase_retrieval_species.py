@@ -150,6 +150,43 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                     base = target[obs[0]].imag
                     target.imag[obs] = base + np.angle(np.exp(1j*(target.imag[obs]-base)))
 
+    spatial_weighting = recipe.get('physical_spatial_weighting')
+    if spatial_weighting not in (None, 'exit_wave_intensity', 'exit_wave_intensity_per_frame'):
+        raise ValueError("physical_spatial_weighting must be None, 'exit_wave_intensity', or 'exit_wave_intensity_per_frame'.")
+    spatial_weights = np.ones(shape)
+    if spatial_weighting is not None:
+        # Use the combined exit wave, never a species-specific contribution.
+        # Remove observation gauges first and hold weights fixed during the fit.
+        selected = np.arange(nobs)
+        if spatial_weighting == 'exit_wave_intensity':
+            anchor_states = set()
+            for entry in entries:
+                if entry.get('magnetic', False):
+                    anchor_states.update(u._normalize_saturated_states(
+                        entry.get('saturated_states', saturated_states), metadata['state_names']))
+            anchor_obs = [a for a,state in enumerate(metadata['states']) if state in anchor_states]
+            if anchor_obs:
+                selected = np.asarray(anchor_obs)
+        log_intensity = 2*target[selected].real
+        if spatial_weighting == 'exit_wave_intensity':
+            peak = np.max(log_intensity[:, allowed])
+            spatial_weights = np.mean(np.exp(np.minimum(log_intensity-peak, 0.)), axis=0)
+        else:
+            peak = np.max(log_intensity[:, allowed], axis=1)
+            spatial_weights = np.exp(np.minimum(log_intensity-peak[:, None, None], 0.))
+        spatial_weights[..., ~allowed] = 0.
+        scale = np.mean(spatial_weights[..., allowed], axis=-1)
+        if np.any(~np.isfinite(scale) | (scale <= 0)):
+            raise ValueError('Exit-wave intensity weights require nonzero finite material intensity.')
+        spatial_weights /= np.asarray(scale)[..., None, None]
+    observation_spatial_weights = np.broadcast_to(spatial_weights, target.shape)
+    pixel_weights = weights[:, None, None]*np.where(
+        allowed[None], np.maximum(observation_spatial_weights, 1e-30), 1.)
+
+    def weighted_mean(values, obs):
+        local_weights = pixel_weights[obs]
+        return np.sum(local_weights*values, axis=0)/np.sum(local_weights, axis=0)
+
     count = len(entries)
     rng = np.random.default_rng(recipe['chemical_initialization_seed'])
     density = np.zeros((count, *shape))
@@ -256,12 +293,13 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
             output += density[i][None]*(charge[i, ei, None, None] + polarization[:, None, None]*magnetic[i, ei, None, None]*magnetization[i, si])
         return output
     def fit_common(terms):
-        return np.stack([np.average(target[bi == beam]-terms[bi == beam], axis=0, weights=weights[bi == beam]) for beam in range(nb)])
+        return np.stack([weighted_mean(target[bi == beam]-terms[bi == beam], np.flatnonzero(bi == beam)) for beam in range(nb)])
     def centered(values):
         result = values.copy()
         for beam in range(nb):
             obs = np.flatnonzero(bi == beam)
-            result[obs] -= np.average(values[obs], axis=0, weights=weights[obs])
+            result[obs] -= (weighted_mean(values[obs], obs) if values.ndim == 3
+                            else np.average(values[obs], axis=0, weights=weights[obs]))
         return result
     # Seed free chemical spectra by regressing beam-centered observations on
     # distinct nonnegative spatial seeds. This avoids identical-species starts.
@@ -271,11 +309,13 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
         basis = density.reshape(count, -1).T
         for energy in range(ne):
             obs = np.flatnonzero(ei == energy)
-            values = np.average(centered_target[obs], axis=0, weights=weights[obs]).ravel()
+            values = weighted_mean(centered_target[obs], obs).ravel()
             fixed = [i for i in range(count) if i not in free]
             if fixed:
                 values = values-basis[:, fixed] @ charge[fixed, energy]
-            charge[free, energy] = np.linalg.lstsq(basis[:, free], values, rcond=None)[0]
+            root_weight = np.sqrt(np.sum(pixel_weights[obs],axis=0)).ravel()
+            charge[free, energy] = np.linalg.lstsq(
+                basis[:, free]*root_weight[:,None], values*root_weight, rcond=None)[0]
         for i in free:
             charge[i] = constrain(charge[i], i, 'charge')
 
@@ -287,14 +327,14 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
         for energy in range(ne):
             obs = np.flatnonzero((bi == beam) & (ei == energy))
             if obs.size:
-                state_contrast[obs] = target[obs]-np.average(target[obs], axis=0, weights=weights[obs])
+                state_contrast[obs] = target[obs]-weighted_mean(target[obs], obs)
     for i in range(count):
         if not is_magnetic[i] or entries[i].get('magnetic_response') is not None:
             continue
         for energy in range(ne):
             obs = np.flatnonzero(ei == energy)
             values = state_contrast[obs][:, supports[i]]
-            moment = np.sum(weights[obs, None]*values**2)
+            moment = np.sum(pixel_weights[obs][:, supports[i]]*values**2)
             if abs(moment) > 1e-30:
                 axis = np.exp(.5j*np.angle(moment))
                 amplitude = np.max(abs(np.real(axis.conjugate()*values)))
@@ -308,8 +348,8 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                 coefficients -= np.average(coefficients, weights=weights[selected])
                 for a, coefficient in zip(selected, coefficients):
                     basis = coefficient*density[i]
-                    numerator += weights[a]*np.vdot(basis, target[a])
-                    denominator += weights[a]*np.vdot(basis, basis).real
+                    numerator += np.sum(pixel_weights[a]*basis.conj()*target[a])
+                    denominator += np.sum(pixel_weights[a]*abs(basis)**2)
             if denominator > 1e-30:
                 magnetic[i, energy] = numerator/denominator
         if fit_magnetic[i]:
@@ -328,8 +368,8 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
             own = density[i][None]*response
             residual = centered(target-terms+own)
             coefficient = centered(np.broadcast_to(response, target.shape))
-            numerator = np.sum(weights[:, None, None]*np.real(coefficient.conj()*residual), axis=0)
-            denominator = np.sum(weights[:, None, None]*abs(coefficient)**2, axis=0)
+            numerator = np.sum(pixel_weights*np.real(coefficient.conj()*residual), axis=0)
+            denominator = np.sum(pixel_weights*abs(coefficient)**2, axis=0)
             updated = np.maximum(0., np.divide(numerator, denominator, out=density[i].copy(), where=denominator > 1e-30))*supports[i]
             terms += (updated-density[i])[None]*response
             density[i] = updated
@@ -346,8 +386,8 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                     coefficient = polarization[obs, None, None]*magnetic[i, ei[obs], None, None]*density[i]
                     own = coefficient*previous
                     residual = target[obs]-common[bi[obs]]-terms[obs]+own
-                    numerator = np.sum(weights[obs, None, None]*np.real(coefficient.conj()*residual), axis=0)
-                    denominator = np.sum(weights[obs, None, None]*abs(coefficient)**2, axis=0)
+                    numerator = np.sum(pixel_weights[obs]*np.real(coefficient.conj()*residual), axis=0)
+                    denominator = np.sum(pixel_weights[obs]*abs(coefficient)**2, axis=0)
                     updated = np.divide(numerator, denominator, out=previous.copy(), where=denominator > 1e-30)
                     if recipe.get('binary_magnetization', False):
                         updated = u._snap_magnetization(updated, binary_values)
@@ -373,8 +413,8 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
                 residual = target[a]-common[bi[a]]-terms[a]
                 for j, (i, kind) in enumerate(columns):
                     residual += basis[j]*(charge[i, energy] if kind == 'charge' else magnetic[i, energy])
-                gram += weights[a]*(b.conj() @ b.T)
-                rhs += weights[a]*(b.conj() @ residual.ravel())
+                gram += (b.conj()*pixel_weights[a].ravel()) @ b.T
+                rhs += b.conj() @ (pixel_weights[a]*residual).ravel()
             if columns:
                 coefficients = np.linalg.pinv(gram) @ rhs
                 for value, (i, kind) in zip(coefficients, columns):
@@ -460,7 +500,11 @@ def project_species(log_objects, metadata, recipe, weights, material_thickness,
         chemical_maps_conditionally_identifiable=bool(rank == count and not any(fit_charge)),
         density_scale_anchored=scale_anchored, identifiable=False, ambiguity_notes=ambiguities,
         fit_residual_rms=history[-1], species_fit_history=np.asarray(history),
+        weighted_fit_residual_rms=float(np.sqrt(
+            np.sum((pixel_weights*abs(target-fitted)**2)[:, allowed])
+            /np.sum(pixel_weights[:, allowed]))),
         fitted_log_objects=fitted, physical_projection_roi_mask=apply,
+        physical_spatial_weighting=spatial_weighting, physical_spatial_weights=spatial_weights,
         binary_magnetization=recipe.get('binary_magnetization', False),
         binary_magnetization_values=binary_values,
         magnetization_bounds=(-1., 1.) if (recipe['clip_magnetization'] or recipe.get('binary_magnetization', False)) else None)

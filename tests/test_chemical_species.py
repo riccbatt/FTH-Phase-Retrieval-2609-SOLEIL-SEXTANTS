@@ -7,6 +7,67 @@ from library import phase_retrieval_universal as u
 
 
 class ChemicalSpeciesTests(unittest.TestCase):
+    def test_shared_intensity_weights_change_spectral_fit_as_weighted_least_squares(self):
+        density=self.density[0]
+        q=np.array([-.12,.04,.09,-.01],complex)
+        noise=np.zeros(self.shape); noise[2,0]=1.
+        noise_scale=np.array([.5,-.3,.1,-.3])
+        logs=-2*noise[None]+q[:,None,None]*density+noise_scale[:,None,None]*noise
+        recipe=self.recipe([dict(name='a',density_map=density)])
+        recipe['physical_spatial_weighting']='exit_wave_intensity'
+        _,c=self.project(logs,recipe,iterations=300)
+        active=self.material>0
+        expected_weights=np.mean(np.exp(2*logs.real),axis=0)
+        expected_weights[~active]=0.
+        expected_weights/=expected_weights[active].mean()
+        np.testing.assert_allclose(c['physical_spatial_weights'],expected_weights)
+        coefficient=np.sum(expected_weights*density*noise)/np.sum(expected_weights*density**2)
+        expected=q-q.mean()+coefficient*(noise_scale-noise_scale.mean())
+        np.testing.assert_allclose(c['species_charge_response'][0],expected,atol=1e-8)
+        recipe['physical_spatial_weighting']=None
+        _,uniform=self.project(logs,recipe,iterations=300)
+        self.assertGreater(np.linalg.norm(uniform['charge_response']-c['charge_response']),.01)
+
+    def test_species_use_one_combined_exit_wave_weight_map(self):
+        species=[dict(name=str(i),charge_response=self.spectra[i]) for i in range(2)]
+        for weighting in ('exit_wave_intensity','exit_wave_intensity_per_frame'):
+            with self.subTest(weighting=weighting):
+                recipe=self.recipe(species)
+                recipe['physical_spatial_weighting']=weighting
+                projected,c=self.project(self.logs,recipe,iterations=300)
+                np.testing.assert_allclose(c['species_density_maps'],self.density,atol=1e-7)
+                np.testing.assert_allclose(projected,self.logs,atol=1e-7)
+                expected=np.exp(2*self.logs.real)
+                if weighting=='exit_wave_intensity':
+                    expected=expected.mean(axis=0)
+                expected[...,self.material==0]=0.
+                expected/=expected[...,self.material>0].mean(axis=-1)[...,None,None]
+                np.testing.assert_allclose(c['physical_spatial_weights'],expected)
+                self.assertLess(c['weighted_fit_residual_rms'],1e-7)
+
+    def test_weighted_magnetic_response_fit_uses_species_saturation_anchors(self):
+        q=np.array([.1+.05j,.13+.08j,.08-.03j,.2+.01j])
+        m=np.array([1.,.2,-1.])
+        logs=np.stack([self.logs[e]+self.density[0]*q[e]*m[s]
+                       for s in range(3) for e in range(4)])
+        species=[dict(name='magnetic',density_map=self.density[0],
+                      charge_response=self.spectra[0],magnetic=True,
+                      fit_magnetic_response=True,saturated_states={'p':1.,'n':-1.}),
+                 dict(name='other',density_map=self.density[1],charge_response=self.spectra[1])]
+        for weighting in ('exit_wave_intensity','exit_wave_intensity_per_frame'):
+            recipe=self.recipe(species)
+            recipe['physical_spatial_weighting']=weighting
+            projected,c=self.project(logs,recipe,states=[s for s in ['p','f','n'] for _ in range(4)],
+                                     energies=self.energies*3,iterations=300)
+            np.testing.assert_allclose(projected,logs,atol=1e-8)
+            np.testing.assert_allclose(c['magnetic_response'],q,atol=1e-8)
+            np.testing.assert_allclose(c['magnetization'][1,self.material>0],.2,atol=1e-8)
+            if weighting=='exit_wave_intensity':
+                expected=np.exp(2*logs[np.r_[0:4,8:12]].real).mean(axis=0)
+                expected[self.material==0]=0
+                expected/=expected[self.material>0].mean()
+                np.testing.assert_allclose(c['physical_spatial_weights'],expected)
+
     def setUp(self):
         self.shape = (6, 7)
         self.material = np.ones(self.shape); self.material[:2] = 0
