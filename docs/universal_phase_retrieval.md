@@ -246,6 +246,9 @@ partial inner stages to actually resume partial coherence after a refresh.
 
 ## Physical model and the secondary mode
 
+For the derivation, matrix construction, optimization updates and references,
+see [Theory: extracting charge and magnetic components](#theory-extracting-charge-and-magnetic-components).
+
 The primary log-object is modeled as
 
 `log(object[a]) = log(illumination[beam[a]]) + thickness * (charge[E[a]] + polarization[a] * magnetic[E[a]] * magnetization[state[a]])`.
@@ -277,6 +280,242 @@ ill-conditioned fits. Refractive-index spectra require thickness/wave-number
 conversion; explicit `kt` products do not. See the complete option inventory and
 the validation messages for mutually exclusive inputs. Absolute thickness and
 spectral response scale remain coupled without external calibration.
+
+## Theory: extracting charge and magnetic components
+
+This section describes `project_log_objects_physical` and distinguishes it from
+`project_log_objects_general`. Its starting point is the “Theory Behind The
+Projection” section in the sibling repository's
+[`phase_retrieval_universal.md`](../../FTH-Phase_Retrieval/docs/phase_retrieval_universal.md#theory-behind-the-projection),
+but the equations below follow **this repository's implementation**, including
+relative thickness, weighting, gauge fixing, and optional domain corrections.
+That sibling link requires the repositories to retain their local layout.
+
+### From exit waves to a factorization
+
+Let observation $a$ have energy $e(a)$, state $s(a)$, illumination group $b(a)$,
+and real polarization coefficient $p_a$. At object pixel $j$, the model is
+
+$$
+\psi_{aj}=\exp(c_{b(a),j})\,
+\exp\!\left[t_j\left(q_{c,e(a)}+p_a q_{m,e(a)}m_{s(a),j}\right)\right].
+$$
+
+The common field $c$, charge response $q_c$, and magnetic response $q_m$ are
+complex; thickness $t$ is real and nonnegative and reduced magnetization $m$ is
+real. Taking consistently referenced logarithms gives
+
+$$
+L_{aj}=c_{b(a),j}+t_jq_{c,e(a)}+p_a t_jq_{m,e(a)}m_{s(a),j}+\epsilon_{aj}.
+$$
+
+This transmission model assumes that a scalar charge response and scalar magnetic
+response at each energy multiply the prescribed spatial thickness and magnetic
+maps. It is not a general multiple-scattering or vector-polarization model.
+The optical response convention and conversion to refractive index are described
+[below](#where-the-wave-number-appears). Logarithms require nonzero fields and
+consistent phase branches; phase referencing is not general phase unwrapping.
+
+Flattening the object grid gives $L\in\mathbb C^{A\times P}$, where $A$ is the
+number of observations and $P$ the number of fitted pixels. The extracted arrays
+are $c\in\mathbb C^{B\times P}$, $m\in\mathbb R^{S\times P}$,
+$t\in\mathbb R^P$, and $q_c,q_m\in\mathbb C^E$. They are reshaped to images
+on output. With one energy, beam and helicity, subtracting the common charge
+field leaves $R_{sj}=q_m t_jm_{sj}$: all residuals have one complex response
+coefficient multiplying real spatial values. This is a constrained factorization,
+not an unconstrained SVD of the observation matrix.
+
+### The linear projection theorem and the metadata matrix
+
+For `state_energy_beam`, the unknown component images form a matrix $X$ and
+
+$$
+L=AX+\epsilon,\qquad
+\min_X\|W^{1/2}(L-AX)\|_F^2.
+$$
+
+Each row of $A$ has a `1` in its beam column and $p_a$ in its state/energy
+response column; $W=\operatorname{diag}(w_a)$ contains positive observation
+weights. The code computes
+
+$$
+X^\star=(W^{1/2}A)^+W^{1/2}L.
+$$
+
+The finite-dimensional projection theorem makes $W^{1/2}AX^\star$ the unique
+orthogonal projection of $W^{1/2}L$ onto the column space of $W^{1/2}A$.
+Equivalently, $A^*W(L-AX^\star)=0$. Full column rank makes the component
+coefficients unique; otherwise the pseudoinverse selects a minimum-norm solution
+and the coefficient interpretation remains ambiguous. The implementation rejects
+rank-deficient designs unless `rank_deficient="minimum_norm"` is requested.
+A single-helicity, single-energy state scan is deficient for this unrestricted
+model: a common spatial field can be exchanged with every state's response.
+
+The Moore–Penrose inverse is the algebraic basis for this calculation
+([Penrose, 1955](https://doi.org/10.1017/S0305004100030401)). It does not by itself
+establish physical identifiability.
+
+### Alternating fits in the physical model
+
+Because $q_m m$ is a product of unknowns (and fitted $t$ adds another product),
+the physical model is nonlinear jointly, but linear in each block when the others
+are fixed. `physical_iterations` sets a fixed number of alternating passes;
+there is no convergence-based stopping test in this inner loop.
+
+For fixed weights, the least-squares objective is
+
+$$
+J=\sum_{a,j}\omega_{aj}
+\left|L_{aj}-c_{b(a),j}-t_j(q_{c,e(a)}+p_aq_{m,e(a)}m_{s(a),j})\right|^2.
+$$
+
+The following updates explain how the code optimizes each block before additional
+constraints. There is an important weighting detail: with a shared spatial map
+$u_j$, the common-field and magnetization updates use $w_a$ at each pixel;
+the spectral update uses $w_a u_j$. For $u_j>0$ this gives the same map minimizers,
+because a common pixel factor cancels. In the per-frame weighting option the map
+updates use frame-specific weights, with a small floor inside material and
+observation weights outside it. Spectral weights use the original spatial map.
+Zero weights and these floors prevent interpreting every configuration as exact
+coordinate descent for one identical objective.
+
+**1. Fit the common complex field.** For fixed responses and maps, each beam/pixel
+has a scalar complex least-squares solution:
+
+$$
+c_{bj}\leftarrow
+\frac{\sum_{a:b(a)=b}\omega_{aj}
+[L_{aj}-t_j(q_{c,e(a)}+p_aq_{m,e(a)}m_{s(a),j})]}
+{\sum_{a:b(a)=b}\omega_{aj}}.
+$$
+
+**2. Fit real magnetization.** Define $h_{aj}=p_aq_{m,e(a)}t_j$ and
+$r_{aj}=L_{aj}-c_{b(a),j}-t_jq_{c,e(a)}$. Differentiating the quadratic with
+respect to the real variable $m_{sj}$ gives
+
+$$
+m_{sj}\leftarrow
+\frac{\sum_{a:s(a)=s}\omega_{aj}\operatorname{Re}(h_{aj}^*r_{aj})}
+{\sum_{a:s(a)=s}\omega_{aj}|h_{aj}|^2}.
+$$
+
+The real part is necessary: fitting an unrestricted complex coefficient would
+allow an unphysical complex magnetization. A negligible denominator has no usable
+magnetic sensitivity; the implementation guards the division. Saturated states
+are assigned their supplied signs instead of fitted. Continuous clipping is the
+exact scalar box-constrained minimizer of this quadratic; discrete snapping is
+the nearest allowed scalar value. Trend and domain-median corrections are applied
+afterward and need not minimize this original pixelwise objective.
+
+**3. Fit charge and magnetic responses jointly.** At each energy, stack all
+observation/pixel pairs into a two-column design $H_e$. Its row is
+
+$$
+H_{aj}=[t_j,\ p_a m_{s(a),j}t_j],\qquad y_{aj}=L_{aj}-c_{b(a),j}.
+$$
+
+With $\theta_e=[q_{c,e},q_{m,e}]^T$, the normal equations are
+
+$$
+G_e\theta_e=d_e,\qquad G_e=H_e^*W_eH_e,\qquad d_e=H_e^*W_ey_e,
+\qquad\theta_e\leftarrow G_e^+d_e.
+$$
+
+The implementation accumulates this **2 × 2 Gram matrix** and two-entry complex
+right-hand side over pixels, avoiding allocation of a large stacked design.
+The diagonal entries are weighted squared norms of the thickness and magnetic
+basis; the off-diagonal entry is their weighted inner product. Thus charge and
+magnetic spectra are fitted together, accounting for correlation of their bases.
+Proportional columns make $G_e$ singular; nearly proportional columns make the
+separation sensitive to noise. A pseudoinverse supplies coefficients but does not
+create missing information. Forming normal equations also squares the condition
+number of the weighted design when full rank; direct QR/SVD on that design is
+numerically preferable in difficult cases, but is not this block's implementation.
+
+**4. Optionally fit thickness.** Within each beam, subtract the weighted mean of
+$L_a$ and of $v_a=q_{c,e(a)}+p_aq_{m,e(a)}m_{s(a)}$ to eliminate the free common
+field. Using centered quantities $\widetilde L,\widetilde v$ gives
+
+$$
+t_j\leftarrow\max\!\left(0,
+\frac{\sum_a\omega_{aj}\operatorname{Re}(\widetilde v_{aj}^*\widetilde L_{aj})}
+{\sum_a\omega_{aj}|\widetilde v_{aj}|^2}\right).
+$$
+
+The code normalizes the mean thickness in allowed material to one and multiplies
+both responses by the removed scale, preserving their products with thickness.
+It also probes allowed zero-thickness pixels with a small positive value during
+the magnetic update so zero thickness is not an absorbing initialization.
+
+### Gauges, calibration, and the single-energy notebook
+
+The transformation $q_c\mapsto q_c-\alpha$, $c_b\mapsto c_b+t\alpha$ leaves
+all modeled fields unchanged for a common complex $\alpha$. The solver chooses
+$\alpha=\operatorname{mean}_e q_{c,e}$ on every pass. Consequently, in a
+**single-energy free-spectrum fit**, the returned charge response is zero after
+this gauge choice: nonmagnetic transmission resides in the common spatial field.
+The notebook's `charge_exit_wave` represents the combined nonmagnetic exit wave,
+not an independently measured charge refractive index or bare illumination.
+
+Likewise, $m\mapsto\gamma m$, $q_m\mapsto q_m/\gamma$ preserves the magnetic
+product for nonzero real $\gamma$ when constraints allow it. Known saturation
+anchors fix the relative magnetic scale and sign; they do not establish absolute
+magnetization in A/m. Fitted thickness and response also have a reciprocal scale
+ambiguity. With one fixed helicity and no anchors, a common offset of all magnetic
+maps can be absorbed into the common field. Opposite polarizations sharing the
+same illumination provide additional separation information.
+
+### Constraints, projection, and what is guaranteed
+
+After these updates the code fixes the charge gauge, applies spectral constraints
+(free, known spectra, or KK-based options), and clips response ranges. A KK prior
+assumes the relevant causal spectral relation and adequate spectral treatment;
+a single-energy hysteresis scan cannot determine a spectrum from one point.
+Trend fitting uses bounded weighted isotonic regression of state means;
+domain estimation and median corrections are additional modeling choices,
+[described below](#intensity-weighted-magnetization-trends).
+
+For a fixed linear block with consistent positive weights, its exact least-squares
+update cannot increase that block's residual. Repeated exact updates for one fixed
+objective give a nonincreasing, nonnegative sequence of objective values. This
+establishes convergence of those values, not uniqueness, convergence of the
+parameters, or global optimality. Block-coordinate convergence theorems require
+additional hypotheses; see [Tseng (2001)](https://doi.org/10.1023/A:1017501703105)
+for such conditional results. The code's spectral priors, trend/median corrections,
+weight handling and intervening detector updates do not come with a proved
+monotonicity or global-convergence guarantee for the complete workflow.
+
+Here “physical projection” therefore means an iterative constrained fit, not a
+proved global nearest-point projection onto the full nonlinear physical model.
+The low-level log projector blends $L$ with its fitted model using relaxation;
+the Fourier/mode wrapper additionally handles propagation, illumination
+corrections, masks, and field replacement. Inspect physical fit residuals and
+detector residuals separately: minimizing a log-field residual is not the same
+as maximizing a photon-count likelihood at the detector.
+
+The best-rank-$k$ approximation theorem underlying truncated SVD
+([Eckart and Young, 1936](https://doi.org/10.1007/BF02288367)) applies to the
+separate unconstrained SVD projection, not to this constrained physical fit.
+Reality, saturation anchors, metadata sharing, and spectral priors distinguish
+the physical model from a generic low-rank matrix approximation.
+
+### Implementation and returned matrices
+
+| Quantity / operation | Code or output |
+| --- | --- |
+| Metadata design and linear pseudoinverse | `project_log_objects_general`; `design_matrix` |
+| Alternating common/map/response/thickness updates | `project_log_objects_physical` |
+| Spatial nonmagnetic common fields | `common_log_objects`, `common_exit_waves` |
+| Complex response vectors over energies | `charge_response`, `magnetic_response` |
+| Real state maps and thickness | `magnetization`, `material_thickness` |
+| Fit checks | `fit_residual_rms`, `weighted_fit_residual_rms`, scale/identifiability diagnostics |
+| Mode-group packing and field projection | `_project_physical_modes`; `modal_physical_fit`, `modal_physical_fit_aperture` |
+
+The equations above cover the single-species model used by the XPCS notebook.
+`chemical_species` delegates to `phase_retrieval_species.py` and adds species
+maps and spectra; its updates require a separate derivation. Neither small
+residuals nor the exported `identifiable` flag replace checking acquisition rank,
+illumination stability, phase alignment, calibration and model validity.
 
 ## When the incoming illumination changes
 
