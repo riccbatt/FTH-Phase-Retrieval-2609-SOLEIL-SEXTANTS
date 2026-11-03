@@ -21,8 +21,6 @@ __all__ = [
     "mask_png_paths",
     "load_red_mask_png",
     "save_red_mask_png",
-    "save_binary_mask_png",
-    "write_mask_pngs",
 ]
 
 
@@ -63,9 +61,6 @@ def mask_png_paths(basefolder, kind: str, image_id=None):
     stem = kind if image_id is None else f"{kind}_{image_id}"
     reference = folder / f"{stem}_reference.png"
     painted = folder / f"{stem}.png"
-    legacy = folder / f"{stem}_painted.png"
-    if legacy.exists() and not painted.exists():
-        painted = legacy
     return reference, painted
 
 
@@ -103,17 +98,3 @@ def save_red_mask_png(path: str | Path, mask: np.ndarray, reference: str | Path 
     rgb[binary] = (255, 0, 0)
     Image.fromarray(rgb, mode="RGB").save(path)
     return path
-
-
-def save_binary_mask_png(basefolder, kind, image_id, mask, reference=None):
-    reference_png, painted_png = mask_png_paths(basefolder, kind, image_id)
-    if reference is not None:
-        save_mask_reference_png(reference, reference_png, log_scale=True, colormap="viridis")
-    return save_red_mask_png(painted_png, mask, reference=reference_png if reference is not None else None)
-
-
-def write_mask_pngs(basefolder, kind, image, mask, image_id=None):
-    reference_png, painted_png = mask_png_paths(basefolder, kind, image_id)
-    save_mask_reference_png(image, reference_png, log_scale=True, colormap="viridis")
-    save_red_mask_png(painted_png, mask, reference=reference_png)
-    return reference_png, painted_png

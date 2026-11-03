@@ -165,13 +165,14 @@ def estimate_hologram_shift(reference, moving, reference_mask, moving_mask, *, m
     if np.std(moving[valid_mov]) <= 1e-12:
         raise ValueError("Moving hologram has no contrast for alignment")
 
-    seed = phase_cross_correlation(
+    registration = phase_cross_correlation(
         np.where(valid_ref, reference, 0.0),
         moving,
         reference_mask=valid_ref,
         moving_mask=valid_mov,
         overlap_ratio=0.5,
-    )[0]
+    )
+    seed = registration[0] if isinstance(registration, tuple) else registration
     if np.any(np.abs(seed) > max_shift):
         raise ValueError(f"Estimated alignment shift {seed} exceeds max_shift={max_shift}")
 
@@ -228,6 +229,8 @@ def prepare_cache(
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        raise FileExistsError(f"Choose a new cache path: {output}")
     partial = output.with_suffix(".partial.h5")
 
     config = dict(
@@ -258,7 +261,7 @@ def prepare_cache(
         h.create_dataset("energy_ev", data=[r["energy_ev"] for r in records])
         h.create_dataset("frame_count", data=[r["frames"] for r in records])
         h.create_dataset("exposure_s", data=[r["exposure_s"] for r in records])
-        h.create_dataset("state_labels", data=np.asarray([r["label"] for r in records], dtype=h5py.string_dtype()))
+        h.create_dataset("state", data=np.asarray([r["label"] for r in records], dtype=h5py.string_dtype()))
         h.create_dataset("raw_detector_mask", data=mask, compression="gzip")
         h.create_dataset("source_supportmask", data=support, compression="gzip")
         if dark is not None:
@@ -271,6 +274,7 @@ def prepare_cache(
         for i, record in enumerate(records):
             raw, invalid, _ = frame_mean(record["path"], saturation)
             corrected = raw if dark is None else raw - dark
+            invalid |= mask | ~np.isfinite(corrected)
             delta = np.zeros(2)
             if align_holograms:
                 if i == alignment_reference:
@@ -296,14 +300,15 @@ def prepare_cache(
 
             # Keep the API generic: the caller decides how to crop, shift, and bin the data.
             total_shift = np.asarray((0.0, 0.0)) + delta
-            centered = shift(corrected / record["exposure_s"], total_shift, order=1, mode="constant", cval=0, prefilter=False)
+            centered = shift(np.nan_to_num(corrected) / record["exposure_s"], total_shift, order=1, mode="constant", cval=0, prefilter=False)
+            excluded = shift(invalid.astype(np.uint8), total_shift, order=0, mode="constant", cval=1) != 0
             if i == 0:
                 h.create_dataset("holograms", shape=(len(records),) + centered.shape, dtype="f4", chunks=(1, *centered.shape), compression="gzip")
                 h.create_dataset("mask_pixel", shape=(len(records),) + centered.shape, dtype="bool", chunks=(1, *centered.shape), compression="gzip")
                 h.create_dataset("supportmask", data=support, compression="gzip")
                 h.create_dataset("first_raw_mean", data=raw, compression="gzip")
             h["holograms"][i] = centered
-            h["mask_pixel"][i] = mask
+            h["mask_pixel"][i] = excluded | ~np.isfinite(centered)
             print(f"Prepared {i + 1}/{len(records)}: {record['label']}", flush=True)
 
     partial.replace(output)

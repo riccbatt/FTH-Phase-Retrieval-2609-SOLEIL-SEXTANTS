@@ -5,7 +5,7 @@ import pytest
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from library import phase_retrieval_universal as u
+from library import real_space_constraints as real_space
 ROOT=Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("dataset",["hyperspectral","2601_XPCS"])
@@ -24,8 +24,8 @@ def test_shared_notebook_cells(tmp_path,monkeypatch,dataset,modes,crop,binning):
     energy=[700.,710.,700.,710.] if dataset=="hyperspectral" else [710.]*3
     ns.update(holograms=np.random.default_rng(1).uniform(.5,2,(len(states),32,32)),
         mask_pixel=np.zeros((len(states),32,32)),support=support,
-        material=u.largest_support_component(support).astype(float),
-        state_labels=states,energy_labels=energy,polarizations=[1.]*len(states),
+        material=real_space.largest_support_component(support).astype(float),
+        state=states,energy=energy,polarizations=[1.]*len(states),
         saturated={} if dataset=="hyperspectral" else {"p":1.,"n":-1.},
         current=None if dataset=="hyperspectral" else np.array([1.,0.,-1.]),
         crop=crop,binning=binning,THICKNESS_NM=None,
@@ -34,12 +34,17 @@ def test_shared_notebook_cells(tmp_path,monkeypatch,dataset,modes,crop,binning):
     ns["MODES"]=modes
     if binning>1:
         ns["recipe"].update(fit_aperture_illumination=False,fit_illumination_intensity=False,align_global_phase=False)
-    ns["recipe"].update(modes=modes,mode_support_center="components",outer_iterations=2,
-        inner_Nit=1,physical_iterations=2,TV_freq=1000000)
+    ns["recipe"].update(modes=modes,mode_support_center="components",
+        stages=[dict(it=2,mode="ER",physical_it=2,physical_every=1)])
     for i in [7,9,11,13,15]:exec("".join(cells[i]["source"]),ns)
     assert np.all(np.isfinite(ns["fields"]))
     assert ns["fields"].shape[-2:]==((32-2*crop)//binning,)*2
     assert ns["OUTPUT"].is_file()
+    # Reuse the returned detector fields without cropping/binning them a second time.
+    restarted = ns['universal'].initialize_phase_retrieval(
+        ns['holograms'], ns['mask_pixel'], ns['support'], ns['recipe'], start_fields=ns['fields'])
+    starts = restarted['fields'][:, 0] if len(modes) == 1 else restarted['fields']
+    np.testing.assert_array_equal(starts, ns['fields'])
     plt.close("all")
 
 def test_streaming_saturation_and_mean(tmp_path):

@@ -3,65 +3,14 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import affine_transform, center_of_mass, label, shift as image_shift
+from scipy.ndimage import affine_transform, center_of_mass, label
 
-
-GEOMETRY_DEFAULTS = {"binning": 1, "crop": 0, "roi": None}
 
 __all__ = [
-    "GEOMETRY_DEFAULTS",
-    "recenter_source_support",
     "recenter_modal_supports",
     "Geometry",
     "prepare",
-    "support_bounding_roi",
 ]
-
-
-def recenter_source_support(support, crop, binning, margin=2):
-    """Translate an object support so the detector crop/bin grid retains it.
-
-    The returned integer source-grid shift can also be applied to any known
-    object-space thickness or material map. Detector masks must stay fixed.
-    """
-    support = np.asarray(support)
-    if support.ndim != 2 or not np.any(support):
-        raise ValueError("support must be a nonempty 2D array")
-    shape = np.asarray(support.shape, dtype=int)
-    crop = _positive_integer(crop, "crop", 0)
-    binning = _positive_integer(binning, "binning", 1)
-    cropped = shape - 2 * crop
-    if np.any(cropped <= 0):
-        raise ValueError("crop removes the complete support grid")
-    used = cropped // binning
-    if np.any(used < 1):
-        raise ValueError("binning is larger than the cropped grid")
-    if crop:
-        source_center = (shape - 1) / 2
-        used_center = (used - 1) / 2
-        scale = shape / cropped
-        visible_low = source_center + (margin - used_center) * scale
-        visible_high = source_center + (used - 1 - margin - used_center) * scale
-    else:
-        origin = (shape - used) // 2
-        visible_low = origin + margin
-        visible_high = origin + used - 1 - margin
-    points = np.argwhere(support != 0)
-    lower = np.ceil(visible_low - points.min(axis=0)).astype(int)
-    upper = np.floor(visible_high - points.max(axis=0)).astype(int)
-    if np.any(lower > upper):
-        raise ValueError(
-            f"Support span cannot fit retrieval grid {tuple(used)} "
-            f"with crop={crop}, binning={binning}."
-        )
-    translation = np.minimum(np.maximum(np.zeros(2, dtype=int), lower), upper)
-    if np.any(translation):
-        shifted = image_shift(support.astype(float), translation, order=0,
-                              mode="constant", cval=0, prefilter=False)
-        if np.count_nonzero(shifted) != np.count_nonzero(support):
-            raise ValueError("Recentering would cut support at the source-grid edge")
-        support = shifted.astype(support.dtype)
-    return support.copy(), tuple(int(v) for v in translation)
 
 
 def recenter_modal_supports(support, factors, center="image", margin=2):
@@ -166,78 +115,17 @@ def _resample_spatial(array, target_shape, order, coordinate_scale=None):
     return sampled.reshape((*source.shape[:-2], *target_shape))
 
 
-_SPATIAL_COMPONENT_KEYS = {
-    "static_log_object", "energy_dependent_log_object", "spectral_spatial_map",
-    "common_log_objects", "common_exit_waves", "response_log_objects",
-    "magnetization", "common_log_objects_by_beam",
-    "response_log_objects_by_state_energy", "magnetization_by_state",
-    "mode_components",
-}
-
-
-def _map_components(value, old_shape, target_shape, *, force=False):
-    """
-    Output helper for nested component structures. Resample only recognized spatial maps;
-    spectra and observation labels must not be interpreted as images merely because they are
-    arrays.
-    """
-    if isinstance(value, dict):
-        return {
-            key: _map_components(
-                item, old_shape, target_shape,
-                force=force or key in _SPATIAL_COMPONENT_KEYS - {"mode_components"},
-            ) if force or key in _SPATIAL_COMPONENT_KEYS else item
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_map_components(item, old_shape, target_shape, force=force) for item in value]
-    array = np.asarray(value)
-    if array.ndim < 2 or array.shape[-2:] != old_shape:
-        return value
-    return _resample_spatial(array, target_shape, order=1)
-
-
 @dataclass
 class Geometry:
     source_shape: tuple[int, int]
     used_shape: tuple[int, int]
-    final_shape: tuple[int, int]
     binning: int
     crop: int
     roi: np.ndarray | None
-    mask_used: np.ndarray
-    support_used: np.ndarray
-
-    def finish(self, fields, warmup, components, bsmasks, errors):
-        """
-        Output bookkeeping: attach the exact masks/support/geometry used by retrieval. Returned
-        fields remain on the retrieval grid; this method does not invent source-resolution
-        information.
-        """
-        components["supportmask_used"] = self.support_used.copy()
-        components["supportmask"] = self.support_used.copy()
-        components["mask_pixel"] = self.mask_used.copy()
-        components["roi"] = None if self.roi is None else self.roi.copy()
-        errors["geometry"] = {
-            "source_shape": self.source_shape,
-            "retrieval_shape": self.used_shape,
-            "output_shape": self.final_shape,
-            "binning": self.binning,
-            "crop": self.crop,
-            "roi": None if self.roi is None else self.roi.copy(),
-        }
-        return fields, warmup, components, bsmasks, errors
 
 
 def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
-    """
-    Crop the detector grid first, then bin intensities and masks.
-
-    Context:
-    Input geometry boundary shared by retrieval and refinement. Crop detector edges, sum
-    intensity bins, propagate invalid pixels and map the object support. Return prepared
-    images, mask, support, optional starts and a Geometry record.
-    """
+    """Crop/bin intensities and masks, map support, and prepare optional starting fields."""
     binning = _positive_integer(recipe["binning"], "binning", 1)
     crop = _positive_integer(recipe["crop"], "crop", 0)
     images = np.asarray(holograms)
@@ -251,15 +139,14 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
     if support.ndim not in (2, 3):
         raise ValueError("supportmask must be 2D or modal 3D.")
     start = None if start_fields is None else np.asarray(start_fields)
-    if start is not None and start.shape[-2:] != source_shape:
-        raise ValueError("start_fields spatial shape must match the holograms.")
     if 2 * crop >= min(source_shape):
         raise ValueError("recipe['crop'] removes the complete detector image.")
     cropped_shape = tuple(n - 2 * crop for n in source_shape)
     used_shape = tuple(n // binning for n in cropped_shape)
+    if start is not None and start.shape[-2:] not in {source_shape, used_shape}:
+        raise ValueError("start_fields must match the detector grid or retrieval grid.")
     if min(used_shape) < 1:
         raise ValueError("recipe['binning'] is larger than the cropped hologram.")
-    final_shape = used_shape
     if support.shape[-2:] not in {source_shape, used_shape}:
         raise ValueError(
             "supportmask must match the source hologram grid or the cropped/binned retrieval grid."
@@ -297,8 +184,8 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
 
     images = blockify(images).sum(axis=(-3, -1))
     mask = blockify(mask != 0).any(axis=(-3, -1)).astype(np.uint8)
-    if start is not None:
-        start = blockify(start).mean(axis=(-3, -1))
+    if start is not None and start.shape[-2:] == source_shape:
+        start = blockify(start).mean(axis=(-3, -1))  # Retrieval-grid starts are already prepared.
     if support.shape[-2:] == used_shape:
         support = support.copy()
     elif crop:
@@ -317,34 +204,5 @@ def prepare(holograms, mask_pixel, supportmask, recipe, start_fields=None):
             support = np.repeat(support[None], nmodes, axis=0)
         elif support.shape[0] == 1:
             support = np.repeat(support, nmodes, axis=0)
-    geometry = Geometry(source_shape, used_shape, final_shape, binning, crop,
-                        roi, mask.copy(), support.copy())
+    geometry = Geometry(source_shape, used_shape, binning, crop, roi)
     return images, mask, support, start, geometry
-
-
-def support_bounding_roi(support, padding_fraction=0.15):
-    """
-    Centered display ROI enclosing the largest aperture on the current grid.
-
-    Call after crop/binning/support recentering. Fractional padding scales with
-    the aperture, so no manually maintained source-to-retrieval pixel offsets.
-
-    Context:
-    Display helper only: bound the largest connected aperture on the prepared object grid.
-    The physical fit uses its positive-thickness pixel selection, which need not be
-    rectangular or identical to this display crop.
-    """
-    from scipy.ndimage import label
-    support = np.asarray(support) != 0
-    if support.ndim != 2 or padding_fraction < 0:
-        raise ValueError("Expected 2D support and nonnegative padding fraction.")
-    labels, count = label(support, structure=np.ones((3, 3)))
-    if not count:
-        raise ValueError("Support has no aperture.")
-    sizes = np.bincount(labels.ravel()); sizes[0] = 0
-    points = np.argwhere(labels == np.argmax(sizes))
-    low, high = points.min(axis=0), points.max(axis=0) + 1
-    pad = np.ceil((high - low) * padding_fraction).astype(int)
-    low = np.maximum(low - pad, 0)
-    high = np.minimum(high + pad, support.shape)
-    return tuple(slice(int(a), int(b)) for a, b in zip(low, high))

@@ -1,13 +1,33 @@
 # Validation
 
-Run from the paper folder:
+Run from the repository root:
 
-    python -m pytest tests -q
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+```
 
-Result: **14 passed**. Tests cover physical-fit continuation and optional nearest-sign initialization, optical coefficient signs and thickness conversion, streaming frame means and per-frame saturation, and execution of the actual reconstruction notebook cells through HDF5/PDF export. Both datasets are exercised with single and two-mode fields, with and without crop/bin preprocessing. Cropped synthetic tests disable reference-hole illumination correction because their small synthetic grid excludes those apertures; full-grid cases exercise it. The cropped tests use component-centered modal support expansion to fit that small grid.
+**60 tests passed on 2026-11-03.** Plugin autoload was disabled to exclude an unrelated installed napari plugin.
 
-The measured hyperspectral support and configured XPCS support were also mapped through their default crop/bin settings and checked for valid factor-2 modal supports.
+The suite covers:
 
-These checks validate code paths and data handoffs. They do not establish experimental performance, optical-constant accuracy, error bars or improved hysteresis accuracy. Full raw-data processing and reconstruction were not run. Hyperspectral preparation still assumes existing facility frame averages and the source workflow's 500-frame normalization. Verify those metadata before quantitative use. The manuscript has not been typeset or populated with experimental results.
+- Mandatory Fourier/support updates, detector-mask preservation and spatial-only TV.
+- Stage-local physical/RL/TV timing, disabled `False` controls, and the 700 HAPRE + 50 ER default and repeated RL round.
+- Single/multimode RL normalization and per-observation/shared kernel fitting.
+- Saturation anchors keyed by state values, physical-fit reuse, grouped magnetic/illumination modes, reversible focusing, and exact multi-energy/multi-beam synthetic fits.
+- Crop/bin geometry and direct initialization from previous reconstruction fields.
+- Execution of both reconstruction notebooks with one/two modes and crop/bin variants, including HDF5/PDF export.
+- Four complete preparation-to-export workflows using synthetic on-disk raw frames, MAX IV metadata/averages and painted masks, with RL on/off. Non-RL cases use the default 750 retrieval iterations; RL cases shorten iteration counts. These checks include alignment, dark subtraction, saturation-mask propagation and agreement between notebook and solver detector residuals.
 
-Tested environment: Python 3.13.14; NumPy 2.4.6; SciPy 1.18.0; h5py 3.16.0; Matplotlib 3.11.1; scikit-image 0.26.0; nbformat 5.10.4; pytest 9.1.1. `requirements.txt` specifies lower bounds, not an environment lock. Freeze the environment used for final paper results.
+All four notebook files pass nbformat validation and Python-cell compilation.
+
+## Code audit
+
+Every remaining top-level library function has a caller in runtime code or notebook code. Exports, tests and self-recursion alone were not counted as callers. Recipe-selected support algorithms are retained as callable dispatch entries. Unused geometry/output remapping, absorption conversion, duplicate mask writers and their orphaned constants were removed.
+
+The beta schedules now share one evaluator. A numerical comparison against the baseline implementation passed for all nine supported modes across five iteration counts and three starting values (135 cases). Four further comparisons verified the unchanged KK sign convention after removing its sign-only wrapper.
+
+## Environment and limits
+
+The local run used Python 3.10.12, NumPy 1.26.4, SciPy 1.15.3, h5py 3.13.0, Matplotlib 3.7.0, scikit-image 0.19.3, nbformat 5.7.0 and pytest 7.1.2. `requirements.txt` recommends newer minimum versions for a fresh environment; this run is not a test of every allowed dependency version.
+
+GPU execution and full experimental reconstructions were not run. Raw experimental data are external. The tests establish numerical contracts and working notebook handoffs, not experimental accuracy, uncertainty bounds or improved hysteresis results. Hyperspectral preparation assumes existing facility averages and a configured frame count (default 500); verify that count and the acquisition metadata before quantitative analysis.

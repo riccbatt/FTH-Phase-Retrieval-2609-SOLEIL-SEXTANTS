@@ -1,35 +1,54 @@
 {
-  "library/phase_retrieval_universal.py": {
-    "sha256": "fb57fbd11041b302b72c19af4647c192bcc8ce5792a5ac000ff8f480d3493d52",
-    "changes": "Retained numerical dependency closure for physical_factorized/none; optional species, gradient and spectral-baseline paths rejected; unused top-level functions and plotting removed",
-    "exported_sha256": "fbd1006d7dc77eb84ac941a29f162d3e0f546b49ad02c526376a241a84386a4b"
+  "description": "Historical source provenance and checksums of the current numerical library. Historical paths describe source artifacts, not runtime imports.",
+  "baseline_commit": "dab2c8bece58e06921e08d5f76eca4e523742344",
+  "historical_sources": {
+    "library/phase_retrieval_universal.py": {
+      "source_sha256": "fb57fbd11041b302b72c19af4647c192bcc8ce5792a5ac000ff8f480d3493d52",
+      "initial_export_notes": "Retained numerical dependency closure for physical_factorized/none; optional species, gradient and spectral-baseline paths rejected; unused top-level functions and plotting removed",
+      "initial_export_sha256": "fbd1006d7dc77eb84ac941a29f162d3e0f546b49ad02c526376a241a84386a4b"
+    },
+    "library/phase_retrieval_geometry.py": {
+      "source_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59",
+      "initial_export_notes": "Unmodified",
+      "initial_export_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59"
+    },
+    "library/kramers_kronig.py": {
+      "source_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1",
+      "initial_export_notes": "Unmodified",
+      "initial_export_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1"
+    },
+    "library/retrieval_optical_constants.py": {
+      "source_sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281",
+      "initial_export_notes": "Unmodified",
+      "initial_export_sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281"
+    },
+    "2601_XPCS/reconstruction_inputs.py": {
+      "source_sha256": "9721517ce223c1ff1dd48f4cdd1663b4f491fc68c5ead6f945a58d24b283650e",
+      "initial_export_notes": "Renamed xpcs_inputs.py; unused postprocessing functions removed",
+      "initial_export_sha256": "6e63ea298d1d58be4f4b76eae045b5b61e772abc97efb64d93f39727bc38837b"
+    },
+    "hyperspectral_support": {
+      "source": "maxiv_phase_test/processed/Logs/data_recon_ImId_1143_maxiv.hdf5",
+      "datasets": [
+        "supportmask",
+        "mask_pixel"
+      ],
+      "initial_export_sha256": "40435d36f5758971d8281c1cd41cc7810878eefca96e75056df22e40c18cd80d"
+    }
   },
-  "library/phase_retrieval_geometry.py": {
-    "sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59",
-    "changes": "Unmodified",
-    "exported_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59"
-  },
-  "library/kramers_kronig.py": {
-    "sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1",
-    "changes": "Unmodified",
-    "exported_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1"
-  },
-  "library/retrieval_optical_constants.py": {
-    "sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281",
-    "changes": "Unmodified",
-    "exported_sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281"
-  },
-  "2601_XPCS/reconstruction_inputs.py": {
-    "sha256": "9721517ce223c1ff1dd48f4cdd1663b4f491fc68c5ead6f945a58d24b283650e",
-    "changes": "Renamed xpcs_inputs.py; unused postprocessing functions removed",
-    "exported_sha256": "6e63ea298d1d58be4f4b76eae045b5b61e772abc97efb64d93f39727bc38837b"
-  },
-  "hyperspectral_support": {
-    "source": "maxiv_phase_test/processed/Logs/data_recon_ImId_1143_maxiv.hdf5",
-    "datasets": [
-      "supportmask",
-      "mask_pixel"
-    ],
-    "exported_sha256": "40435d36f5758971d8281c1cd41cc7810878eefca96e75056df22e40c18cd80d"
+  "library_sha256": {
+    "library/__init__.py": "c856d25b45a94f4c8e2f9bf0271f779b0bdf617e8af7fca384b65297e390da7f",
+    "library/kramers_kronig.py": "ca7c27033e2e91cbf847062db8770ad5e2e0c87d5848339e7c46c46b3905031b",
+    "library/magnitude_constraints.py": "b65f6d20c715bd058b2b2eca67837c182a4c43a10d12586a1399c8bccb6bb19c",
+    "library/mask_store.py": "96a42e63c50a556750206843cf53a0f0fedf9af4afae00f487c463ae7a29ffd1",
+    "library/phase_retrieval_backend.py": "2d134191c719162a3a3c280a483ed9d66f48766604ae345de6b85db101c452ae",
+    "library/phase_retrieval_geometry.py": "1e7bb03f171f058e6f900d10bde8f069903cc9984434d4b2191dd630d4d1b3a0",
+    "library/phase_retrieval_initialization.py": "4968115ba9781923713152fd052eba101cde3eca5a3a9fbb2bc23da4c7809ad7",
+    "library/phase_retrieval_physical.py": "ff1e193209ffcda29b440d6e246b82cb96d293bbe1ffbe2b8c2374e322ed678a",
+    "library/phase_retrieval_recipe.py": "d2ceef5f59e5a5086388e7217daac2d96a914822c21bb708e92a4e3759797c72",
+    "library/phase_retrieval_universal.py": "85f07fe14be38522e3194b506726addacbbe44cde85e9ce76f31950b34d7f474",
+    "library/phase_retrieval_validation.py": "bf9c84c57fbe31f30b0c4c7208baff605f2768ded08b1a7bad3ebe80a695fdd9",
+    "library/real_space_constraints.py": "96c71f287f4c638b332ca0578f0c0e01a886b56793232c4e77c8dd1ebdca0ca9",
+    "library/scan_io.py": "4ae26dfdf9923a60a671dd08ddb69ec86c4911aeaca14c861c06554864de8e4e"
   }
 }

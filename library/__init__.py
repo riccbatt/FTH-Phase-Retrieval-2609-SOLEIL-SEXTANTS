@@ -1,8 +1,4 @@
-"""Public library surface for the physical-projection workflow.
-
-The package intentionally exposes only the generic, paper-active modules and
-keeps the API explicit instead of silently carrying legacy names.
-"""
+"""Numerical modules for recipe-driven physical-projection phase retrieval."""
 
 __all__ = [
     "kramers_kronig",
@@ -11,6 +7,10 @@ __all__ = [
     "phase_retrieval_geometry",
     "phase_retrieval_physical",
     "phase_retrieval_universal",
+    "phase_retrieval_initialization",
+    "phase_retrieval_recipe",
+    "phase_retrieval_backend",
+    "phase_retrieval_validation",
     "real_space_constraints",
     "scan_io",
 ]
