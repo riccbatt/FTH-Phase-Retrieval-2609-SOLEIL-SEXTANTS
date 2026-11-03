@@ -1,0 +1,7 @@
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+data/**/*.h5
+results/*
+!results/.gitkeep

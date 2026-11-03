@@ -1,0 +1,35 @@
+{
+  "library/phase_retrieval_universal.py": {
+    "sha256": "fb57fbd11041b302b72c19af4647c192bcc8ce5792a5ac000ff8f480d3493d52",
+    "changes": "Retained numerical dependency closure for physical_factorized/none; optional species, gradient and spectral-baseline paths rejected; unused top-level functions and plotting removed",
+    "exported_sha256": "fbd1006d7dc77eb84ac941a29f162d3e0f546b49ad02c526376a241a84386a4b"
+  },
+  "library/phase_retrieval_geometry.py": {
+    "sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59",
+    "changes": "Unmodified",
+    "exported_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59"
+  },
+  "library/kramers_kronig.py": {
+    "sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1",
+    "changes": "Unmodified",
+    "exported_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1"
+  },
+  "library/retrieval_optical_constants.py": {
+    "sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281",
+    "changes": "Unmodified",
+    "exported_sha256": "94f9174835a6f2d14905df4c853ee941b12172932e4ca8392afdec2825f79281"
+  },
+  "2601_XPCS/reconstruction_inputs.py": {
+    "sha256": "9721517ce223c1ff1dd48f4cdd1663b4f491fc68c5ead6f945a58d24b283650e",
+    "changes": "Renamed xpcs_inputs.py; unused postprocessing functions removed",
+    "exported_sha256": "6e63ea298d1d58be4f4b76eae045b5b61e772abc97efb64d93f39727bc38837b"
+  },
+  "hyperspectral_support": {
+    "source": "maxiv_phase_test/processed/Logs/data_recon_ImId_1143_maxiv.hdf5",
+    "datasets": [
+      "supportmask",
+      "mask_pixel"
+    ],
+    "exported_sha256": "40435d36f5758971d8281c1cd41cc7810878eefca96e75056df22e40c18cd80d"
+  }
+}

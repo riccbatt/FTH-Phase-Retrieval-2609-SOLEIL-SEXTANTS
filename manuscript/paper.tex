@@ -1,0 +1,34 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,graphicx,hyperref}
+\title{Physical projection for quantitative coherent X-ray imaging}
+\author{Author list to be supplied}
+\date{}
+\begin{document}
+\maketitle
+\begin{abstract}
+[Draft scaffold.] We present an iterative phase retrieval algorithm that alternates detector and support constraints with a physical projection coupling energy, polarization and magnetic state. Two applications are hyperspectral imaging with extraction of refractive-index contributions and quantitative reconstruction of a magnetic hysteresis dataset. Numerical performance, calibration accuracy and uncertainty remain to be supplied from validated experimental runs.
+\end{abstract}
+\section{Introduction}
+Describe the quantitative imaging problem, limitations of independent reconstructions and relevant prior work. State the algorithmic contribution and two experimentally supported outcomes. [Add verified references.]
+\section{Physical projection and phase retrieval}
+For observation $a$ we model the object logarithm as
+\begin{equation}
+ L_a(\mathbf r)=c_{b(a)}(\mathbf r)+t(\mathbf r)
+ [q_c(E_a)+p_a q_m(E_a)m_{s(a)}(\mathbf r)].
+\end{equation}
+An independent HAPRE/ER warmup precedes alternating physical fits and detector/support updates. Describe weighting, relaxation, mode supports, phase referencing, stopping criteria and gauge freedoms using the frozen notebook settings.
+\subsection{Physical units and identifiability}
+With $T=\exp[-ik(n-1)d]$, $n=1-\delta-i\beta$ and $d=d_0t$, the fitted coefficient is $q=-ikd_0(n-1)$. Therefore $\beta=-\operatorname{Re}(q)/(kd_0)$ and $\delta=\operatorname{Im}(q)/(kd_0)$. Supply independently measured thickness and calibration constraints; report unresolved charge offsets and magnetic scale/sign ambiguities.
+\section{Experimental datasets and reproducibility}
+Supply sample composition, thickness, beamline geometry, acquisition settings, detector calibration, data availability and software versions. Describe masks, dark correction, registration, crop/bin mapping and acquisition-order handling. Freeze all choices before drawing conclusions.
+\section{Hyperspectral imaging and optical constants}
+Insert validated spatial maps and charge/magnetic spectra from the hyperspectral notebooks. Quantify agreement with independent optical data, spectral-window effects and thickness uncertainty. [Results and figures pending.]
+\section{Quantitative hysteresis reconstruction}
+Insert maps and local/global loops from scan 263. Compare independent warmup and physical reconstruction using the same ROIs, reference choices and current/field calibration. Quantify detector consistency and uncertainty without imposing the desired loop shape. [Results and figures pending.]
+\section{Discussion}
+Discuss identifiability, partial coherence, illumination assumptions, model mismatch, finite spectral sampling and limits of the two experiments. Support any claim of improved quantitative accuracy with independent evidence.
+\section{Conclusion}
+[Complete after validation of both datasets.]
+\section*{Data and code availability}
+[Supply archived datasets, source revision, environment and permanent links.]
+\end{document}
