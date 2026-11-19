@@ -1,0 +1,35 @@
+{
+  "source_repository": "FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS",
+  "files": {
+    "phase_retrieval_universal.py": {
+      "source": "../FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS/library/phase_retrieval_universal.py",
+      "source_sha256": "f5c873a2800182d3b31a2c153c3eb4ecdbf682b1e74e8f0f5674a340416166dd",
+      "local_sha256": "d5fdfe626b380e25b463d26cfaa28b515d37c34eb33e4b924a80b95bd5db5621"
+    },
+    "phase_retrieval_geometry.py": {
+      "source": "../FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS/library/phase_retrieval_geometry.py",
+      "source_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59",
+      "local_sha256": "5a6ca9429db003ce5fa5035dfefe3da710a5ecaf0a550b0c95eca08269a43a59"
+    },
+    "phase_retrieval_gradient.py": {
+      "source": "../FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS/library/phase_retrieval_gradient.py",
+      "source_sha256": "f6650daa56c870e020e684ab7616eae54e75e26f0265af4b75dbc0e75162ced4",
+      "local_sha256": "f6650daa56c870e020e684ab7616eae54e75e26f0265af4b75dbc0e75162ced4"
+    },
+    "phase_retrieval_species.py": {
+      "source": "../FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS/library/phase_retrieval_species.py",
+      "source_sha256": "b1bc2777da7cfd66b9c2bee72ed4679f8d00d911f2207651b5b06f70d0c55d13",
+      "local_sha256": "b1bc2777da7cfd66b9c2bee72ed4679f8d00d911f2207651b5b06f70d0c55d13"
+    },
+    "kramers_kronig.py": {
+      "source": "../FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS/library/kramers_kronig.py",
+      "source_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1",
+      "local_sha256": "b3323d93b557015307f8c6c068bd25a2b4572dba237349e48ba33e0aed226ac1"
+    }
+  },
+  "local_changes": [
+    "Optional projection_focus_setup.reference_energy_eV implements propagation on the common q grid.",
+    "Observation stage runner preserves invalid pixels during PC unless an explicit fixed masked-intensity target is supplied.",
+    "Standalone focus supports reversible FTH-convention dx/dy object-phase ramps and applies global phase even at zero propagation."
+  ]
+}

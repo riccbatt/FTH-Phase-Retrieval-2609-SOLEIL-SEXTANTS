@@ -1,5 +1,7 @@
 # FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS
 
+For the independent hyperspectral reconstruction, open [05_hyperspectral_physical.ipynb](05_hyperspectral_physical.ipynb) and follow the [setup guide](HYPERSPECTRAL.md).
+
 For the November SEXTANTS MCP and CMOS detector notebooks, see the [SEXTANTS_261105 workflow](SEXTANTS_261105/README.md).
 
 This folder contains the notebook sequence for going from raw BESSY/P04/SEXTANTS holograms to an FTH reconstruction, masks, support, and phase-retrieved CDI reconstruction. The numbered reconstruction notebooks share one HDF5 data dictionary in `processed/Logs/`.

@@ -352,4 +352,24 @@ def load_scan_value(folder: str | Path, image_id: int | str, mnemonic: str) -> f
     return float(values)
 
 
+def predicted_detector_intensity(fields, gamma=None):
+    """Sum modal intensities, convolving each with its centered coherence kernel."""
+    modes = as_modes(fields)
+    intensities = np.abs(modes)**2
+    if gamma is None:
+        return np.sum(intensities, axis=0)
+    kernels = as_modes(gamma)
+    if kernels.shape != modes.shape:
+        raise ValueError(f"Coherence kernels {kernels.shape} != field modes {modes.shape}")
+    result = np.zeros(modes.shape[-2:], dtype=float)
+    for intensity, kernel in zip(intensities, kernels):
+        # Match the retrieval kernel's corner-based circular convolution.
+        predicted = np.fft.ifft2(
+            np.fft.fft2(np.fft.fftshift(intensity)) *
+            np.fft.fft2(np.fft.fftshift(kernel))
+        )
+        result += np.fft.ifftshift(predicted).real
+    return result
+
+
 __all__ = [name for name in globals() if not name.startswith("_")]

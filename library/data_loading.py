@@ -39,10 +39,16 @@ def image_ids(value: int | str | Sequence[int | str]) -> list[int | str]:
     Strings are scalar IDs, not sequences. This helper lets notebook settings
     accept either ``95`` or ``[95, 97, 99]`` without special-casing both forms.
     """
-    if isinstance(value, (str, bytes)) or np.isscalar(value):
-        result = [value]
-    else:
-        result = list(value)
+    result = []
+    def append_ids(item):
+        if isinstance(item, (str, bytes)) or np.isscalar(item):
+            result.append(item)
+        elif isinstance(item, np.ndarray) and item.ndim == 0:
+            result.append(item.item())
+        else:
+            for child in item:
+                append_ids(child)
+    append_ids(value)
     if not result:
         raise ValueError("At least one image ID is required")
     return result
@@ -253,10 +259,22 @@ class SextantsNexusLoader(NexusLoader):
     def __init__(self, raw_folder: str | Path, frame_reduction: str = "mean") -> None:
         super().__init__(
             raw_folder,
-            filename="scanx_{id:04d}.nxs",
+            filename="scanxx_{id:04d}.nxs",
             exposure_paths=("scan_data/integration_times",),
             frame_reduction=frame_reduction,
         )
+
+    def path_for(self, image_id: int | str) -> Path:
+        """Keep the configured filename; accept known SOLEIL prefix variants."""
+        configured = super().path_for(image_id)
+        if configured.exists():
+            return configured
+        alternatives = [self.raw_folder / f"{prefix}{int(image_id):04d}.nxs"
+                        for prefix in ("scanx_", "scan_")]
+        existing = [path for path in alternatives if path.exists()]
+        if len(existing) > 1:
+            raise ValueError(f"Ambiguous NeXus acquisition {image_id}: {existing}")
+        return existing[0] if existing else configured
 
     @staticmethod
     def _detector_dataset(handle: h5py.File, entry: str) -> tuple[str, h5py.Dataset]:
