@@ -3,7 +3,8 @@ SOLEIL_2507/
 
 # Generated workflow outputs.
 processed/
-raw/
+/raw
+/output/
 
 # Python and notebook caches.
 __pycache__/
@@ -12,3 +13,6 @@ __pycache__/
 .DS_Store
 .venv*/
 .virtual_documents/
+.env
+.env.*
+.aws/

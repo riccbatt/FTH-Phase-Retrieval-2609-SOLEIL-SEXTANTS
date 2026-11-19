@@ -2,9 +2,8 @@
 
 ## MCP detector analysis
 
-The [MCP analysis notebooks](SEXTANTS_261105/README.md) live in
-`SEXTANTS_261105/`. Run them from that directory and place or link your MCP
-acquisition files under `raw/MCP/`.
+Run the [MCP and CMOS analysis notebooks](DETECTOR_ANALYSIS.md) from the
+repository root. Place or link your MCP acquisition files under `raw/MCP/`.
 
 ## FTH and phase retrieval
 

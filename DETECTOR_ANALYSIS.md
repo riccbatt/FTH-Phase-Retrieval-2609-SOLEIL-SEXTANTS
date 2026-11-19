@@ -1,4 +1,4 @@
-# SEXTANTS_261105
+# November SEXTANTS detector analysis
 
 Notebooks for SEXTANTS images, Fourier power animations, and detector radial and azimuthal averages.
 
@@ -11,7 +11,7 @@ pip install -r requirements.txt
 jupyter lab
 ```
 
-Run notebooks from the `SEXTANTS_261105/` directory.
+Run the detector notebooks from the repository root.
 
 ## MCP workflow
 
