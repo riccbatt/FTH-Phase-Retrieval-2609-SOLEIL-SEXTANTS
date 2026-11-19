@@ -1,5 +1,7 @@
 # FTH-Phase-Retrieval-2609-SOLEIL-SEXTANTS
 
+For the November FTH workflow, use [beamstop stitching](00b_stitch_beamstops_000.ipynb) when needed, then run [single-pair FTH](01_FTH.ipynb) and [series FTH](01_FTH_series.ipynb). Set the raw NeXus paths and beamstop masks for your acquisition in the notebooks.
+
 For the independent hyperspectral reconstruction, open [05_hyperspectral_physical.ipynb](05_hyperspectral_physical.ipynb) and follow the [setup guide](HYPERSPECTRAL.md).
 
 For the November SEXTANTS MCP and CMOS detector notebooks, see the [SEXTANTS_261105 workflow](SEXTANTS_261105/README.md).

@@ -352,6 +352,40 @@ def load_scan_value(folder: str | Path, image_id: int | str, mnemonic: str) -> f
     return float(values)
 
 
+__all__ = [name for name in globals() if not name.startswith("_")]
+
+
+def reconstruct_fth_pair(positive, reference, experimental_setup, fth, *,
+                         prop_dist=0, phase=0, dx=0, dy=0, operation="-"):
+    """Use the focus widget's exact pair operation, phase, and shift order."""
+    p = fth_reconstruct(positive, experimental_setup, fth, prop_dist=prop_dist, phase=phase)
+    n = fth_reconstruct(reference, experimental_setup, fth, prop_dist=prop_dist, phase=phase)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if operation == "-":
+            image = p - n
+        elif operation == "+":
+            image = p + n
+        elif operation == "p":
+            image = p
+        elif operation == "n":
+            image = n
+        elif operation == "/":
+            image = (p / n) * np.exp(1j * phase)
+        elif operation == "log":
+            image = np.log(np.abs(p / n)) * np.exp(1j * np.angle(p / n))
+        elif operation == "**2/**2":
+            image = (np.abs(p)**2 / np.abs(n)**2) * np.exp(1j * phase)
+        elif operation == "-/+":
+            image = (p - n) / (p + n) * np.exp(1j * phase)
+        elif operation == "load_both":
+            holo, _ = fth.load_both(positive, reference, True)
+            image = fth_reconstruct(holo, experimental_setup, fth, prop_dist=prop_dist, phase=phase)
+        else:
+            raise ValueError(f"Unsupported focus operation: {operation}")
+    image = np.nan_to_num(image, nan=0, posinf=0, neginf=0)
+    return np.asarray(fth.sub_pixel_centering(image, dx, dy))
+
+
 def predicted_detector_intensity(fields, gamma=None):
     """Sum modal intensities, convolving each with its centered coherence kernel."""
     modes = as_modes(fields)
@@ -370,6 +404,3 @@ def predicted_detector_intensity(fields, gamma=None):
         )
         result += np.fft.ifftshift(predicted).real
     return result
-
-
-__all__ = [name for name in globals() if not name.startswith("_")]

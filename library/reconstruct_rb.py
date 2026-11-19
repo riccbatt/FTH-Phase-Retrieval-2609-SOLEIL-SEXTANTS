@@ -688,27 +688,15 @@ def focusCDI(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100)
     style = {'description_width': 'initial'}
     fig, axs = plt.subplots(2,2, figsize=(7,7))
     def p(x, y, fx, fy):
-        image_p = fth.reconstructCDI(fth.propagate(pos, x*1e-6, experimental_setup)* np.exp(1j*y))
-        image_n = fth.reconstructCDI(fth.propagate(neg, x*1e-6, experimental_setup)* np.exp(1j*y))
-        
-        if operation== "-":
-            image= (image_p-image_n)
-        elif operation== "+":
-            image= (image_p+image_n)
-        elif operation=="/":
-            image= (image_p/image_n)* np.exp(1j*y)
-        elif operation=="log":
-            image= np.log(np.abs(image_p/image_n))* np.exp(1j*np.angle(image_p/image_n))
-        elif operation=="**2/**2":
-            image= (np.abs(image_p)**2/np.abs(image_n)**2) * np.exp(1j*y)
-        elif operation=="-/+":
-            image= (image_p-image_n)/(image_p+image_n) * np.exp(1j*y)
-        elif operation=="load_both":
-            image,_=fth.load_both(pos,neg,True)
-            image= fth.reconstructCDI(fth.propagate(image, x*1e-6, experimental_setup))* np.exp(1j*y)
-            
-        image=np.nan_to_num(image, nan=0, posinf=0, neginf=0)
-        simage = fth.sub_pixel_centering(image, fx, fy)[roi]
+        try:
+            from .fth_phase_workflow import reconstruct_fth_pair
+        except ImportError:
+            from fth_phase_workflow import reconstruct_fth_pair
+        image = reconstruct_fth_pair(
+            pos, neg, experimental_setup, fth, prop_dist=x, phase=y,
+            dx=fx, dy=fy, operation=operation,
+        )
+        simage = image[roi]
         maskroi=(image*0+mask)[roi]
         simage_mask=simage[maskroi==1]        
         
@@ -765,6 +753,805 @@ def focusCDI(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100)
     return (slider_prop, slider_phase, slider_dx, slider_dy)
 
 
+from scipy.special import j1
+
+
+from scipy.special import j1
+
+import numpy as np
+
+def make_complex_reference(
+    shape,
+    diameter_px=5,
+    profile="Circular",
+    ellipticity=1.0,
+    angle=0.0,
+    phase_curvature=0.0,
+    phase_astigmatism=0.0,
+    phase_gradient_x=0.0,
+    phase_gradient_y=0.0,
+    amplitude_gradient_x=0.0,
+    amplitude_gradient_y=0.0,
+):
+    """
+    Construct a complex-valued FTH reference-hole profile.
+
+    Parameters
+    ----------
+    shape : tuple
+        (ny, nx) of reconstructed image.
+    diameter_px : float
+        Diameter for Circular; amplitude FWHM for Gaussian/Lorentzian.
+    profile : str
+        Circular, Gaussian, Lorentzian.
+    ellipticity : float
+        Ratio of y/x reference widths.
+    angle : float
+        Rotation angle in degrees.
+    phase_curvature : float
+        Quadratic phase variation in radians at reference radius.
+    phase_astigmatism : float
+        Astigmatic quadratic phase in radians.
+    phase_gradient_x, phase_gradient_y : float
+        Linear phase slopes, radians per reference radius.
+    amplitude_gradient_x, amplitude_gradient_y : float
+        Linear amplitude asymmetry.
+
+    Returns
+    -------
+    complex ndarray
+        Centered complex reference profile.
+    """
+
+    ny, nx = shape
+    y, x = np.mgrid[:ny, :nx]
+    x = x - nx // 2
+    y = y - ny // 2
+
+    theta = np.deg2rad(angle)
+    xr = x * np.cos(theta) + y * np.sin(theta)
+    yr = -x * np.sin(theta) + y * np.cos(theta)
+
+    radius = max(diameter_px / 2, 1e-9)
+    ellipticity = max(ellipticity, 1e-9)
+
+    X = xr / radius
+    Y = yr / (radius * ellipticity)
+    r2 = X**2 + Y**2
+
+    if profile == "Circular":
+        amplitude = (r2 <= 1).astype(float)
+
+    elif profile == "Gaussian":
+        amplitude = np.exp(-np.log(2) * r2)
+
+    elif profile == "Lorentzian":
+        amplitude = 1 / (1 + r2)
+
+    else:
+        raise ValueError(f"Unknown profile: {profile}")
+
+    amplitude *= np.clip(
+        1 + amplitude_gradient_x * X + amplitude_gradient_y * Y,
+        0, None
+    )
+
+    phase = (
+        phase_curvature * r2
+        + phase_astigmatism * (X**2 - Y**2)
+        + phase_gradient_x * X
+        + phase_gradient_y * Y
+    )
+
+    reference = amplitude * np.exp(1j * phase)
+
+    # Normalize DC transfer function to unity
+    total = np.sum(reference)
+    if abs(total) > 1e-12:
+        reference = reference / total
+
+    return reference
+
+def deconvolve_reference(image, diameter_px, regularization=1e-3,
+                         profile="Circular", experimental_setup=None):
+    """
+    Regularized deconvolution of the FTH reference profile.
+
+    Parameters
+    ----------
+    image : 2D complex array
+        Full FTH reconstruction.
+    diameter_px : float
+        Diameter of circular reference, or FWHM for Gaussian/Lorentzian,
+        in reconstructed-image pixels.
+    regularization : float
+        Tikhonov regularization strength.
+    profile : str
+        "Circular", "Gaussian", or "Lorentzian".
+    """
+
+    if diameter_px <= 0:
+        return image
+
+    ny, nx = image.shape
+    qy = np.fft.fftfreq(ny)
+    qx = np.fft.fftfreq(nx)
+    QX, QY = np.meshgrid(qx, qy)
+    q = np.sqrt(QX**2 + QY**2)
+
+    if profile == "Circular":
+        radius = diameter_px / 2
+        z = 2 * np.pi * radius * q
+
+        transfer = np.ones_like(z)
+        nonzero = z != 0
+        transfer[nonzero] = 2 * j1(z[nonzero]) / z[nonzero]
+
+    elif profile == "Gaussian":
+        sigma = diameter_px / (2 * np.sqrt(2 * np.log(2)))
+        transfer = np.exp(-2 * np.pi**2 * sigma**2 * q**2)
+
+    elif profile == "Lorentzian":
+        # 2D radial Lorentzian-like profile:
+        # R(r) = 1 / (1 + (r/gamma)^2)
+        # Its FWHM is 2*gamma.
+        # Build a finite, normalized real-space kernel.
+        gamma = diameter_px / 2
+
+        yy = np.arange(ny) - ny // 2
+        xx = np.arange(nx) - nx // 2
+        X, Y = np.meshgrid(xx, yy)
+        r2 = X**2 + Y**2
+
+        kernel = 1 / (1 + r2 / gamma**2)
+        kernel /= kernel.sum()
+
+        transfer = np.fft.fft2(np.fft.ifftshift(kernel))
+
+    else:
+        raise ValueError(f"Unknown reference profile: {profile}")
+
+    image_fft = np.fft.fft2(image)
+
+    image_fft *= np.conj(transfer) / (
+        np.abs(transfer)**2 + regularization
+    )
+
+    return np.fft.ifft2(image_fft)
+
+
+
+
+def focusCDIdeconv(pos, neg, roi, mask=1, phase=0, prop_dist=0,
+             dx=0, dy=0, scale=(0,100),
+             experimental_setup={'ccd_dist':18e-2,
+                                 'energy':779.5,
+                                 'px_size':20e-6},
+             operation="-", max_prop_dist=10,
+             reference_diameter=5, regularization=1e-3,reference_profile="Circular",
+             deconvolution=False):
+
+    """
+    Interactive FTH focusing with optional circular-reference deconvolution.
+
+    Additional parameters:
+        reference_diameter: circular reference diameter in nm
+        regularization: regularization strength for inverse filtering
+        deconvolution: enable/disable reference deconvolution
+
+    Returns original four sliders followed by three new controls.
+    """
+
+    style = {'description_width': 'initial'}
+    fig, axs = plt.subplots(2, 2, figsize=(7,7))
+
+    def p(x, y, fx, fy, deconv, diameter, reg, profile):
+
+        image_p = fth.reconstructCDI(
+            fth.propagate(pos, x*1e-6, experimental_setup)
+            * np.exp(1j*y)
+        )
+        image_n = fth.reconstructCDI(
+            fth.propagate(neg, x*1e-6, experimental_setup)
+            * np.exp(1j*y)
+        )
+
+        if operation == "-":
+            image = image_p - image_n
+        elif operation == "+":
+            image = image_p + image_n
+        elif operation == "/":
+            image = (image_p/image_n) * np.exp(1j*y)
+        elif operation == "log":
+            image = (np.log(np.abs(image_p/image_n))
+                     * np.exp(1j*np.angle(image_p/image_n)))
+        elif operation == "**2/**2":
+            image = (np.abs(image_p)**2/np.abs(image_n)**2) * np.exp(1j*y)
+        elif operation == "-/+":
+            image = (image_p-image_n)/(image_p+image_n) * np.exp(1j*y)
+        elif operation == "load_both":
+            image, _ = fth.load_both(pos, neg, True)
+            image = fth.reconstructCDI(
+                fth.propagate(image, x*1e-6, experimental_setup)
+            ) * np.exp(1j*y)
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
+
+        image = np.nan_to_num(image, nan=0, posinf=0, neginf=0)
+
+        # NEW: circular reference deconvolution
+        if deconv:
+            image = deconvolve_reference(
+                image,
+                diameter_px=diameter,
+                regularization=reg,
+                profile=profile
+            )
+
+        simage = fth.sub_pixel_centering(image, fx, fy)[roi]
+        maskroi = (image*0 + mask)[roi]
+        simage_mask = simage[maskroi == 1]
+
+        # Update existing plots rather than creating new images
+        components = [
+            (np.abs(simage), np.abs(simage_mask), 'Abs'),
+            (np.angle(simage), np.angle(simage_mask), 'Phase'),
+            (np.real(simage), np.real(simage_mask), 'Real Part'),
+            (np.imag(simage), np.imag(simage_mask), 'Imaginary Part')
+        ]
+
+        for ax, (data, masked, title) in zip(axs.flat, components):
+            mi, ma = np.percentile(masked, scale)
+            ax.clear()
+            ax.imshow(data, cmap='gray', vmin=mi, vmax=ma)
+            ax.set_title(title)
+
+        fig.canvas.draw_idle()
+
+    layout = widgets.Layout(width='90%')
+
+    slider_prop = widgets.FloatSlider(
+        min=-max_prop_dist, max=max_prop_dist, step=0.01,
+        value=prop_dist, layout=layout,
+        description='propagation[um]', style=style
+    )
+    slider_phase = widgets.FloatSlider(
+        min=-np.pi, max=np.pi, step=0.001,
+        value=phase, layout=layout,
+        description='phase shift', style=style
+    )
+    slider_dx = widgets.FloatSlider(
+        min=-6, max=6, step=0.01, value=dx,
+        layout=layout, description='x shift', style=style
+    )
+    slider_dy = widgets.FloatSlider(
+        min=-6, max=6, step=0.01, value=dy,
+        layout=layout, description='y shift', style=style
+    )
+
+    # NEW: deconvolution controls
+    slider_deconv = widgets.Checkbox(
+        value=deconvolution,
+        description='Deconvolve circular reference',
+        style=style
+    )
+    dropdown_profile = widgets.Dropdown(
+        options=["Circular", "Gaussian", "Lorentzian"],
+        value=reference_profile,
+        description="Reference profile",
+        style=style,
+        layout=layout
+    )
+
+    slider_diameter = widgets.FloatSlider(
+        min=0.5, max=30, step=0.1,
+        value=reference_diameter,
+        layout=layout,
+        description='Reference diameter [px]', style=style
+    )
+    slider_reg = widgets.FloatLogSlider(
+        value=regularization,
+        base=10, min=-6, max=0, step=0.1,
+        layout=layout,
+        description='Regularization', style=style
+    )
+
+    widgets.interact(
+        p,
+        x=slider_prop,
+        y=slider_phase,
+        fx=slider_dx,
+        fy=slider_dy,
+        deconv=slider_deconv,
+        diameter=slider_diameter,
+        reg=slider_reg,
+        profile=dropdown_profile
+    )
+
+    return (slider_prop, slider_phase, slider_dx, slider_dy,
+            slider_deconv, slider_diameter, slider_reg,
+            dropdown_profile)
+
+
+
+def deconvolve_complex_reference(
+    image,
+    reference,
+    regularization=1e-3,
+    correlation=True
+):
+    """
+    Deconvolve a complex reference from an FTH reconstruction.
+
+    image : 2D complex ndarray
+        FTH cross-correlation image.
+    reference : 2D complex ndarray
+        Centered complex reference profile.
+    regularization : float
+        Regularization strength.
+    correlation : bool
+        True if image is object-reference cross-correlation.
+        False if image is object-reference convolution.
+    """
+
+    if image.shape != reference.shape:
+        raise ValueError("Image and reference must have the same shape")
+
+    transfer = np.fft.fft2(np.fft.ifftshift(reference))
+
+    # FTH reconstructs an object-reference cross-correlation.
+    # The reference enters conjugated in Fourier space.
+    if correlation:
+        transfer = np.conj(transfer)
+
+    image_fft = np.fft.fft2(image)
+
+    result_fft = image_fft * np.conj(transfer) / (
+        np.abs(transfer)**2 + regularization
+    )
+
+    return np.fft.ifft2(result_fft)
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import ipywidgets as widgets
+from IPython.display import display
+
+def focusCDI_complex(
+    pos, neg, roi, mask=1, phase=0, prop_dist=0,
+    dx=0, dy=0, scale=(0, 100),
+    experimental_setup={'ccd_dist':18e-2, 'energy':779.5, 'px_size':20e-6},
+    operation="-", max_prop_dist=10,
+    reference_diameter=5, reference_profile="Circular",
+    regularization=1e-3, deconvolution=False
+):
+    """
+    Interactive FTH focusing with complex reference-hole deconvolution.
+
+    Requires:
+        make_complex_reference()
+        deconvolve_complex_reference()
+
+    Returns a dictionary of interactive widgets.
+    """
+
+    style = {'description_width': 'initial'}
+    layout = widgets.Layout(width='95%')
+
+    fig, axs = plt.subplots(2, 2, figsize=(7, 7))
+
+    def p(x, y, fx, fy, deconv, diameter, reg, profile,
+          ellipticity, angle, phase_curvature, phase_astigmatism,
+          phase_gradient_x, phase_gradient_y,
+          amplitude_gradient_x, amplitude_gradient_y):
+
+        image_p = fth.reconstructCDI(
+            fth.propagate(pos, x*1e-6, experimental_setup)
+            * np.exp(1j*y)
+        )
+        image_n = fth.reconstructCDI(
+            fth.propagate(neg, x*1e-6, experimental_setup)
+            * np.exp(1j*y)
+        )
+
+        if operation == "-":
+            image = image_p - image_n
+        elif operation == "+":
+            image = image_p + image_n
+        elif operation == "/":
+            image = (image_p/image_n) * np.exp(1j*y)
+        elif operation == "log":
+            image = (np.log(np.abs(image_p/image_n))
+                     * np.exp(1j*np.angle(image_p/image_n)))
+        elif operation == "**2/**2":
+            image = (np.abs(image_p)**2/np.abs(image_n)**2) * np.exp(1j*y)
+        elif operation == "-/+":
+            image = (image_p-image_n)/(image_p+image_n) * np.exp(1j*y)
+        elif operation == "load_both":
+            image, _ = fth.load_both(pos, neg, True)
+            image = fth.reconstructCDI(
+                fth.propagate(image, x*1e-6, experimental_setup)
+            ) * np.exp(1j*y)
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
+
+        image = np.nan_to_num(image, nan=0, posinf=0, neginf=0)
+
+        if deconv:
+            reference = make_complex_reference(
+                image.shape,
+                diameter_px=diameter,
+                profile=profile,
+                ellipticity=ellipticity,
+                angle=angle,
+                phase_curvature=phase_curvature,
+                phase_astigmatism=phase_astigmatism,
+                phase_gradient_x=phase_gradient_x,
+                phase_gradient_y=phase_gradient_y,
+                amplitude_gradient_x=amplitude_gradient_x,
+                amplitude_gradient_y=amplitude_gradient_y
+            )
+
+            image = deconvolve_complex_reference(
+                image, reference, regularization=reg
+            )
+
+        simage = fth.sub_pixel_centering(image, fx, fy)[roi]
+        maskroi = (image*0 + mask)[roi]
+        simage_mask = simage[maskroi == 1]
+
+        components = [
+            (np.abs(simage), np.abs(simage_mask), "Abs"),
+            (np.angle(simage), np.angle(simage_mask), "Phase"),
+            (np.real(simage), np.real(simage_mask), "Real Part"),
+            (np.imag(simage), np.imag(simage_mask), "Imaginary Part")
+        ]
+
+        for ax, (data, masked, title) in zip(axs.flat, components):
+            mi, ma = np.percentile(masked, scale)
+            ax.clear()
+            ax.imshow(data, cmap="gray", vmin=mi, vmax=ma)
+            ax.set_title(title)
+
+        fig.canvas.draw_idle()
+
+    # Original focusing sliders
+    controls = {
+        'x': widgets.FloatSlider(
+            min=-max_prop_dist, max=max_prop_dist, step=0.01,
+            value=prop_dist, description='Propagation [µm]',
+            style=style, layout=layout, continuous_update=False
+        ),
+        'y': widgets.FloatSlider(
+            min=-np.pi, max=np.pi, step=0.001,
+            value=phase, description='Phase shift',
+            style=style, layout=layout, continuous_update=False
+        ),
+        'fx': widgets.FloatSlider(
+            min=-6, max=6, step=0.01,
+            value=dx, description='X shift',
+            style=style, layout=layout, continuous_update=False
+        ),
+        'fy': widgets.FloatSlider(
+            min=-6, max=6, step=0.01,
+            value=dy, description='Y shift',
+            style=style, layout=layout, continuous_update=False
+        ),
+
+        # Reference controls
+        'deconv': widgets.Checkbox(
+            value=deconvolution, description='Enable deconvolution'
+        ),
+        'profile': widgets.Dropdown(
+            options=['Circular', 'Gaussian', 'Lorentzian'],
+            value=reference_profile, description='Profile',
+            style=style, layout=layout
+        ),
+        'diameter': widgets.FloatSlider(
+            min=0.5, max=30, step=0.1,
+            value=reference_diameter, description='Diameter [px]',
+            style=style, layout=layout, continuous_update=False
+        ),
+        'reg': widgets.FloatLogSlider(
+            value=regularization, base=10, min=-6, max=0,
+            step=0.1, description='Regularization',
+            style=style, layout=layout, continuous_update=False
+        ),
+        'ellipticity': widgets.FloatSlider(
+            min=0.2, max=3, step=0.01, value=1,
+            description='Ellipticity', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'angle': widgets.FloatSlider(
+            min=-90, max=90, step=1, value=0,
+            description='Rotation [°]', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'phase_curvature': widgets.FloatSlider(
+            min=-np.pi, max=np.pi, step=0.01, value=0,
+            description='Phase curvature', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'phase_astigmatism': widgets.FloatSlider(
+            min=-np.pi, max=np.pi, step=0.01, value=0,
+            description='Phase astigmatism', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'phase_gradient_x': widgets.FloatSlider(
+            min=-np.pi, max=np.pi, step=0.01, value=0,
+            description='Phase gradient X', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'phase_gradient_y': widgets.FloatSlider(
+            min=-np.pi, max=np.pi, step=0.01, value=0,
+            description='Phase gradient Y', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'amplitude_gradient_x': widgets.FloatSlider(
+            min=-1, max=1, step=0.01, value=0,
+            description='Amplitude gradient X', style=style,
+            layout=layout, continuous_update=False
+        ),
+        'amplitude_gradient_y': widgets.FloatSlider(
+            min=-1, max=1, step=0.01, value=0,
+            description='Amplitude gradient Y', style=style,
+            layout=layout, continuous_update=False
+        )
+    }
+
+    # Group controls into tabs
+    focusing = widgets.VBox([
+        controls[k] for k in ['x', 'y', 'fx', 'fy']
+    ])
+
+    reference = widgets.VBox([
+        controls[k] for k in [
+            'deconv', 'profile', 'diameter', 'reg',
+            'ellipticity', 'angle',
+            'amplitude_gradient_x', 'amplitude_gradient_y'
+        ]
+    ])
+
+    phase_controls = widgets.VBox([
+        controls[k] for k in [
+            'phase_curvature', 'phase_astigmatism',
+            'phase_gradient_x', 'phase_gradient_y'
+        ]
+    ])
+
+    tabs = widgets.Tab(children=[focusing, reference, phase_controls])
+    tabs.set_title(0, 'Focusing')
+    tabs.set_title(1, 'Reference amplitude')
+    tabs.set_title(2, 'Reference phase')
+
+    output = widgets.interactive_output(p, controls)
+
+    display(tabs, output)
+
+    return controls
+
+import numpy as np
+from scipy.optimize import differential_evolution
+from scipy.ndimage import gaussian_filter
+
+def optimize_focusCDI(
+    pos, neg, roi,
+    experimental_setup,
+    operation="-",
+    profiles=("Circular", "Gaussian", "Lorentzian"),
+    prop_bounds=(-5, 5),
+    diameter_bounds=(1, 15),
+    reg_bounds=(-5, -1),
+    ellipticity_bounds=(0.7, 1.3),
+    angle_bounds=(-45, 45),
+    phase_bounds=(-1, 1),
+    maxiter=30,
+    popsize=8,
+    noise_weight=0.5,
+    complexity_weight=0.05,
+    component="real",
+    noise_mask=None,
+    seed=42,
+):
+    """
+    Optimize FTH focusing and complex reference deconvolution.
+
+    Parameters
+    ----------
+    pos, neg : 2D arrays
+        Input holograms.
+    roi : tuple of slices
+        Reconstruction ROI.
+    profiles : tuple
+        Reference profiles to compare.
+    reg_bounds : tuple
+        Bounds for log10(regularization).
+    component : str
+        'real', 'imag', or 'abs'.
+    noise_mask : 2D bool array, optional
+        Mask of uniform/background pixels inside the ROI.
+        If None, uses a global high-frequency noise proxy.
+
+    Returns
+    -------
+    dict
+        Best parameters, score, and reconstructed image.
+    """
+
+    bounds = [
+        prop_bounds,
+        diameter_bounds,
+        reg_bounds,
+        ellipticity_bounds,
+        angle_bounds,
+        phase_bounds,  # curvature
+        phase_bounds,  # astigmatism
+    ]
+
+    def reconstruct(params, profile, deconv=True):
+        prop, diameter, logreg, ellip, angle, curv, astig = params
+
+        image_p = fth.reconstructCDI(
+            fth.propagate(pos, prop * 1e-6, experimental_setup)
+        )
+        image_n = fth.reconstructCDI(
+            fth.propagate(neg, prop * 1e-6, experimental_setup)
+        )
+
+        if operation == "-":
+            image = image_p - image_n
+        elif operation == "+":
+            image = image_p + image_n
+        else:
+            raise ValueError(
+                "Optimization currently supports '-' and '+'"
+            )
+
+        image = np.nan_to_num(image)
+
+        if deconv:
+            reference = make_complex_reference(
+                image.shape,
+                diameter_px=diameter,
+                profile=profile,
+                ellipticity=ellip,
+                angle=angle,
+                phase_curvature=curv,
+                phase_astigmatism=astig
+            )
+
+            image = deconvolve_complex_reference(
+                image,
+                reference,
+                regularization=10**logreg
+            )
+
+        return image[roi]
+
+    def get_component(image):
+        if component == "real":
+            return np.real(image)
+        elif component == "imag":
+            return np.imag(image)
+        elif component == "abs":
+            return np.abs(image)
+        raise ValueError("component must be real, imag, or abs")
+
+    def sharpness_metric(image):
+        image = get_component(image)
+
+        # Robust normalization
+        scale = np.percentile(image, 99) - np.percentile(image, 1)
+        image = (image - np.median(image)) / max(scale, 1e-12)
+
+        # Slight smoothing suppresses single-pixel noise
+        smooth = gaussian_filter(image, sigma=0.7)
+
+        gy, gx = np.gradient(smooth)
+        gradient = np.sqrt(gx**2 + gy**2)
+
+        # Reward strong edges without relying on single outliers
+        sharpness = np.percentile(gradient, 95)
+
+        # High-frequency residual
+        residual = image - gaussian_filter(image, sigma=1.5)
+
+        if noise_mask is not None:
+            noise = np.std(residual[noise_mask])
+        else:
+            noise = np.median(np.abs(residual)) * 1.4826
+
+        return sharpness, noise
+
+    # Baseline for relative noise amplification
+    initial = [
+        0,
+        np.mean(diameter_bounds),
+        np.mean(reg_bounds),
+        1,
+        0,
+        0,
+        0
+    ]
+
+    baseline = reconstruct(initial, profiles[0], deconv=False)
+    _, baseline_noise = sharpness_metric(baseline)
+    baseline_noise = max(baseline_noise, 1e-12)
+
+    results = []
+
+    for profile in profiles:
+        print(f"Optimizing {profile} reference...")
+
+        def objective(params):
+            try:
+                image = reconstruct(params, profile)
+
+                sharpness, noise = sharpness_metric(image)
+
+                if not np.isfinite(sharpness + noise):
+                    return 1e10
+
+                # Penalize noise amplification relative to baseline
+                noise_ratio = noise / baseline_noise
+                noise_penalty = max(0, noise_ratio - 1)**2
+
+                # Weak prior against extreme phase aberrations
+                curv, astig = params[5], params[6]
+                complexity = curv**2 + astig**2
+
+                score = (
+                    sharpness
+                    - noise_weight * noise_penalty
+                    - complexity_weight * complexity
+                )
+
+                return -score
+
+            except (FloatingPointError, ValueError, RuntimeError):
+                return 1e10
+
+        result = differential_evolution(
+            objective,
+            bounds=bounds,
+            maxiter=maxiter,
+            popsize=popsize,
+            seed=seed,
+            polish=True,
+            updating="immediate"
+        )
+
+        results.append((result.fun, profile, result))
+
+        print(f"  Score: {-result.fun:.5f}")
+
+    best_score, best_profile, best_result = min(
+        results, key=lambda r: r[0]
+    )
+
+    p = best_result.x
+
+    best_parameters = {
+        "propagation": p[0],
+        "diameter": p[1],
+        "regularization": 10**p[2],
+        "ellipticity": p[3],
+        "angle": p[4],
+        "phase_curvature": p[5],
+        "phase_astigmatism": p[6],
+        "profile": best_profile
+    }
+
+    best_image = reconstruct(p, best_profile)
+
+    return {
+        "parameters": best_parameters,
+        "image": best_image,
+        "score": -best_score,
+        "results": results,
+        "success": best_result.success
+    }
 
 def focusCDI_2(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,100), experimental_setup={'ccd_dist':18e-2, 'energy':779.5, 'px_size':20e-6}, operation="-", max_prop_dist=10):
     '''
