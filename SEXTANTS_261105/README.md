@@ -11,12 +11,14 @@ pip install -r requirements.txt
 jupyter lab
 ```
 
-Run notebooks from the `SEXTANTS_261105/` directory. Experimental data and generated files are excluded from Git; provide your own data locally.
+Run notebooks from the `SEXTANTS_261105/` directory.
 
 ## MCP workflow
 
-Place the MCP text images in `raw/MCP/` relative to this directory. You can also
-symlink the original project's `raw/` directory here.
+Place the MCP text files under `raw/MCP/` or symlink your existing `raw/`
+directory. Copy your painted scan 09 mask to
+`output/mcp/beamstop_mask_scan09.png` for zone comparison, or create it using
+the mask template notebook.
 
 - [Detector profiles](mcp_detector_analysis.ipynb) calculates radial and azimuthal averages.
 - [Radial profiles](mcp_images_radial.ipynb) processes MCP images by filename.

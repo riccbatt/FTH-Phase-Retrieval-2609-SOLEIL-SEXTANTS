@@ -36,12 +36,13 @@ def load_detector_masks(
     image_id: int,
     expected_shape: tuple[int, int],
     *,
-    detector_file: str | Path | None = "mask_detector.png",
+    detector_file: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load detector and beamstop PNGs and return their binary union.
 
     A value of one always means unusable. The expected filenames are
-    ``mask_beamstop_<image_id>.png``. Pass detector_file=None to omit the fixed detector mask.
+    ``mask_beamstop_<image_id>.png``. The fixed detector mask is disabled
+    unless detector_file is explicitly supplied.
     """
     folder = Path(folder)
     detector_path = None if detector_file is None else Path(detector_file)

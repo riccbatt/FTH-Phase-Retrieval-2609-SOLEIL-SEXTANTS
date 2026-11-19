@@ -14,26 +14,16 @@ Each observation ``a`` is described by four pieces of metadata:
 
 Writing ``c_m = log(C_m)``, the physical projection uses log-object space,
 
-    L_a(r) = c_m(a)(r) + t(r)[q_c(E_a) + p_a q_m(E_a) mz_s(a)(r)],
+    L_a(r) = c_m(a)(r) + q_c(E_a) + p_a q_m(E_a) mz_s(a)(r),
 
-Here t(r) is a dimensionless relative thickness and the fitted q values are
-log-transmission coefficients, NOT refractive indices. With physical thickness
-d(r)=d0*t(r) and transmission exp(-1j*k*(n-1)*d), define
-q_c(E)=-1j*k(E)*d0*(n_c(E)-1), q_m(E)=-1j*k(E)*d0*n_m(E),
-where k(E)=2*pi/lambda(E). This absorbs k*d0 exactly once. Dropping the vacuum
-reference replaces n_c-1 by n_c and moves the vacuum phase into the common field.
-
-with ``-1 <= mz <= 1``. By default ``t=1``; optional material inputs set known
-vacuum holes to ``t=0``, supply relative thickness, or fit a shared nonnegative
-relative thickness map. The scalar spectral responses absorb the reference
-thickness and wave number. Optional saturated states fix an entire ``mz`` map
-to +1 or -1 within material. Absolute thickness and refractive index remain
-coupled unless external information fixes their scale.
+with ``q = -i k t n`` and ``-1 <= mz <= 1``. Optional saturated states fix an
+entire ``mz`` map to +1 or -1. The independently measurable material
+quantities are the dimensionless products ``k t delta`` and ``k t beta``;
+the library does not claim to separate thickness from refractive index.
 
 The module contains its own phase-retrieval kernel, schedules, multi-energy
-projectors, ordered observation stages, and single/multimode kernels.
-The historical unified module is a compatibility alias of this module.
-Selecting ``svd`` or ``rank1_spectral`` for a
+projectors, and metadata-aware physical projectors. It does not import any
+other phase-retrieval library. Selecting ``svd`` or ``rank1_spectral`` for a
 pure energy scan remains numerically equivalent to the corresponding
 multi-energy implementation, while ``physical_factorized`` handles mixed
 state/polarization/energy/illumination datasets.
@@ -46,17 +36,11 @@ from functools import partial
 import os
 import time
 import numpy as np
-try:
-    from . import phase_retrieval_geometry as geometry
-except ImportError:
-    import phase_retrieval_geometry as geometry
-
 from numpy.typing import ArrayLike
 
 import matplotlib.pyplot as plt
 
 from scipy import stats
-from scipy.ndimage import affine_transform
 
 try:
     from . import kramers_kronig as kk
@@ -99,9 +83,9 @@ else:
     import numpy as xp
     import scipy.fft as fft
 
-    # Respect scipy.fft.set_workers in each observation worker.
-    fft2 = fft.fft2
-    ifft2 = fft.ifft2
+    # Use all available CPU workers for FFT operations.
+    fft2 = partial(fft.fft2, workers=os.cpu_count())
+    ifft2 = partial(fft.ifft2, workers=os.cpu_count())
 
 
 def to_numpy(array, xp):
@@ -118,8 +102,6 @@ def to_numpy(array, xp):
 # ############################################################
 
 
-
-# Ordered observation stages and modal kernel share the universal implementation.
 def default_phase_retrieval_recipe():
     """
     Return the default flat phase-retrieval recipe.
@@ -154,68 +136,23 @@ def default_phase_retrieval_recipe():
         "Fourier_last": [True, True, True, True, True, True],
         "output": [False, False, False, False, True, True],
 
-        # Number of incoherent reconstruction modes. Nmodes=1 reproduces
-        # the standard single-mode phase retrieval. Nmodes>1 uses a modal
-        # intensity sum for the Fourier constraint.
-        "Nmodes": 1,
-        # Legacy harmonic-mode support expansion factors. For a 2-D support,
-        # modes=[1, 2] uses the original and a 2x spatially enlarged support.
-        # A supplied 3-D modal support bypasses automatic enlargement.
-        "modes": None,
-        "recenter_modal_supports": True,
-        "mode_support_center": "image",
-        # Remove this many pixels from every edge of returned spatial arrays.
-        "crop": 0,
-        # Crop detector intensities first, then bin; center crop object support.
-        "binning": 1,
-        # Optional [row_start, row_stop, column_start, column_stop] in input coordinates.
-        "roi": None,
-        "normalize_startimage_between_holograms": True,
-        # Retained for compatibility with saved recipes; only False is allowed.
-        "subtract_startimage_fit_intercept": False,
-        "return_format": "auto",
-
         "hologram_intensity_cutoff_vmin": -1,
-        # Explicit detector-intensity offset subtracted before clipping/sqrt.
-        # Use one scalar for all holograms or a {label: offset} mapping.
-        "hologram_offset": 0.0,
         "Startimage": [None, "pos", "pos", "pos", "pos", "pos"],
         "Startgamma": [None,  None,  None,  None, "pos", "pos"],
     }
     return recipe
 
-def _default_output_flags(labels):
-    """Return True for the last recipe step of each requested hologram label."""
-    flags = [False] * len(labels)
-    for label in dict.fromkeys(labels):
-        for index in range(len(labels) - 1, -1, -1):
-            if labels[index] == label:
+
+def _default_output_flags(helicity):
+    """Return True for the last recipe step of each helicity."""
+    flags = [False] * len(helicity)
+    for h in ("pos", "neg"):
+        for index in range(len(helicity) - 1, -1, -1):
+            if helicity[index] == h:
                 flags[index] = True
                 break
     return flags
 
-def _broadcast_recipe_scalars(recipe):
-    """Expand scalar per-step settings to the number of algorithm stages."""
-    stage_count = len(recipe["algorithm_list"])
-    scalar_keys = (
-        "beta_zero",
-        "beta_mode",
-        "alpha_zero",
-        "alpha_mode",
-        "RL_its",
-        "RL_freqs",
-        "TV_freqs",
-        "plot_every",
-        "average_img",
-        "Fourier_last",
-        "output",
-    )
-    for key in scalar_keys:
-        value = recipe[key]
-        if isinstance(value, tuple):
-            recipe[key] = list(value)
-        elif not isinstance(value, list):
-            recipe[key] = [value] * stage_count
 
 def _resolve_start_field(start_spec, default_field, latest, name):
     """
@@ -224,12 +161,8 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     start_spec can be:
       - None: use the default support-based initialization
       - np.ndarray: use this array directly
-      - str: use latest[str]
-
-    Context:
-    Legacy stage-driver handoff: resolve an explicit start or a previously reconstructed
-    labeled field. This is separate from the universal driver's independent/reference warmup
-    policy.
+      - "pos": use latest["pos"]
+      - "neg": use latest["neg"]
     """
 
     if start_spec is None:
@@ -238,11 +171,7 @@ def _resolve_start_field(start_spec, default_field, latest, name):
     if isinstance(start_spec, np.ndarray):
         return start_spec.copy()
 
-    if isinstance(start_spec, str):
-        if start_spec not in latest:
-            raise ValueError(
-                f"{name} requested unknown hologram label {start_spec!r}."
-            )
+    if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
         if latest[start_spec] is None:
             raise ValueError(
                 f"{name} requested latest '{start_spec}', "
@@ -252,282 +181,9 @@ def _resolve_start_field(start_spec, default_field, latest, name):
 
     raise ValueError(
         f"Invalid {name} entry: {start_spec!r}. "
-        "Allowed values are None, np.ndarray, or a hologram label string."
+        "Allowed values are None, np.ndarray, 'pos', or 'neg'."
     )
 
-def _as_modes(arr, Nmodes, shape_2d, name, dtype=None):
-    """
-    Convert a 2D or 3D array into modal shape ``(Nmodes, nx, ny)``.
-
-    Accepted inputs are:
-      - ``(nx, ny)``: copied into all modes
-      - ``(1, nx, ny)``: copied into all modes
-      - ``(Nmodes, nx, ny)``: used directly
-
-    Context:
-    Internal shape contract: kernels work with an explicit leading mode axis even when the
-    public single-mode API supplies a 2D image.
-    """
-    arr = np.asarray(arr)
-
-    if arr.ndim == 2:
-        if arr.shape != shape_2d:
-            raise ValueError(f"{name} must have shape {shape_2d}.")
-        out = np.repeat(arr[None, :, :], Nmodes, axis=0)
-
-    elif arr.ndim == 3:
-        if arr.shape[1:] != shape_2d:
-            raise ValueError(
-                f"{name} has incompatible spatial shape {arr.shape[1:]}; "
-                f"expected {shape_2d}."
-            )
-        if arr.shape[0] == Nmodes:
-            out = arr.copy()
-        elif arr.shape[0] == 1:
-            out = np.repeat(arr, Nmodes, axis=0)
-        else:
-            raise ValueError(
-                f"{name} first dimension must be 1 or Nmodes={Nmodes}."
-            )
-    else:
-        raise ValueError(f"{name} must be 2D or 3D.")
-
-    if dtype is not None:
-        out = out.astype(dtype, copy=False)
-
-    return out
-
-def _expand_support_about_center(support, factor):
-    """Enlarge a 2-D support spatially about the array center."""
-    support = np.asarray(support)
-    if support.ndim != 2:
-        raise ValueError("support must be 2D")
-    if isinstance(factor, bool) or not isinstance(factor, (int, float, np.number)):
-        raise TypeError("mode support expansion factors must be numeric")
-    factor = float(factor)
-    if not np.isfinite(factor) or factor <= 0:
-        raise ValueError("mode support expansion factors must be finite and > 0")
-    if factor == 1:
-        return support.copy()
-
-    inverse_scale = np.eye(2) / factor
-    center = (np.asarray(support.shape, dtype=float) - 1) / 2
-    offset = center - inverse_scale @ center
-    expanded = affine_transform(
-        support.astype(float),
-        inverse_scale,
-        offset=offset,
-        output_shape=support.shape,
-        order=0,
-        mode="constant",
-        cval=0,
-        prefilter=False,
-    )
-    if np.issubdtype(support.dtype, np.bool_) or np.array_equal(
-        support, support.astype(bool)
-    ):
-        return (expanded > 0.5).astype(support.dtype)
-    return expanded.astype(support.dtype, copy=False)
-
-def _mode_supports(supportmask, mode_factors, shape_2d):
-    """
-    Build modal supports from legacy spatial expansion factors.
-
-    Context:
-    Build the object support allowed for each incoherent mode from the configured support-
-    size factors. This controls geometry, not whether a mode is magnetic.
-    """
-    supportmask = np.asarray(supportmask)
-    nmodes = len(mode_factors)
-    if supportmask.ndim == 2:
-        return np.stack(
-            [_expand_support_about_center(supportmask, factor) for factor in mode_factors]
-        )
-    return _as_modes(
-        supportmask,
-        nmodes,
-        shape_2d,
-        "supportmask",
-        dtype=supportmask.dtype,
-    )
-
-def _support_on_output_grid(supportmask, output_shape):
-    """Map object support to the grid implied by a cropped Fourier field."""
-    support = np.asarray(supportmask)
-    source_shape = np.asarray(support.shape[-2:])
-    target_shape = np.asarray(output_shape)
-    if np.array_equal(source_shape, target_shape):
-        return support.copy()
-    scale = source_shape / target_shape
-    offset = (source_shape - 1) / 2 - scale * (target_shape - 1) / 2
-    mapped = [
-        affine_transform(mode.astype(float), np.diag(scale), offset=offset,
-                         output_shape=tuple(target_shape), order=0,
-                         mode="constant", cval=0, prefilter=False)
-        for mode in _as_modes(support, support.shape[0] if support.ndim == 3 else 1,
-                              tuple(source_shape), "supportmask", dtype=support.dtype)
-    ]
-    result = (np.stack(mapped) != 0).astype(np.uint8)
-    return result if support.ndim == 3 else result[0]
-
-def _maybe_squeeze_modes(arr, Nmodes):
-    """Return 2D output for ``Nmodes == 1`` and 3D output otherwise."""
-    if arr is None:
-        return None
-    if Nmodes == 1 and np.asarray(arr).ndim == 3:
-        return arr[0]
-    return arr
-
-def _modal_intensity_numpy(arr):
-    """Return the total intensity of a 2D single-mode or 3D multimode field."""
-    arr = np.asarray(arr)
-    if arr.ndim == 2:
-        return np.abs(arr) ** 2
-    if arr.ndim == 3:
-        return np.sum(np.abs(arr) ** 2, axis=0)
-    raise ValueError("Expected a 2D or 3D reconstruction array.")
-
-def _modal_amplitude_numpy(arr):
-    """Return sqrt(total modal intensity) for a 2D or 3D complex field."""
-    return np.sqrt(_modal_intensity_numpy(arr))
-
-def _normalize_startimage_amplitude(startimage, measured_amplitude, start_amplitude):
-    """Scale a start field by a positive, through-origin amplitude fit."""
-    x = np.asarray(measured_amplitude).ravel()
-    y = np.asarray(start_amplitude).ravel()
-    if x.size == 0:
-        return startimage
-    denominator = np.dot(x, x)
-    if denominator <= 0:
-        return startimage
-    scale = np.dot(x, y) / denominator
-    if not np.isfinite(scale) or scale <= 1e-12:
-        return startimage
-    return np.asarray(startimage) / scale
-
-def _modal_convolved_intensities(current_guess, current_gamma, nmodes):
-    """
-    Return one coherent or partially coherent intensity per mode.
-
-    Context:
-    Kernel-level forward model in the kernel's FFT ordering. Preserve one intensity plane
-    per mode until the detector constraint sums them.
-    """
-    convolved = xp.zeros_like(current_guess, dtype=xp.complex128)
-    for mode_index in range(nmodes):
-        intensity = xp.abs(current_guess[mode_index]) ** 2
-        if current_gamma is None:
-            convolved[mode_index] = intensity
-        else:
-            convolved[mode_index] = ifft2(
-                fft2(intensity) * fft2(current_gamma[mode_index])
-            )
-    return convolved
-
-def _apply_modal_fourier_constraint(
-    current_guess,
-    current_convolved,
-    measured_amplitude,
-    observed,
-    invalid,
-):
-    """
-    Jointly rescale all modes to match the measured total intensity.
-
-    Context:
-    One detector measurement constrains the sum of incoherent mode powers. Apply the same
-    amplitude factor to all modes; invalid pixels receive factor one and remain free.
-    """
-    total_intensity = xp.sum(current_convolved, axis=0)
-    modal_amplitude = xp.sqrt(total_intensity)
-    modal_amplitude = xp.where(
-        xp.abs(modal_amplitude) > 1e-30,
-        modal_amplitude,
-        1e-30,
-    )
-    factor = measured_amplitude / modal_amplitude
-    return current_guess * (
-        observed[None, :, :] * factor[None, :, :]
-        + invalid[None, :, :]
-    )
-
-def _apply_modal_fourier_constraint_numpy(field_modes, measured_amplitude, bsmask):
-    """NumPy version of the summed-intensity modal Fourier constraint."""
-    observed = bsmask == 0
-    invalid = ~observed
-    total_amplitude = _modal_amplitude_numpy(field_modes)
-    total_amplitude = np.where(total_amplitude > 1e-30, total_amplitude, 1e-30)
-    factor = measured_amplitude / total_amplitude
-    return field_modes * (
-        observed[None, :, :] * factor[None, :, :]
-        + invalid[None, :, :]
-    )
-
-def _refine_modes_gradient(
-    phase,
-    measured_amplitude,
-    supportmask,
-    bsmask,
-    *,
-    nmodes,
-    image_shape,
-    Nit,
-    learning_rate,
-    support_weight,
-    Fourier_last,
-):
-    """Refine every coherent mode and preserve summed-amplitude convention."""
-    phase_modes = _as_modes(
-        phase,
-        nmodes,
-        image_shape,
-        "Phase",
-        dtype=np.complex128,
-    )
-    support_modes = _as_modes(
-        supportmask,
-        nmodes,
-        image_shape,
-        "supportmask",
-        dtype=np.asarray(supportmask).dtype,
-    )
-    refined_modes = np.empty_like(phase_modes, dtype=np.complex128)
-    diffraction_losses = []
-    support_losses = []
-    total_losses = []
-    modal_target = measured_amplitude / np.sqrt(max(nmodes, 1))
-
-    for mode_index in range(nmodes):
-        result = gradient.refine_field_gradient(
-            phase_modes[mode_index],
-            modal_target,
-            supportmask=support_modes[mode_index],
-            mask_pixel=bsmask,
-            n_steps=Nit,
-            learning_rate=learning_rate,
-            support_weight=support_weight,
-            loss_mode="amplitude",
-            support_projection=False,
-            fourier_projection=False,
-        )
-        refined_modes[mode_index] = result.fields
-        diffraction_losses.append(result.diffraction_loss)
-        support_losses.append(result.support_loss)
-        total_losses.append(result.loss)
-
-    if Fourier_last:
-        refined_modes = _apply_modal_fourier_constraint_numpy(
-            refined_modes,
-            measured_amplitude,
-            bsmask,
-        )
-
-    return (
-        _maybe_squeeze_modes(refined_modes, nmodes),
-        np.mean(np.stack(diffraction_losses), axis=0),
-        np.mean(np.stack(support_losses), axis=0),
-        np.mean(np.stack(total_losses), axis=0),
-    )
 
 def _verify_valid_phase_retrieval_recipe(recipe):
     """
@@ -598,8 +254,13 @@ def _verify_valid_phase_retrieval_recipe(recipe):
             f"Allowed algorithms are: {sorted(allowed_algorithms)}"
         )
 
-    if not all(isinstance(h, str) for h in recipe["helicity"]):
-        raise ValueError("All helicity entries must be hologram label strings.")
+    invalid_helicity = [h for h in recipe["helicity"] if h not in {"pos", "neg"}]
+
+    if invalid_helicity:
+        raise ValueError(
+            f"Invalid helicity value(s): {invalid_helicity}. "
+            "Allowed values are 'pos' and 'neg'."
+        )
 
     if not all(isinstance(n, int) and n > 0 for n in recipe["number_iterations"]):
         raise ValueError("All number_iterations values must be positive integers.")
@@ -609,10 +270,10 @@ def _verify_valid_phase_retrieval_recipe(recipe):
 
     if not all(f > 0 for f in recipe["RL_freqs"]):
         raise ValueError("All RL_freqs values must be > 0.")
-
+    
     if not all(f > 0 for f in recipe["TV_freqs"]):
         raise ValueError("All TV_freqs values must be > 0.")
-
+    
     if not all(n > 0 for n in recipe["plot_every"]):
         raise ValueError("All plot_every values must be > 0.")
 
@@ -625,19 +286,6 @@ def _verify_valid_phase_retrieval_recipe(recipe):
     if not all(isinstance(flag, bool) for flag in recipe["output"]):
         raise ValueError("All output values must be bool.")
 
-    if not isinstance(recipe["normalize_startimage_between_holograms"], bool):
-        raise ValueError("normalize_startimage_between_holograms must be bool.")
-    if not isinstance(recipe["recenter_modal_supports"], bool):
-        raise ValueError("recenter_modal_supports must be bool.")
-    if recipe["mode_support_center"] not in {"image", "components"}:
-        raise ValueError("mode_support_center must be 'image' or 'components'.")
-
-    if recipe["subtract_startimage_fit_intercept"] is not False:
-        raise ValueError("Startimage normalization only supports scaling; set subtract_startimage_fit_intercept=False.")
-
-    if recipe["return_format"] not in {"auto", "legacy", "dict"}:
-        raise ValueError("return_format must be 'auto', 'legacy', or 'dict'.")
-
     for key in ["Startimage", "Startgamma"]:
         if key not in recipe:
             raise ValueError(f"Missing recipe key: {key}")
@@ -649,11 +297,11 @@ def _verify_valid_phase_retrieval_recipe(recipe):
             raise ValueError(
                 f"Recipe key '{key}' must have same length as algorithm_list."
             )
-
-def _scale_phase_between_holograms(
+        
+def _scale_phase_between_helicities(
     phase,
-    source_label,
-    target_label,
+    source_helicity,
+    target_helicity,
     intensity_data,
     bsmasks,
     use_offset=False,
@@ -662,8 +310,8 @@ def _scale_phase_between_holograms(
     verbose=False,
 ):
     """
-    Rescale a reconstruction when it is reused as the starting guess for a
-    different hologram label.
+    Rescale a reconstruction when it is reused as the starting guess for the
+    opposite helicity.
 
     The scale factor is estimated from a linear fit of the measured hologram
     intensities, while excluding invalid pixels from both helicities using
@@ -673,8 +321,8 @@ def _scale_phase_between_holograms(
     ----------
     phase : np.ndarray
         Previous reconstructed complex Fourier-domain field.
-    source_label, target_label : str
-        Label of the previous reconstruction and the target step.
+    source_helicity, target_helicity : {"pos", "neg"}
+        Helicity of the previous reconstruction and the target step.
     intensity_data : dict
         {"pos": pos_input, "neg": neg_input}
     bsmasks : dict
@@ -694,18 +342,18 @@ def _scale_phase_between_holograms(
         Rescaled complex reconstruction.
     """
 
-    if phase is None or source_label is None or source_label == target_label:
+    if phase is None or source_helicity is None or source_helicity == target_helicity:
         return phase
 
-    if source_label not in intensity_data or target_label not in intensity_data:
+    if source_helicity not in {"pos", "neg"} or target_helicity not in {"pos", "neg"}:
         raise ValueError(
-            f"Invalid hologram conversion: {source_label!r} -> {target_label!r}"
+            f"Invalid helicity conversion: {source_helicity!r} -> {target_helicity!r}"
         )
 
-    source_intensity = intensity_data[source_label].copy()
-    target_intensity = intensity_data[target_label].copy()
+    source_intensity = intensity_data[source_helicity].copy()
+    target_intensity = intensity_data[target_helicity].copy()
 
-    valid = (bsmasks[source_label] == 0) & (bsmasks[target_label] == 0)
+    valid = (bsmasks[source_helicity] == 0) & (bsmasks[target_helicity] == 0)
 
     if not isinstance(crop, int) or crop < 0:
         raise ValueError("crop must be a non-negative integer.")
@@ -771,121 +419,46 @@ def _scale_phase_between_holograms(
 
     return scaled_phase
 
-def _normalize_phase_retrieval_inputs(
-    holograms,
-    neg=None,
-    mask_pixel=None,
-    supportmask=None,
-    phase_retrieval_recipe=None,
-):
-    """Accept both legacy positional inputs and the new hologram dictionary."""
-    legacy_call = not isinstance(holograms, dict)
-
-    if legacy_call:
-        if neg is None or mask_pixel is None or supportmask is None:
-            raise TypeError(
-                "Legacy calls require pos, neg, mask_pixel, supportmask."
-            )
-        return (
-            {"pos": holograms, "neg": neg},
-            mask_pixel,
-            supportmask,
-            phase_retrieval_recipe,
-            True,
-        )
-
-    if not holograms:
-        raise ValueError("holograms dictionary must not be empty.")
-
-    if phase_retrieval_recipe is None and isinstance(supportmask, dict):
-        phase_retrieval_recipe = supportmask
-        supportmask = mask_pixel
-        mask_pixel = neg
-    elif supportmask is None:
-        supportmask = mask_pixel
-        mask_pixel = neg
-
-    if mask_pixel is None or supportmask is None:
-        raise TypeError(
-            "Dictionary calls require holograms, mask_pixel, supportmask."
-        )
-
-    return holograms, mask_pixel, supportmask, phase_retrieval_recipe, False
-
-def _legacy_tuple_from_result(result):
-    """Return the historical ``pos/neg`` tuple from a structured result."""
-    fc = result["full_coherence"]
-    pc = result["partial_coherence"]
-    bsmasks = result["bsmasks"]
-    gamma = result["gamma"]
-    return (
-        fc.get("pos"),
-        fc.get("neg"),
-        pc.get("pos"),
-        pc.get("neg"),
-        bsmasks.get("pos"),
-        bsmasks.get("neg"),
-        gamma.get("pos"),
-        gamma.get("neg"),
-        result["error"],
-    )
 
 def phase_retrieval_algorithm(
-    holograms: ArrayLike,
-    neg: ArrayLike = None,
-    mask_pixel: ArrayLike = None,
-    supportmask: ArrayLike = None,
+    pos: ArrayLike,
+    neg: ArrayLike,
+    mask_pixel: ArrayLike,
+    supportmask: ArrayLike,
     phase_retrieval_recipe=None,
 ):
     """
-    Run a recipe-driven phase retrieval for any number of hologram labels.
+    Run a recipe-driven two-helicity phase retrieval.
 
-    Legacy use is still supported::
+    The recipe is a flat sequence of steps. Each step selects an algorithm,
+    iteration count, helicity (``"pos"`` or ``"neg"``), beta schedule, optional TV
+    schedule through alpha, and optional Richardson-Lucy parameters.
 
-        phase_retrieval_algorithm(pos, neg, mask, support, recipe)
+    The starting phase of each step is controlled by recipe["Startimage"].
+    Startimage[i] may be:
+        None        -> use the default support-based start image
+        "pos"       -> use the latest positive-helicity reconstruction
+        "neg"       -> use the latest negative-helicity reconstruction
+        np.ndarray  -> use the supplied array directly
 
-    New generalized use passes a dictionary::
+    When a reconstruction from a different helicity is reused, it is rescaled
+    using a masked correlation-based linear normalization.
 
-        phase_retrieval_algorithm(
-            {"pos": pos, "neg": neg, "LH": LH, "LV": LV},
-            mask,
-            support,
-            recipe,
-        )
 
-    ``recipe["helicity"]`` lists the dictionary keys to reconstruct in order.
-    ``recipe["modes"]`` contains legacy spatial support-expansion factors. With
-    a 2-D support, ``[1, 2]`` assigns the original support to the first mode
-    and a 2x enlarged support to the second. An explicit 3-D support is used
-    directly. ``recipe["Startimage"]`` and ``recipe["Startgamma"]`` may refer to any
-    previous key. If ``normalize_startimage_between_holograms`` is true, a
-    masked linear intensity scaling is applied when a start image is reused
-    across different labels. Set it to false to copy the complex field exactly.
-
-    Dictionary results include ``supportmask_used``, the exact support passed
-    to each kernel stage after input cropping, binning, and mode expansion.
-    ``supportmask`` and ``mask_pixel`` use the same grid as the returned field.
-    ``recipe['roi']`` is in the supplied support's coordinates and is shifted
-    into the centered support crop of the final detector grid.
-
-    Context:
-    Ordered-stage entry point for simpler notebooks. Mixed-state physical fitting
-    and shared-gamma round scheduling use universal_phase_retrieval_algorithm.
+    Returns
+    -------
+    retrieved_p, retrieved_n : np.ndarray or None
+        Final reconstruction for positive/negative helicity, if requested.
+    bsmask_p, bsmask_n : np.ndarray
+        Beamstop/floating-pixel masks used for full-coherence steps.
+    gamma_p, gamma_n : np.ndarray
+        Latest mutual-coherence estimates for each helicity. If no RL step was
+        performed for a helicity, this is the initial gamma estimate.
+    error : dict
+        Step-wise error information stored under ``error["steps"]``.
     """
-    (
-        holograms,
-        mask_pixel,
-        supportmask,
-        phase_retrieval_recipe,
-        legacy_call,
-    ) = _normalize_phase_retrieval_inputs(
-        holograms,
-        neg=neg,
-        mask_pixel=mask_pixel,
-        supportmask=supportmask,
-        phase_retrieval_recipe=phase_retrieval_recipe,
-    )
 
+    # initializing the phase retrieval recipe
     recipe = default_phase_retrieval_recipe()
     user_supplied_output = False
     if phase_retrieval_recipe is not None:
@@ -901,302 +474,182 @@ def phase_retrieval_algorithm(
         recipe.update(phase_retrieval_recipe)
     if not user_supplied_output:
         recipe["output"] = _default_output_flags(recipe["helicity"])
-    _broadcast_recipe_scalars(recipe)
     _verify_valid_phase_retrieval_recipe(recipe)
 
-    labels = list(holograms.keys())
-    requested = list(dict.fromkeys(recipe["helicity"]))
-    missing = [label for label in requested if label not in holograms]
-    if missing:
-        raise ValueError(
-            f"Recipe requests hologram label(s) absent from input: {missing}"
-        )
-
-    mode_labels = recipe["modes"]
-    if mode_labels is not None:
-        if not isinstance(mode_labels, (list, tuple)) or not mode_labels:
-            raise ValueError("recipe['modes'] must be a non-empty list or tuple.")
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float, np.number))
-            or not np.isfinite(value)
-            or value <= 0
-            for value in mode_labels
-        ):
-            raise ValueError("recipe['modes'] entries must be finite numbers > 0.")
-        Nmodes = len(mode_labels)
-    else:
-        Nmodes = recipe["Nmodes"]
-        mode_labels = [1] * int(Nmodes)
-    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
-        raise ValueError("recipe['Nmodes'] must be a positive integer.")
-    Nmodes = int(Nmodes)
-    if Nmodes <= 0:
-        raise ValueError("recipe['Nmodes'] must be a positive integer.")
-    crop = recipe["crop"]
-    if isinstance(crop, bool) or not isinstance(crop, (int, np.integer)):
-        raise ValueError("recipe['crop'] must be a non-negative integer.")
-    crop = int(crop)
-    if crop < 0:
-        raise ValueError("recipe['crop'] must be a non-negative integer.")
-    binning = recipe["binning"]
-    if isinstance(binning, bool) or not isinstance(binning, (int, np.integer)) or binning < 1:
-        raise ValueError("recipe['binning'] must be a positive integer (1 disables binning).")
-    binning = int(binning)
-
-    inputs = {label: np.asarray(value).copy() for label, value in holograms.items()}
-    first_shape = next(iter(inputs.values())).shape
-    if len(first_shape) != 2:
-        raise ValueError("All holograms must be 2D measured intensities.")
-    for label, value in inputs.items():
-        if value.ndim != 2:
-            raise ValueError(f"Hologram {label!r} must be 2D.")
-        if value.shape != first_shape:
-            raise ValueError("All holograms must have the same shape.")
-
+    pos_input = np.asarray(pos).copy()
+    neg_input = np.asarray(neg).copy()
     mask_pixel = np.asarray(mask_pixel)
     supportmask = np.asarray(supportmask)
-    shape_2d = first_shape
-    if mask_pixel.shape != shape_2d:
-        raise ValueError("mask_pixel must have the same shape as the holograms.")
-    if supportmask.ndim == 2:
-        if supportmask.shape != shape_2d:
-            raise ValueError("2D supportmask must match the hologram shape.")
-    elif supportmask.ndim == 3:
-        if supportmask.shape[1:] != shape_2d:
-            raise ValueError("3D supportmask must have shape (Nmodes, nx, ny).")
-        if supportmask.shape[0] not in {1, Nmodes}:
-            raise ValueError("supportmask first axis must be 1 or Nmodes.")
-    else:
-        raise ValueError("supportmask must be 2D or 3D.")
 
-    source_shape = shape_2d
-    if 2 * crop >= min(source_shape):
-        raise ValueError("recipe['crop'] removes the complete detector image.")
-    cropped_shape = tuple(n - 2 * crop for n in source_shape)
-    target_shape = tuple(n // binning for n in cropped_shape)
-    if min(target_shape) < 1:
-        raise ValueError("recipe['binning'] is larger than the cropped hologram.")
-    trimmed_shape = tuple(n * binning for n in target_shape)
-    trim_origin = tuple((n - t) // 2 for n, t in zip(cropped_shape, trimmed_shape))
-    detector_origin = tuple(crop + o for o in trim_origin)
-    detector_slice = tuple(slice(o, o + t) for o, t in zip(detector_origin, trimmed_shape))
-    inputs = {
-        label: value[detector_slice].reshape(target_shape[0], binning,
-                                              target_shape[1], binning).sum(axis=(1, 3))
-        for label, value in inputs.items()
-    }
-    # One excluded source pixel excludes its entire detector bin.
-    mask_pixel = np.any(
-        mask_pixel[detector_slice].reshape(target_shape[0], binning,
-                                            target_shape[1], binning) != 0,
-        axis=(1, 3),
-    ).astype(np.uint8)
-    # Cropping detector pixels changes the object pixel scale. Binning alone
-    # leaves it unchanged because the detector extent in q stays the same.
-    if crop:
-        source_center = (np.asarray(source_shape) - 1) / 2
-        output_center = (np.asarray(target_shape) - 1) / 2
-        scale = np.asarray(source_shape, dtype=float) / np.asarray(cropped_shape)
-        offset = source_center - scale * output_center
-        modes = (supportmask[None] if supportmask.ndim == 2 else supportmask)
-        mapped = np.stack([
-            affine_transform(mode.astype(float), np.diag(scale), offset=offset,
-                             output_shape=target_shape, order=0,
-                             mode="constant", cval=0, prefilter=False)
-            for mode in modes
-        ])
-        supportmask = mapped[0] if supportmask.ndim == 2 else mapped
-    else:
-        support_origin = tuple((n - t) // 2 for n, t in zip(source_shape, target_shape))
-        support_slice = tuple(slice(o, o + t) for o, t in zip(support_origin, target_shape))
-        supportmask = supportmask[(...,) + support_slice]
-    shape_2d = target_shape
-    supportmask = (supportmask != 0).astype(np.uint8)
-    roi = recipe["roi"]
-    if roi is not None:
-        roi = np.asarray(roi)
-        if roi.shape != (4,) or not np.issubdtype(roi.dtype, np.integer):
-            raise ValueError("recipe['roi'] must contain four integer bounds [r0, r1, c0, c1].")
-        roi = roi.astype(int)
-        if not (0 <= roi[0] < roi[1] <= source_shape[0] and 0 <= roi[2] < roi[3] <= source_shape[1]):
-            raise ValueError("recipe['roi'] must be within the input supportmask.")
-        source_center = (np.asarray(source_shape) - 1) / 2
-        output_center = (np.asarray(target_shape) - 1) / 2
-        object_scale = np.asarray(cropped_shape, dtype=float) / np.asarray(source_shape)
-        for axis, bounds in enumerate(((0, 1), (2, 3))):
-            mapped = (roi[list(bounds)] - source_center[axis]) * object_scale[axis] + output_center[axis]
-            roi[list(bounds)] = np.rint(mapped).astype(int)
-            roi[list(bounds)] = np.clip(roi[list(bounds)], 0, target_shape[axis])
-        if roi[1] <= roi[0] or roi[3] <= roi[2]:
-            raise ValueError("recipe['roi'] falls outside the retrieved supportmask.")
+    if pos_input.shape != neg_input.shape:
+        raise ValueError("pos and neg must have the same shape.")
+    if mask_pixel.shape != pos_input.shape:
+        raise ValueError("mask_pixel must have the same shape as pos/neg.")
+    if supportmask.shape != pos_input.shape:
+        raise ValueError("supportmask must have the same shape as pos/neg.")
 
-    offset_spec = recipe["hologram_offset"]
-    if isinstance(offset_spec, dict):
-        unknown_offset_labels = set(offset_spec) - set(inputs)
-        if unknown_offset_labels:
-            raise ValueError(
-                "recipe['hologram_offset'] contains unknown label(s): "
-                f"{sorted(unknown_offset_labels)}"
-            )
-        offsets = {label: float(offset_spec.get(label, 0.0)) for label in inputs}
-    else:
-        offset = float(offset_spec)
-        offsets = {label: offset for label in inputs}
-    if not all(np.isfinite(value) for value in offsets.values()):
-        raise ValueError("recipe['hologram_offset'] values must be finite.")
-
-    data = {}
+    # Baseline-subtract each helicity using the requested lower percentile,
+    # ignoring zeros because zeros usually represent invalid/masked pixels.
     vmin = recipe["hologram_intensity_cutoff_vmin"]
-    for label, intensity in inputs.items():
-        intensity = intensity - offsets[label] * binning**2
-        if vmin >= 0:
-            vals = intensity[(intensity != 0) & np.isfinite(intensity)]
-            if vals.size:
-                intensity = intensity - np.nanpercentile(vals, vmin)
-        intensity = np.where(np.isnan(intensity), 0, intensity)
-        bsmask = mask_pixel.copy()
-        bsmask[intensity <= 0] = 1
-        intensity = np.clip(intensity, 0, None)
-        data[label] = {
-            "amp": np.sqrt(intensity),
-            "input": intensity,
-            "bsmask": bsmask,
-        }
+    if vmin >= 0:
+        vals = pos_input[(pos_input != 0) & np.isfinite(pos_input)]
+        if vals.size:
+            mi = np.nanpercentile(vals, vmin)
+            pos_input = pos_input - mi
 
-    if recipe["recenter_modal_supports"] and supportmask.ndim == 2:
-        support_modes, mode_support_shifts = geometry.recenter_modal_supports(
-            supportmask, mode_labels, center=recipe["mode_support_center"],
-        )
-    else:
-        support_modes = _mode_supports(supportmask, mode_labels, shape_2d)
-        mode_support_shifts = [(0, 0)] * Nmodes
-    retrieval_support = support_modes if Nmodes > 1 else support_modes[0]
+        vals = neg_input[(neg_input != 0) & np.isfinite(neg_input)]
+        if vals.size:
+            mi = np.nanpercentile(vals, vmin)
+            neg_input = neg_input - mi
 
+        
+    # Replace NaNs and negative intensities before taking square roots.
+    pos_input = np.where(np.isnan(pos_input), 0, pos_input)
+    neg_input = np.where(np.isnan(neg_input), 0, neg_input)
+
+    # Full-coherence beamstop masks inherit the external mask and mark negative
+    # corrected intensities as unconstrained. Zero intensity remains constrained.
+    bsmask_p = mask_pixel.copy()
+    bsmask_n = mask_pixel.copy()
+    bsmask_p[pos_input < 0] = 1
+    bsmask_n[neg_input < 0] = 1
+
+
+    # clip positive intensities to zero to avoid NaNs in the square root.
+    pos_input = np.clip(pos_input, 0, None)
+    neg_input = np.clip(neg_input, 0, None)
+
+    pos_amp = np.sqrt(pos_input)
+    neg_amp = np.sqrt(neg_input)
+
+    # Initial Fourier-domain guess. The supportmask-based default follows the
+    # convention of the original implementation.
     first_startimage = recipe["Startimage"][0]
     if first_startimage is None:
-        Startimage_modes = np.empty_like(support_modes, dtype=np.complex128)
-        for mode_index in range(Nmodes):
-            Startimage_modes[mode_index] = np.fft.ifftshift(
-                np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
-            )
-        Startimage = _maybe_squeeze_modes(Startimage_modes, Nmodes)
+        Startimage = np.fft.fftshift(
+            np.fft.ifft2(np.fft.ifftshift(supportmask))
+        )
     elif isinstance(first_startimage, np.ndarray):
-        Startimage = _maybe_squeeze_modes(
-            _as_modes(
-                first_startimage,
-                Nmodes,
-                shape_2d,
-                "Startimage",
-                dtype=np.complex128,
-            ),
-            Nmodes,
-        )
+        Startimage = np.asarray(first_startimage).copy()
     else:
         raise ValueError(
-            "The first Startimage entry cannot be a label because no "
-            "reconstruction exists yet."
+            "The first Startimage entry cannot be 'pos' or 'neg' "
+            "because no reconstruction exists yet."
         )
 
+    if Startimage.shape != pos_input.shape:
+        raise ValueError("Startimage must have the same shape as pos/neg.")
+
+    # Initial mutual-coherence estimate for RL-enabled steps.
     first_startgamma = recipe["Startgamma"][0]
+
     if first_startgamma is None:
-        Startgamma_modes = np.ones((Nmodes, *shape_2d), dtype=float) * 1e-6 * 2
-        Startgamma_modes[:, shape_2d[0] // 2, shape_2d[1] // 2] = 0.7
-        Startgamma = _maybe_squeeze_modes(Startgamma_modes, Nmodes)
+        Startgamma = np.ones(pos_input.shape, dtype=float) * 1e-6 * 2
+        Startgamma[pos_input.shape[0] // 2, pos_input.shape[1] // 2] = 0.7
     elif isinstance(first_startgamma, np.ndarray):
-        Startgamma = _maybe_squeeze_modes(
-            _as_modes(
-                first_startgamma,
-                Nmodes,
-                shape_2d,
-                "Startgamma",
-                dtype=float,
-            ),
-            Nmodes,
-        )
+        Startgamma = np.asarray(first_startgamma).copy()
     else:
         raise ValueError(
-            "The first Startgamma entry cannot be a label because no "
-            "coherence estimate exists yet."
+            "The first Startgamma entry cannot be 'pos' or 'neg' "
+            "because no coherence estimate exists yet."
         )
 
-    first_label = recipe["helicity"][0]
-    valid_pix = (mask_pixel == 0) & (data[first_label]["input"] > 0)
+
+    if Startgamma.shape != pos_input.shape:
+        raise ValueError("Startgamma must have the same shape as pos/neg.")
+
+
+    first_helicity = recipe["helicity"][0]
+
+    if first_helicity == "pos":
+        first_input = pos_input
+    else:
+        first_input = neg_input
+
+    valid_pix = (mask_pixel == 0) & (first_input > 0)
+
     if np.any(valid_pix):
-        x = data[first_label]["amp"][valid_pix].ravel()
-        y = _modal_amplitude_numpy(Startimage)[valid_pix].ravel()
-        Startimage = _normalize_startimage_amplitude(
-            Startimage,
-            x,
-            y,
-        )
+        x = np.sqrt(first_input[valid_pix]).ravel()
+        y = np.abs(Startimage[valid_pix]).ravel()
 
-    retrieved = {label: None for label in labels}
-    retrieved_fc = {label: None for label in labels}
-    retrieved_pc = {label: None for label in labels}
-    retrieved_gradient = {label: None for label in labels}
-    gamma = {label: Startgamma.copy() for label in labels}
-    pc_diffract = {}
+        if x.size >= 2 and np.ptp(x) > 0 and np.ptp(y) > 0:
+            res = stats.linregress(x, y)
+            if abs(res.slope) > 1e-12:
+                Startimage = Startimage / res.slope
+
+    data = {
+        "pos": {"amp": pos_amp, "input": pos_input, "bsmask": bsmask_p},
+        "neg": {"amp": neg_amp, "input": neg_input, "bsmask": bsmask_n},
+    }
+
+    retrieved = {"pos": None, "neg": None}
+    retrieved_fc = {"pos": None, "neg": None}
+    retrieved_pc = {"pos": None, "neg": None}
+    retrieved_gradient = {"pos": None, "neg": None}
+    gamma = {"pos": Startgamma.copy(), "neg": Startgamma.copy()}
+
+
     default_start_image = Startimage.copy()
     default_start_gamma = Startgamma.copy()
 
-    error = {
-        "steps": [],
-        "outputs": [],
-        "outputs_by_helicity": {label: [] for label in labels},
-    }
+
+    error = {"steps": [], "outputs": [], "outputs_by_helicity": {"pos": [], "neg": []}}
     start_time = time.time()
 
     for i, mode in enumerate(recipe["algorithm_list"]):
-        label = recipe["helicity"][i]
+        h = recipe["helicity"][i]
         Nit = recipe["number_iterations"][i]
         RL_it = int(recipe["RL_its"][i])
         RL_freq = recipe["RL_freqs"][i]
+
         use_RL = RL_it > 0 and RL_freq <= Nit
 
+        # Full-coherence steps use the measured amplitude and the beamstop mask.
+        # RL-enabled steps use the beamstop-filled intensity estimate and no
+        # Fourier-domain beamstop mask, matching the old partial-coherence logic.
         if use_RL:
-            if label not in pc_diffract:
-                source = retrieved_fc[label]
-                if source is None:
-                    pc_input = data[label]["input"]
-                else:
-                    pc_input = (
-                        _modal_intensity_numpy(source) * data[label]["bsmask"]
-                        + data[label]["input"] * (1 - data[label]["bsmask"])
-                    )
-                pc_diffract[label] = np.sqrt(pc_input)
-            diffract = pc_diffract[label]
-            bsmask = np.zeros_like(data[label]["bsmask"])
+            if retrieved[h] is not None:
+                pc_input = (
+                    np.abs(retrieved[h]) ** 2 * data[h]["bsmask"]
+                    + data[h]["input"] * (1 - data[h]["bsmask"])
+                )
+            else:
+                pc_input = data[h]["input"]
+
+            diffract = np.sqrt(pc_input)
+            bsmask = np.zeros_like(data[h]["bsmask"])
             gamma_in = _resolve_start_field(
                 recipe["Startgamma"][i],
                 default_start_gamma,
                 gamma,
                 name="Startgamma",
             )
+
         else:
-            diffract = data[label]["amp"]
-            bsmask = data[label]["bsmask"]
+            diffract = data[h]["amp"]
+            bsmask = data[h]["bsmask"]
             gamma_in = None
 
+
+        #### PHASE DEFINITION
         start_spec = recipe["Startimage"][i]
+
         Phase = _resolve_start_field(
             start_spec,
             default_start_image,
             retrieved,
             name="Startimage",
         )
-        if (
-            recipe["normalize_startimage_between_holograms"]
-            and isinstance(start_spec, str)
-            and start_spec != label
-        ):
-            Phase = _scale_phase_between_holograms(
+
+        if isinstance(start_spec, str) and start_spec in {"pos", "neg"}:
+            Phase = _scale_phase_between_helicities(
                 Phase,
-                source_label=start_spec,
-                target_label=label,
-                intensity_data={key: data[key]["input"] for key in labels},
-                bsmasks={key: data[key]["bsmask"] for key in labels},
+                source_helicity=start_spec,
+                target_helicity=h,
+                intensity_data={key: data[key]["input"] for key in ["pos", "neg"]},
+                bsmasks={key: data[key]["bsmask"] for key in ["pos", "neg"]},
             )
+            
 
         if mode == "gradient_descent":
             if use_RL:
@@ -1204,60 +657,38 @@ def phase_retrieval_algorithm(
                     "gradient_descent recipe stages do not support "
                     "Richardson-Lucy partial-coherence updates."
                 )
-            if Nmodes == 1:
-                refined = gradient.refine_field_gradient(
-                    Phase,
-                    diffract,
-                    supportmask=retrieval_support,
-                    mask_pixel=bsmask,
-                    n_steps=Nit,
-                    learning_rate=make_beta_schedule(
-                        recipe["beta_mode"][i],
-                        Nit,
-                        recipe["beta_zero"][i],
-                    ),
-                    support_weight=make_alpha_schedule(
-                        recipe["alpha_mode"][i],
-                        Nit,
-                        recipe["alpha_zero"][i],
-                    ),
-                    loss_mode="amplitude",
-                    support_projection=False,
-                    fourier_projection=False,
-                )
-                result = refined.fields
-                if recipe["Fourier_last"][i]:
-                    result = _apply_measured_amplitude(result, diffract, bsmask)
-                Error_diff = refined.diffraction_loss
-                Error_supp = refined.support_loss
-                Error_loss = refined.loss
-            else:
-                result, Error_diff, Error_supp, Error_loss = _refine_modes_gradient(
-                    Phase,
-                    diffract,
-                    retrieval_support,
-                    bsmask,
-                    nmodes=Nmodes,
-                    image_shape=shape_2d,
-                    Nit=Nit,
-                    learning_rate=make_beta_schedule(
-                        recipe["beta_mode"][i],
-                        Nit,
-                        recipe["beta_zero"][i],
-                    ),
-                    support_weight=make_alpha_schedule(
-                        recipe["alpha_mode"][i],
-                        Nit,
-                        recipe["alpha_zero"][i],
-                    ),
-                    Fourier_last=recipe["Fourier_last"][i],
-                )
+
+            refined = gradient.refine_field_gradient(
+                Phase,
+                diffract,
+                supportmask=supportmask,
+                mask_pixel=bsmask,
+                n_steps=Nit,
+                learning_rate=make_beta_schedule(
+                    recipe["beta_mode"][i],
+                    Nit,
+                    recipe["beta_zero"][i],
+                ),
+                support_weight=make_alpha_schedule(
+                    recipe["alpha_mode"][i],
+                    Nit,
+                    recipe["alpha_zero"][i],
+                ),
+                loss_mode="amplitude",
+                support_projection=False,
+                fourier_projection=False,
+            )
+            result = refined.fields
+            if recipe["Fourier_last"][i]:
+                result = _apply_measured_amplitude(result, diffract, bsmask)
+            Error_diff = refined.diffraction_loss
+            Error_supp = refined.support_loss
             gamma_out = None
+            extra_diagnostics = {"loss": refined.loss}
         else:
-            Error_loss = None
             result, Error_diff, Error_supp, gamma_out = PhaseRtrv_core(
                 diffract=diffract,
-                mask=retrieval_support,
+                mask=supportmask,
                 mode=mode,
                 Nit=Nit,
                 beta_zero=recipe["beta_zero"][i],
@@ -1275,25 +706,27 @@ def phase_retrieval_algorithm(
                 RL_freq=RL_freq,
                 RL_it=RL_it,
                 TV_freq=recipe["TV_freqs"][i],
-                Nmodes=Nmodes,
             )
+            extra_diagnostics = {}
 
-        retrieved[label] = result
+        retrieved[h] = result
+
         if mode == "gradient_descent":
-            retrieved_gradient[label] = result
-            if retrieved_fc[label] is None:
-                retrieved_fc[label] = result
+            retrieved_gradient[h] = result
+            if retrieved_fc[h] is None:
+                retrieved_fc[h] = result
         elif use_RL:
-            retrieved_pc[label] = result
+            retrieved_pc[h] = result
         else:
-            retrieved_fc[label] = result
-            pc_diffract.pop(label, None)
+            retrieved_fc[h] = result
+
+
         if gamma_out is not None:
-            gamma[label] = gamma_out
+            gamma[h] = gamma_out
 
         step_info = {
             "step": i,
-            "helicity": label,
+            "helicity": h,
             "mode": mode,
             "Nit": Nit,
             "RL_it": RL_it,
@@ -1303,352 +736,46 @@ def phase_retrieval_algorithm(
             "error": np.asarray(Error_diff),
             "support_error": np.asarray(Error_supp),
             "field_after": result.copy(),
+            **extra_diagnostics,
         }
-        if Error_loss is not None:
-            step_info["loss"] = np.asarray(Error_loss)
         error["steps"].append(step_info)
 
         if recipe["output"][i]:
             output_info = {
                 "step": i,
-                "helicity": label,
+                "helicity": h,
                 "mode": mode,
                 "coherence": step_info["coherence"],
                 "field": result.copy(),
             }
             error["outputs"].append(output_info)
-            error["outputs_by_helicity"][label].append(output_info)
+            error["outputs_by_helicity"][h].append(output_info)
 
         print(
-            f"Step {i}: helicity={label}, mode={mode}, Nit={Nit}, "
-            f"{'partial coherence' if use_RL else 'full coherence'}, "
-            f"Nmodes={Nmodes}"
+            f"Step {i}: helicity={h}, mode={mode}, Nit={Nit}, "
+            f"{'partial coherence' if use_RL else 'full coherence'}"
         )
 
     print("--- %s seconds ---" % np.round((time.time() - start_time), 2))
     print("Phase Retrieval Done!")
 
-    result = {
-        "supportmask": retrieval_support.copy(),
-        "supportmask_used": retrieval_support.copy(),
-        "mode_support_shifts": mode_support_shifts,
-        "mask_pixel": mask_pixel.copy(),
-        "roi": roi,
-        "full_coherence": retrieved_fc,
-        "partial_coherence": retrieved_pc,
-        "gradient_descent": retrieved_gradient,
-        "bsmasks": {label: data[label]["bsmask"] for label in labels},
-        "gamma": gamma,
-        "error": error,
-        "recipe": recipe,
-        "hologram_offsets": offsets,
+    error["latest"] = {
+        "full_coherence": retrieved_fc.copy(),
+        "partial_coherence": retrieved_pc.copy(),
+        "gradient_descent": retrieved_gradient.copy(),
     }
 
-    return_format = recipe["return_format"]
-    if return_format == "legacy" or (return_format == "auto" and legacy_call):
-        return _legacy_tuple_from_result(result)
-    return result
-
-def PhaseRtrv_core_multimode(
-    diffract,
-    mask,
-    mode="ER",
-    Nit=500,
-    beta_zero=0.5,
-    beta_mode="const",
-    alpha_zero=0.0,
-    alpha_mode="const",
-    Phase=None,
-    seed=False,
-    plot_every=20,
-    bsmask=None,
-    real_object=False,
-    average_img=10,
-    Fourier_last=True,
-    gamma=None,
-    RL_freq=None,
-    RL_it=0,
-    TV_freq=2e9,
-    Nmodes=1,
-):
-    """
-    Unified single-mode / multimode full- and partial-coherence retrieval.
-
-    ``diffract`` is the measured 2D diffraction amplitude. For ``Nmodes > 1``,
-    ``Phase``, ``mask``, and ``gamma`` may be 3D arrays of shape
-    ``(Nmodes, nx, ny)``. The Fourier constraint is then applied to the
-    incoherent modal intensity sum:
-
-        ``diffract**2 ≈ sum_m |mode_m|**2``
-
-    or, with RL enabled,
-
-        ``diffract**2 ≈ sum_m convolution(|mode_m|**2, gamma_m)``.
-
-    For ``Nmodes == 1``, outputs are squeezed back to 2D to preserve the
-    previous API.
-
-    Context:
-    Single-observation multimode kernel. All modes contribute to the detector intensity, but
-    each has its own support. State-independent secondary-mode projection is a
-    responsibility of the universal driver.
-    """
-    diffract = np.asarray(diffract)
-    mask = np.asarray(mask)
-    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
-        raise ValueError("Nmodes must be a positive integer.")
-    Nmodes = int(Nmodes)
-    if Nmodes <= 0:
-        raise ValueError("Nmodes must be a positive integer.")
-    if diffract.ndim != 2:
-        raise ValueError("diffract must be a 2D measured diffraction amplitude.")
-    if Nit <= 0:
-        raise ValueError("Nit must be > 0.")
-    if average_img <= 0:
-        raise ValueError("average_img must be > 0.")
-    if plot_every <= 0:
-        raise ValueError("plot_every must be > 0.")
-    if RL_freq is not None and RL_freq <= 0:
-        raise ValueError("RL_freq must be > 0.")
-    if RL_it < 0:
-        raise ValueError("RL_it must be >= 0.")
-    if TV_freq <= 0:
-        raise ValueError("TV_freq must be > 0.")
-
-    l, n = diffract.shape
-    shape_2d = (l, n)
-
-    mask_modes = _as_modes(mask, Nmodes, shape_2d, "mask")
-
-    if bsmask is None:
-        bsmask = np.zeros(shape_2d, dtype=np.float32)
-    else:
-        bsmask = np.asarray(bsmask)
-        if bsmask.shape != shape_2d:
-            raise ValueError("bsmask must have same 2D shape as diffract.")
-
-    proj_fn = PROJECTIONS.get(mode)
-    if proj_fn is None:
-        raise ValueError(f"Invalid mode '{mode}'. Allowed: {sorted(PROJECTIONS)}")
-
-    Beta = make_beta_schedule(beta_mode, Nit, beta_zero)
-    Alpha = make_alpha_schedule(alpha_mode, Nit, alpha_zero)
-
-    if seed:
-        np.random.seed(0)
-
-    if Phase is None:
-        phase_random = np.exp(
-            1j * np.random.rand(Nmodes, l, n) * np.pi * 2
-        )
-        Phase = (
-            (1 - bsmask)[None, :, :]
-            * diffract[None, :, :]
-            / np.sqrt(Nmodes)
-            * phase_random
-            + phase_random * bsmask[None, :, :]
-        )
-
-    phase_modes = _as_modes(Phase, Nmodes, shape_2d, "Phase", dtype=np.complex128)
-
-    if RL_freq is None:
-        RL_freq = Nit + 1
-
-    use_RL = gamma is not None and RL_it > 0 and RL_freq <= Nit
-
-    if use_RL:
-        gamma_modes = _as_modes(gamma, Nmodes, shape_2d, "gamma", dtype=np.complex128)
-        gamma_modes = np.fft.fftshift(gamma_modes, axes=(-2, -1))
-    else:
-        gamma_modes = None
-
-    # Shift to corner convention. Modes are shifted only over the spatial axes.
-    bsmask = np.fft.fftshift(bsmask)
-    mask_modes = np.fft.fftshift(mask_modes, axes=(-2, -1))
-    diffract = np.fft.fftshift(diffract)
-    guess = np.fft.fftshift(phase_modes, axes=(-2, -1))
-
-    BSmask_cp = xp.asarray(bsmask).astype(xp.bool_)
-    obs = ~BSmask_cp
-
-    guess_cp = xp.asarray(guess)
-    mask_cp = xp.asarray(mask_modes)
-    diffract_cp = xp.asarray(diffract)
-
-    if use_RL:
-        gamma_cp = xp.asarray(gamma_modes)
-        for m in range(Nmodes):
-            gamma_sum = xp.sum(gamma_cp[m])
-            if not bool(xp.isfinite(gamma_sum)) or bool(xp.abs(gamma_sum) == 0):
-                raise ValueError(
-                    f"gamma mode {m} must have a finite, non-zero sum."
-                )
-            gamma_cp[m] /= gamma_sum
-    else:
-        gamma_cp = None
-
-    convolved = _modal_convolved_intensities(guess_cp, gamma_cp, Nmodes)
-    prev = xp.zeros_like(guess_cp, dtype=xp.complex128)
-    initial_constrained = _apply_modal_fourier_constraint(
-        guess_cp,
-        convolved,
-        diffract_cp,
-        obs,
-        BSmask_cp,
+    return (
+        retrieved_fc["pos"],
+        retrieved_fc["neg"],
+        retrieved_pc["pos"],
+        retrieved_pc["neg"],
+        bsmask_p,
+        bsmask_n,
+        gamma["pos"],
+        gamma["neg"],
+        error,
     )
-    for m in range(Nmodes):
-        prev[m] = fft2(initial_constrained[m])
-
-    if not use_RL:
-        guess_cp = initial_constrained
-        convolved = _modal_convolved_intensities(
-            guess_cp,
-            gamma_cp,
-            Nmodes,
-        )
-
-    Error_diffr_list = []
-    Error_supp_list = []
-
-    n_best = min(average_img, Nit)
-    Best_guess = xp.zeros((n_best, Nmodes, l, n), dtype=xp.complex128)
-    Best_error = xp.full((n_best,), xp.inf, dtype=xp.float64)
-
-    if use_RL:
-        Best_gamma = xp.zeros((n_best, Nmodes, l, n), dtype=xp.complex128)
-
-    start_best_at = max(0, Nit - n_best * 2)
-
-    for s in range(Nit):
-        beta = float(Beta[s])
-        alpha = float(Alpha[s])
-
-        # Apply one measured-intensity constraint jointly to all modes.
-        convolved = _modal_convolved_intensities(
-            guess_cp,
-            gamma_cp,
-            Nmodes,
-        )
-        guess_cp = _apply_modal_fourier_constraint(
-            guess_cp,
-            convolved,
-            diffract_cp,
-            obs,
-            BSmask_cp,
-        )
-
-        new_guess = xp.zeros_like(guess_cp)
-
-        # Update every mode independently in support space.
-        for m in range(Nmodes):
-            inv = fft2(guess_cp[m])
-
-            if (s % TV_freq == 0) and alpha > 0:
-                inv = inv + alpha * TV(inv, 1)
-
-            inv = proj_fn(inv, prev[m], mask_cp[m], beta, s, Nit)
-            prev[m] = inv.copy()
-            new_guess[m] = ifft2(inv)
-
-        # Update partial-coherence kernels only at the requested RL interval.
-        if use_RL and s > 2 and (s % RL_freq == 0):
-            for m in range(Nmodes):
-                convolved_new_m = ifft2(
-                    fft2(xp.abs(new_guess[m]) ** 2) * fft2(gamma_cp[m])
-                )
-                Idelta = 2 * xp.abs(new_guess[m]) ** 2 - xp.abs(guess_cp[m]) ** 2
-                I_exp = obs * (xp.abs(diffract_cp) ** 2) + convolved_new_m * BSmask_cp
-                gamma_cp[m] = RL(
-                    Idelta=Idelta,
-                    Iexp=I_exp,
-                    gamma_cp=gamma_cp[m],
-                    RL_it=RL_it,
-                )
-
-        guess_cp = new_guess
-        convolved = _modal_convolved_intensities(
-            guess_cp,
-            gamma_cp,
-            Nmodes,
-        )
-
-        total_intensity = xp.sum(convolved, axis=0)
-        if use_RL:
-            err_guess = obs * total_intensity
-            err_target = obs * xp.abs(diffract_cp) ** 2
-        else:
-            err_guess = obs * xp.sqrt(total_intensity)
-            err_target = obs * diffract_cp
-
-        # Record errors and retain the best late-iteration candidates.
-        if s <= 2 or (s % plot_every == 0) or (s >= start_best_at):
-            err = Error_diffract_cp(err_guess, err_target)
-            Error_diffr_list.append(err)
-
-            if s >= start_best_at:
-                j = int(xp.argmax(Best_error).item())
-                if err < Best_error[j]:
-                    Best_error[j] = err
-                    Best_guess[j, :, :, :] = guess_cp
-
-                    if use_RL:
-                        Best_gamma[j, :, :, :] = gamma_cp
-
-    guess_cp = xp.mean(Best_guess, axis=0)
-
-    if use_RL:
-        gamma_cp = xp.mean(Best_gamma, axis=0)
-
-    if Fourier_last:
-        convolved = _modal_convolved_intensities(
-            guess_cp,
-            gamma_cp,
-            Nmodes,
-        )
-        guess_cp = _apply_modal_fourier_constraint(
-            guess_cp,
-            convolved,
-            diffract_cp,
-            obs,
-            BSmask_cp,
-        )
-
-    guess = to_numpy(guess_cp, xp)
-    guess = np.fft.ifftshift(guess, axes=(-2, -1))
-    guess = _maybe_squeeze_modes(guess, Nmodes)
-
-    if use_RL:
-        gamma = to_numpy(gamma_cp, xp)
-        gamma = np.fft.ifftshift(gamma, axes=(-2, -1))
-        gamma = _maybe_squeeze_modes(gamma, Nmodes)
-    else:
-        gamma = None
-
-    return guess, Error_diffr_list, Error_supp_list, gamma
-
-def PhaseRtrv_core(*args, Nmodes=1, **kwargs):
-    """
-    Dispatch to the fast single-mode or full multimode phase-retrieval kernel.
-
-    ``Nmodes == 1`` uses :func:`PhaseRtrv_core_single`, the 2D implementation
-    from the standard core. ``Nmodes > 1`` uses
-    :func:`PhaseRtrv_core_multimode`, where the Fourier constraint is applied to
-    the summed modal intensity.
-
-    Context:
-    Public kernel dispatcher: select single/multimode implementation through Nmodes while
-    preserving the shared call contract expected by observation workers.
-    """
-    if isinstance(Nmodes, bool) or not isinstance(Nmodes, (int, np.integer)):
-        raise ValueError("Nmodes must be a positive integer.")
-    Nmodes = int(Nmodes)
-    if Nmodes <= 0:
-        raise ValueError("Nmodes must be a positive integer.")
-    if Nmodes == 1:
-        return PhaseRtrv_core_single(*args, **kwargs)
-    return PhaseRtrv_core_multimode(*args, Nmodes=Nmodes, **kwargs)
-
-
 
 def plot_phase_retrieval_errors(error, phase_retrieval_recipe=None, ax=None):
     """
@@ -1922,7 +1049,7 @@ PROJECTIONS = {
 
 # ----------------------------
 # Other Subprocesses
-# ----------------------------
+# ---------------------------- 
 def RL(Idelta, Iexp, gamma_cp, RL_it):
     """
     Richardson–Lucy update loop (CuPy).
@@ -1963,7 +1090,7 @@ def RL(Idelta, Iexp, gamma_cp, RL_it):
 # ############################################################
 
 
-def PhaseRtrv_core_single(
+def PhaseRtrv_core(
     diffract,
     mask,
     mode="ER",
@@ -2187,7 +1314,7 @@ def PhaseRtrv_core_single(
         guess = to_numpy(guess_cp, xp)
 
         return np.fft.ifftshift(guess), Error_diffr_list, Error_supp_list, None
-
+    
 
 #############################################################
 #    TOTAL VARIATION FUNCTION
@@ -2283,10 +1410,10 @@ def W(npx,npy,alpha=0.1):
     '''
     Simple generator of a gaussian, used for filtering in OSS
     INPUT:  npx,npy: number of pixels on the image
-            alpha: width of the gaussian
-
+            alpha: width of the gaussian 
+            
     OUTPUT: gaussian matrix
-
+    
     --------
     author: RB 2020
     '''
@@ -2300,11 +1427,11 @@ def W(npx,npy,alpha=0.1):
 
 def Error_diffract_cp(guess, diffract):
     '''
-    Error on the diffraction attern of retrieved data.
-    INPUT:  guess, diffract: retrieved and experimental diffraction patterns
-
+    Error on the diffraction attern of retrieved data. 
+    INPUT:  guess, diffract: retrieved and experimental diffraction patterns 
+            
     OUTPUT: Error between the two
-
+    
     --------
     author: RB 2020
     '''
@@ -2378,11 +1505,6 @@ def _prepare_energy_amplitudes(
     Returns
     -------
     amplitudes, intensities, bsmasks : arrays, shape (nE, nx, ny)
-
-    Context:
-    Input boundary: convert measured intensities into amplitude targets and effective
-    invalid masks. Keep the explicit detector mask distinct from cutoff-based exclusions
-    when estimating radial means or low-count statistics.
     """
     intensities = _as_energy_stack(holograms).astype(float, copy=True)
     nE, nx, ny = intensities.shape
@@ -2398,7 +1520,7 @@ def _prepare_energy_amplitudes(
                 img = img - mi
 
         img = np.where(np.isnan(img), 0, img)
-        bsmasks[j, img <= 0] = 1
+        bsmasks[j, img < 0] = 1
         intensities[j] = np.clip(img, 0, None)
 
     amplitudes = np.sqrt(intensities)
@@ -2535,84 +1657,6 @@ def _apply_projection_supportmask(projected, original, projection_supportmask):
 #  Generic SVD low-rank projection: L_E(r) = C(r) + low-rank residual
 # -------------------------------------------------------------------------
 
-def _validate_material_thickness(value, shape):
-    """Validate a relative material thickness on the object grid."""
-    if value is None:
-        return None
-    thickness = np.asarray(value, dtype=float)
-    if thickness.shape != tuple(shape) or not np.all(np.isfinite(thickness)):
-        raise ValueError(f"material_thickness must be finite with shape {tuple(shape)}.")
-    if np.any(thickness < 0):
-        raise ValueError("material_thickness must be nonnegative.")
-    return thickness
-
-
-def _recipe_material_thickness(recipe, input_geometry):
-    """
-    Map optional object-grid material inputs through crop/bin geometry.
-
-    Context:
-    Geometry bridge: bring the supplied material/thickness information onto the object grid
-    used by the physical projection, rather than treating detector binning as object-space
-    averaging.
-    """
-    mask = recipe.get("material_mask")
-    thickness = recipe.get("material_thickness")
-    if mask is None and thickness is None and not recipe.get("fit_material_thickness", False):
-        return None
-    source_shape = input_geometry.source_shape
-    used_shape = input_geometry.used_shape
-    crop = input_geometry.crop
-    scale = (np.asarray(source_shape, dtype=float)
-             / (np.asarray(source_shape, dtype=float) - 2 * crop))
-
-    def map_object(value, name, order):
-        array = np.asarray(value)
-        if array.shape == used_shape:
-            return array.copy()
-        if array.shape != source_shape:
-            raise ValueError(
-                f"{name} must have source shape {source_shape} or retrieval shape {used_shape}."
-            )
-        if source_shape == used_shape:
-            return array.copy()
-        if crop:
-            return geometry._resample_spatial(
-                array, used_shape, order=order, coordinate_scale=scale,
-            )
-        # Match geometry.prepare: binning alone keeps object pixel scale.
-        origin = tuple((n - u) // 2 for n, u in zip(source_shape, used_shape))
-        return array[tuple(slice(o, o + u) for o, u in zip(origin, used_shape))]
-
-    result = (np.ones(used_shape, dtype=float) if thickness is None else
-              _validate_material_thickness(map_object(thickness, "material_thickness", 1), used_shape))
-    if mask is not None:
-        material = map_object(mask, "material_mask", 0)
-        if not np.all(np.isfinite(material)):
-            raise ValueError("material_mask must be finite.")
-        result = result * (material != 0)
-    if not np.any(result > 0):
-        raise ValueError("material_mask/material_thickness contains no material pixels.")
-    return result
-
-
-def _material_thickness_on_grid(recipe, shape):
-    """Resolve material options for a direct projection on its current grid."""
-    mask = recipe.get("material_mask")
-    thickness = _validate_material_thickness(recipe.get("material_thickness"), shape)
-    if mask is None and thickness is None and not recipe.get("fit_material_thickness", False):
-        return None
-    result = np.ones(shape, dtype=float) if thickness is None else thickness.copy()
-    if mask is not None:
-        material = np.asarray(mask)
-        if material.shape != tuple(shape) or not np.all(np.isfinite(material)):
-            raise ValueError(f"material_mask must be finite with shape {tuple(shape)}.")
-        result *= material != 0
-    if not np.any(result > 0):
-        raise ValueError("material_mask/material_thickness contains no material pixels.")
-    return result
-
-
 def project_log_object_low_rank(
     L_stack,
     rank=1,
@@ -2620,8 +1664,6 @@ def project_log_object_low_rank(
     weights=None,
     relaxation=1.0,
     projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -2671,14 +1713,6 @@ def project_log_object_low_rank(
         raise ValueError("static_mode must be 'mean', 'first', or 'none'.")
 
     Delta = Lmat - C[:, None]
-    thickness = _validate_material_thickness(material_thickness, (nx, ny))
-    if fit_material_thickness:
-        raise ValueError("Fitting thickness requires projection_model='rank1_spectral'.")
-    if thickness is not None:
-        # A generic low-rank model has free spatial factors. A known vacuum
-        # region can still be constrained to have no energy-dependent term.
-        Delta = Delta.copy()
-        Delta[thickness.ravel() == 0] = 0
 
     if rank == 0:
         Delta_rank = np.zeros_like(Delta)
@@ -2689,18 +1723,12 @@ def project_log_object_low_rank(
         Delta_rank_w = (U[:, :rank] * s[:rank]) @ Vh[:rank, :]
         Delta_rank = Delta_rank_w / sqrt_w[None, :]
         singular_values = s
-    if thickness is not None:
-        Delta_rank[thickness.ravel() == 0] = 0
 
     Lproj_mat = C[:, None] + Delta_rank
     Lproj = Lproj_mat.T.reshape(nE, nx, ny)
 
     if relaxation < 1:
         Lproj = (1 - relaxation) * L_stack + relaxation * Lproj
-    if thickness is not None:
-        Lproj[:, thickness == 0] = C.reshape(nx, ny)[thickness == 0]
-    if projection_supportmask is not None and thickness is not None:
-        projection_supportmask = projection_supportmask | (thickness == 0)
     Lproj = _apply_projection_supportmask(
         Lproj,
         L_stack,
@@ -2713,7 +1741,6 @@ def project_log_object_low_rank(
             "static_log_object": C.reshape(nx, ny),
             "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
             "singular_values": singular_values,
-            "material_thickness": thickness,
             "projection_supportmask_applied": (
                 projection_supportmask is not None
             ),
@@ -3036,8 +2063,6 @@ def project_log_object_rank1_spectral(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -3053,15 +2078,7 @@ def project_log_object_rank1_spectral(
     if not (0 <= relaxation <= 1):
         raise ValueError("relaxation must be between 0 and 1.")
 
-    if (fit_material_thickness and
-            str(spectral_constraint).lower() in {"known_beta", "known-beta", "known_beta_kk", "known-beta-kk"}
-            and not fit_known_beta_scale):
-        raise ValueError("Fitting relative thickness requires a free spectral scale.")
-
     nE, nx, ny = L_stack.shape
-    thickness = _validate_material_thickness(material_thickness, (nx, ny))
-    if fit_material_thickness and thickness is None:
-        thickness = np.ones((nx, ny), dtype=float)
     projection_supportmask = _normalize_projection_supportmask(
         projection_supportmask,
         (nx, ny),
@@ -3089,85 +2106,6 @@ def project_log_object_rank1_spectral(
         raise ValueError("static_mode must be 'mean', 'first', or 'none'.")
 
     Delta = Lmat - C[:, None]
-    if thickness is not None:
-        # The supplied map is a relative thickness, shared by all energies.
-        # Vacuum pixels have zero material response by construction.
-        t = thickness.ravel()
-        denominator = np.sum(t * t)
-        if denominator <= 0:
-            raise ValueError("material_thickness must contain material pixels.")
-        a_initial = np.sum(t[:, None] * Delta, axis=0) / denominator
-        if fit_material_thickness:
-            allowed = t > 0
-            for _ in range(12):
-                spectral_power = np.sum(w * np.abs(a_initial) ** 2)
-                if spectral_power <= 1e-30:
-                    raise ValueError("Cannot fit thickness without energy-dependent contrast.")
-                updated = np.maximum(
-                    0, np.real(np.sum(Delta * (w * np.conj(a_initial))[None, :], axis=1))
-                    / spectral_power,
-                )
-                updated[~allowed] = 0
-                scale = np.mean(updated[allowed])
-                if scale <= 1e-30:
-                    raise ValueError("Fitted material thickness vanished everywhere.")
-                t = updated / scale
-                a_initial = np.sum(t[:, None] * Delta, axis=0) / np.sum(t * t)
-            thickness = t.reshape(nx, ny)
-        a_constrained, spectral_info = constrain_complex_spectrum(
-            a_initial,
-            spectral_constraint=spectral_constraint,
-            energy_values=energy_values,
-            known_beta_spectrum=known_beta_spectrum,
-            known_delta_spectrum=known_delta_spectrum,
-            absorption_part=absorption_part,
-            kk_sign=kk_sign,
-            kk_subtract_baseline=kk_subtract_baseline,
-            kk_normalize_input=kk_normalize_input,
-            known_beta_normalization=known_beta_normalization,
-            fit_known_beta_scale=fit_known_beta_scale,
-            fit_known_beta_offset=fit_known_beta_offset,
-        )
-        if fit_material_thickness:
-            spectral_power = np.sum(w * np.abs(a_constrained) ** 2)
-            if spectral_power > 1e-30:
-                t = np.maximum(
-                    0, np.real(np.sum(Delta * (w * np.conj(a_constrained))[None, :], axis=1))
-                    / spectral_power,
-                )
-                t[~allowed] = 0
-                scale = np.mean(t[allowed])
-                if scale > 1e-30:
-                    t /= scale
-                    a_constrained *= scale
-                    thickness = t.reshape(nx, ny)
-        # The energy-independent field is free at each pixel. Refit it after
-        # any spectral prior changes the energy mean of the response.
-        C = np.sum((Lmat - t[:, None] * a_constrained[None, :])
-                   * w[None, :], axis=1) / np.sum(w)
-        Delta_rank = t[:, None] * a_constrained[None, :]
-        Lproj = (C[:, None] + Delta_rank).T.reshape(nE, nx, ny)
-        if relaxation < 1:
-            Lproj = (1 - relaxation) * L_stack + relaxation * Lproj
-        Lproj[:, thickness == 0] = C.reshape(nx, ny)[thickness == 0]
-        if projection_supportmask is not None:
-            projection_supportmask = projection_supportmask | (thickness == 0)
-        Lproj = _apply_projection_supportmask(Lproj, L_stack, projection_supportmask)
-        if return_components:
-            components = {
-                "projection_model": "rank1_spectral",
-                "static_log_object": C.reshape(nx, ny),
-                "material_thickness": thickness.copy(),
-                "material_thickness_fitted": bool(fit_material_thickness),
-                "spectral_spatial_map": thickness.astype(np.complex128),
-                "spectral_coefficients_initial": a_initial,
-                "spectral_coefficients": a_constrained,
-                "energy_dependent_log_object": Delta_rank.T.reshape(nE, nx, ny),
-                "projection_supportmask_applied": projection_supportmask is not None,
-            }
-            components.update(spectral_info)
-            return Lproj, components
-        return Lproj
 
     # Initial weighted rank-1 factorization.
     Delta_w = Delta * sqrt_w[None, :]
@@ -3265,8 +2203,6 @@ def project_fourier_fields_multi_energy(
     fit_known_beta_scale=True,
     fit_known_beta_offset=True,
     projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
     return_components=False,
 ):
     """
@@ -3321,8 +2257,6 @@ def project_fourier_fields_multi_energy(
             weights=weights,
             relaxation=relaxation,
             projection_supportmask=projection_supportmask,
-            material_thickness=material_thickness,
-            fit_material_thickness=fit_material_thickness,
             return_components=return_components,
         )
     else:
@@ -3343,8 +2277,6 @@ def project_fourier_fields_multi_energy(
             fit_known_beta_scale=fit_known_beta_scale,
             fit_known_beta_offset=fit_known_beta_offset,
             projection_supportmask=projection_supportmask,
-            material_thickness=material_thickness,
-            fit_material_thickness=fit_material_thickness,
             return_components=return_components,
         )
 
@@ -3379,7 +2311,7 @@ def default_multi_energy_phase_retrieval_recipe():
         "warmup_Nit": [700,50],
 
         "shuffle_energies": True,
-        "random_seed": 0,
+        "random_seed": None,
         # Scalars are broadcast to every stage; lists customize each stage.
         "beta_zero": 0.5,
         "beta_mode": "arctan",
@@ -3404,9 +2336,6 @@ def default_multi_energy_phase_retrieval_recipe():
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
-        "binning": 1,
-        "crop": 0,
-        "roi": None,
 
         # Multi-energy projection settings.
         "projection_model": "svd",  # 'none', 'svd', or 'rank1_spectral'
@@ -3415,20 +2344,13 @@ def default_multi_energy_phase_retrieval_recipe():
         # one full energy sweep, preserving the historical default cadence.
         "projection_every": None,
         "projection_relaxation": 1.0,
-        "final_projection_relaxation": 1.0,
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         # If True, apply cross-object projections only inside supportmask.
-        "projection_constraints_inside_support_only": True,
+        "projection_constraints_inside_support_only": False,
         # Backward-compatible alias for older recipes.
         "physical_constraints_inside_support_only": False,
         "projection_static_mode": "mean",
-        # Optional relative object thickness. A binary material_mask is enough
-        # to mark known vacuum holes; material_thickness may give relative
-        # nonnegative thickness where the sample is present.
-        "material_mask": None,
-        "material_thickness": None,
-        "fit_material_thickness": False,
         "energy_weights": None,
         "log_floor": 1e-12,
 
@@ -3521,13 +2443,7 @@ def _broadcast_stage_parameter(value, stage_count, key):
 
 
 def _build_update_schedule(recipe, name, allow_disabled=False):
-    """
-    Build fully specified stage dictionaries from a recipe.
-
-    Context:
-    Schedule compiler used before executing observations. Expand scalar controls to one
-    value per stage so the numerical runner does not need to interpret notebook shorthand.
-    """
+    """Build fully specified stage dictionaries from a recipe."""
     prefix = "" if name == "inner" else "warmup_"
     mode_key = "inner_mode" if name == "inner" else "warmup_mode"
     Nit_key = "inner_Nit" if name == "inner" else "warmup_Nit"
@@ -3650,247 +2566,6 @@ def _build_update_schedule(recipe, name, allow_disabled=False):
     return schedule
 
 
-def _build_role_warmup_schedule(recipe, role):
-    """
-    Build an optional reference/other warmup schedule.
-
-    A role schedule inherits controls from the shared ``warmup_*`` schedule.
-    Leaving its mode and iteration settings unset preserves the legacy shared
-    schedule behaviour.
-
-    Context:
-    Resolve the reference or other-observation override. This selects algorithms/iterations;
-    whether a field is copied from the reference is controlled separately by
-    warmup_start_from_first.
-    """
-    mode = recipe[f"warmup_{role}_mode"]
-    Nit = recipe[f"warmup_{role}_Nit"]
-    if mode is None and Nit is None:
-        return None
-    if mode is None or Nit is None:
-        raise ValueError(
-            f"warmup_{role}_mode and warmup_{role}_Nit must be set together."
-        )
-
-    role_recipe = recipe.copy()
-    role_recipe["warmup_mode"] = mode
-    role_recipe["warmup_Nit"] = Nit
-    for key in (
-        "beta_zero", "beta_mode", "alpha_zero", "alpha_mode",
-        "TV_freq", "RL_it", "RL_freq",
-    ):
-        role_value = recipe[f"warmup_{role}_{key}"]
-        if role_value is not None:
-            role_recipe[f"warmup_{key}"] = role_value
-    return _build_update_schedule(
-        role_recipe, name="warmup", allow_disabled=True,
-    )
-
-
-def format_universal_workflow(
-    universal_recipe=None,
-    state_labels=None,
-    start_fields_provided=False,
-):
-    """
-    Return an ASCII tree describing a universal retrieval recipe.
-
-    The tree reports which warmup schedule is applied to the reference and
-    nonreference holograms, where their starting fields come from, and how the
-    later joint phase-retrieval and physical-projection loop is arranged.
-    This function only inspects the recipe; it does not allocate image arrays.
-
-    Context:
-    Notebook-facing plan, not a run log: render the recipe without reconstructing any
-    fields. Use this before launching a long calculation to inspect initialization,
-    schedules and coherence policy.
-    """
-    recipe = default_universal_phase_retrieval_recipe()
-    if universal_recipe is not None:
-        if not isinstance(universal_recipe, dict):
-            raise TypeError("universal_recipe must be a dictionary.")
-        unknown = set(universal_recipe) - set(recipe)
-        if unknown:
-            raise ValueError(f"Unknown universal recipe key(s): {sorted(unknown)}")
-        recipe.update(universal_recipe)
-
-    labels = list(state_labels) if state_labels is not None else None
-    reference_index = int(recipe["warmup_reference_observation"])
-    if labels is not None and not 0 <= reference_index < len(labels):
-        raise ValueError("warmup_reference_observation exceeds state_labels.")
-    reference_label = (
-        repr(labels[reference_index]) if labels is not None else f"observation {reference_index}"
-    )
-    other_labels = (
-        [label for index, label in enumerate(labels) if index != reference_index]
-        if labels is not None else None
-    )
-
-    shared_schedule = _build_update_schedule(
-        recipe, name="warmup", allow_disabled=True,
-    )
-    reference_schedule = _build_role_warmup_schedule(recipe, "reference")
-    other_schedule = _build_role_warmup_schedule(recipe, "other")
-    reference_schedule = shared_schedule if reference_schedule is None else reference_schedule
-    if other_schedule is None:
-        indices = recipe["warmup_seeded_stage_indices"]
-        other_schedule = (
-            [shared_schedule[index] for index in indices]
-            if indices is not None else shared_schedule
-        )
-    inner_schedule = _build_update_schedule(recipe, name="inner")
-
-    def stage_text(stage):
-        text = f"{stage['mode']} × {stage['Nit']}"
-        if stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]:
-            text += f" + partial coherence (RL {stage['RL_it']} every {stage['RL_freq']})"
-        if stage["alpha_zero"] != 0:
-            text += f", support weight {stage['alpha_zero']} ({stage['alpha_mode']})"
-        if stage["TV_freq"] <= stage["Nit"]:
-            text += f", TV every {stage['TV_freq']:g}"
-        return text
-
-    def branch(lines, prefix, title, start, schedule):
-        lines.append(f"{prefix}├─ {title}")
-        lines.append(f"{prefix}│  ├─ start: {start}")
-        if schedule:
-            for index, stage in enumerate(schedule):
-                connector = "└" if index == len(schedule) - 1 else "├"
-                lines.append(f"{prefix}│  {connector}─ {stage_text(stage)}")
-        else:
-            lines.append(f"{prefix}│  └─ warmup disabled")
-
-    modes = (recipe["modes"] if recipe["modes"] is not None
-             else list(range(1, recipe["Nmodes"] + 1)))
-    if start_fields_provided:
-        initial = "supplied start_fields"
-    elif len(modes) > 1 and recipe["mode_initialization"] == "random_phase":
-        initial = "measured amplitude with seeded random phase in each mode"
-    else:
-        initial = "FFT(support), scaled to measured intensity"
-    if recipe["startimage_radial_normalization"] and not start_fields_provided:
-        initial += "; radial intensity normalization"
-    if labels is None:
-        others_title = "Other holograms"
-    elif len(other_labels) <= 6:
-        others_title = "Other holograms: " + ", ".join(map(repr, other_labels))
-    else:
-        others_title = (
-            f"Other holograms: {len(other_labels)} observations "
-            f"({other_labels[0]!r} … {other_labels[-1]!r})"
-        )
-    other_start = (
-        f"scaled final field from reference {reference_label}"
-        if recipe["warmup_start_from_first"] else initial
-    )
-
-    if recipe["startimage_radial_normalization"] and recipe["warmup_start_from_first"]:
-        other_start += "; radial intensity normalization for this observation"
-
-    lines = ["Universal phase-retrieval workflow"]
-    if recipe["coherent_refresh_rounds"]:
-        lines.append(f"├─ Coherent refresh before rounds {recipe['coherent_refresh_rounds']}: "
-                     f"{recipe['coherent_refresh_mode']} × {recipe['coherent_refresh_iterations']}; "
-                     "refresh masked fills, retain gamma, resume partial coherence")
-    lines.append(
-        f"├─ Geometry: crop {recipe['crop']} pixels, then bin ×{recipe['binning']}"
-    )
-    branch(lines, "", f"Reference hologram: {reference_label}", initial, reference_schedule)
-    branch(lines, "", others_title, other_start, other_schedule)
-    lines.append(f"├─ Joint reconstruction × {recipe['outer_iterations']} outer loops")
-    lines.append(
-        "│  ├─ observation order: "
-        + ("shuffled each loop" if recipe["shuffle_observations"] else "input order")
-    )
-    for index, stage in enumerate(inner_schedule):
-        lines.append(f"│  ├─ each hologram: {stage_text(stage)}")
-    projection_every = recipe["projection_every"]
-    cadence = "one observation sweep" if projection_every is None else f"{projection_every} observation updates"
-    if recipe["projection_relaxation"] == 0:
-        lines.append("│  └─ Repeated physical projection: skipped (relaxation=0)")
-    else:
-        lines.append(
-            f"│  └─ {recipe['projection_model']} projection every {cadence}; "
-            f"relaxation={recipe['projection_relaxation']}"
-        )
-    if float(recipe["projection_focus_prop_um"]) != 0:
-        lines.append(
-            "│     focus before projection: "
-            f"{recipe['projection_focus_prop_um']} µm, "
-            f"phase {recipe['projection_focus_phase_rad']} rad; reverse afterward"
-        )
-    lines.append(f"├─ Modes: {modes}; physical constraints act on support-factor-1 mode")
-    if len(modes) > 1 and recipe["constrain_nonphysical_modes_common"]:
-        lines.append(
-            "├─ Other modes: state-independent common object per energy/beam; "
-            f"relaxation={recipe['nonphysical_modes_common_relaxation']}"
-        )
-    if recipe["preserve_warmup_masked_intensity"]:
-        lines.append("├─ Warmup order: ALL coherent states, then partial-coherence states")
-        lines.append("│  Masked intensities remain fixed to each state's coherent warmup")
-    if recipe["freeze_coherence_after_reference"]:
-        lines.append("├─ Gamma: fit reference, then reuse unchanged for every state")
-    elif recipe["coherence_kernel_scope"] == "shared":
-        descriptions = {
-            "sequential": "each state passes its updated gamma to the next state (serial)",
-            "average": "independent fits from one snapshot; normalized weighted average after each round",
-            "pooled": "fixed gamma per round; pooled fit against all states afterward",
-        }
-        lines.append("├─ Gamma: " + descriptions[recipe["shared_coherence_update"]])
-    if recipe["warmup_calibrate_shared_gamma"]:
-        lines.append("├─ Partial warmup: calibrate reference gamma first, then seed all loop fits with it")
-    lines.append(f"├─ CPU workers: {recipe['observation_workers']}; FFT threads each: {recipe['fft_workers']}")
-    if recipe["freeze_saturated_fields"]:
-        lines.append("├─ Saturated observations remain fixed after warmup")
-    if recipe["final_projection_relaxation"] == 0:
-        lines.append("├─ Final physical projection: skipped (relaxation=0)")
-    else:
-        lines.append(
-            f"├─ Final physical projection: relaxation={recipe['final_projection_relaxation']}"
-        )
-    lines.append(
-        "├─ Final measured-amplitude projection: "
-        + ("enabled" if recipe["final_fourier_constraint"] else "disabled")
-    )
-    lines.append("└─ Results")
-    lines.append("   ├─ warmup_fields: fields before joint physical iterations")
-    lines.append("   ├─ fields: final retrieved fields")
-    lines.append("   ├─ components: fitted physical/coherence/mode quantities")
-    lines.append("   ├─ bsmasks: detector masks after crop/bin geometry")
-    lines.append("   └─ errors: stage history, settings, and diagnostics")
-    return "\n".join(lines)
-
-
-def print_universal_workflow(
-    universal_recipe=None,
-    state_labels=None,
-    start_fields_provided=False,
-):
-    """Print :func:`format_universal_workflow` and return its text."""
-    text = format_universal_workflow(
-        universal_recipe,
-        state_labels=state_labels,
-        start_fields_provided=start_fields_provided,
-    )
-    print(text)
-    return text
-
-
-def plot_universal_workflow(universal_recipe=None, state_labels=None,
-                            start_fields_provided=False):
-    """Display the resolved workflow as a saveable Matplotlib figure."""
-    text = format_universal_workflow(universal_recipe, state_labels=state_labels,
-                                    start_fields_provided=start_fields_provided)
-    lines = text.splitlines()
-    fig, ax = plt.subplots(figsize=(max(12, min(24, max(map(len, lines)) * .095)),
-                                    max(4, len(lines) * .24)))
-    ax.axis("off")
-    ax.text(0, 1, text, va="top", ha="left", family="monospace", fontsize=9,
-            transform=ax.transAxes)
-    fig.tight_layout()
-    return fig
-
-
 def _run_energy_update_schedule(
     field,
     amplitude,
@@ -3907,12 +2582,12 @@ def _run_energy_update_schedule(
     for stage_index, stage in enumerate(schedule):
         mode = stage["mode"]
         Nit = stage["Nit"]
-        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-            raise ValueError(
-                "This energy schedule does not support partial-coherence RL "
-                "updates because no coherence kernel is supplied."
-            )
         if mode == "gradient_descent":
+            if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
+                raise ValueError(
+                    "gradient_descent update stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
             refined = gradient.refine_field_gradient(
                 field,
                 amplitude,
@@ -3983,16 +2658,12 @@ def _run_energy_update_schedule(
     return field, stage_results
 
 
-def _projection_is_due(completed_updates, projection_start, projection_every,
-                       total_updates=None):
+def _projection_is_due(completed_updates, projection_start, projection_every):
     """Return whether a joint projection is scheduled after this update.
 
     Both controls use completed observation or energy updates, not outer-loop
-    indices. A positive start value is itself an eligible boundary. The last
-    update is reserved for the separately controlled final projection.
+    indices. A positive start value is itself an eligible boundary.
     """
-    if total_updates is not None and completed_updates >= total_updates:
-        return False
     if completed_updates < projection_start:
         return False
     offset = (
@@ -4053,12 +2724,6 @@ def _verify_multi_energy_recipe(recipe, nE):
             "projection_model must be 'none', 'svd'/'low_rank', "
             "or 'rank1_spectral'."
         )
-    if not isinstance(recipe["fit_material_thickness"], bool):
-        raise ValueError("fit_material_thickness must be bool.")
-    if recipe["fit_material_thickness"] and model not in {
-        "rank1_spectral", "spectral", "explicit", "cma", "c+m*a",
-    }:
-        raise ValueError("Fitting thickness requires projection_model='rank1_spectral'.")
 
     _build_update_schedule(
         recipe,
@@ -4083,8 +2748,8 @@ def _verify_multi_energy_recipe(recipe, nE):
         or projection_every <= 0
     ):
         raise ValueError("projection_every must be None or a positive integer.")
-    if recipe["outer_iterations"] < 0:
-        raise ValueError("outer_iterations must be >= 0.")
+    if recipe["outer_iterations"] <= 0:
+        raise ValueError("outer_iterations must be > 0.")
     projection_start = recipe["projection_start"]
     if projection_start is not None and (
         isinstance(projection_start, bool)
@@ -4102,8 +2767,6 @@ def _verify_multi_energy_recipe(recipe, nE):
         raise ValueError("plot_every must be > 0.")
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
-    if not (0 <= recipe["final_projection_relaxation"] <= 1):
-        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
         raise ValueError("projection_constraints_inside_support_only must be bool.")
     if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
@@ -4262,17 +2925,11 @@ def multi_energy_phase_retrieval_algorithm(
             )
         recipe.update(multi_energy_recipe)
 
-    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
-        holograms, mask_pixel, supportmask, recipe, start_fields
-    )
     holograms = _as_energy_stack(holograms)
     supportmask = np.asarray(supportmask)
 
     nE, nx, ny = holograms.shape
     _verify_multi_energy_recipe(recipe, nE)
-    material_thickness = _recipe_material_thickness(recipe, input_geometry)
-    if material_thickness is not None:
-        material_thickness = np.fft.fftshift(material_thickness)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
     projection_supportmask = (
@@ -4293,7 +2950,7 @@ def multi_energy_phase_retrieval_algorithm(
     mask_stack = _as_energy_mask(mask_pixel, nE=nE, image_shape=(nx, ny))
 
     if start_fields is None:
-        start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+        start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
         fields = np.repeat(start[None, :, :], nE, axis=0).astype(np.complex128)
 
         # Rough per-energy amplitude normalization, analogous to the original
@@ -4321,6 +2978,7 @@ def multi_energy_phase_retrieval_algorithm(
         "projection_steps": [],
         "settings": recipe.copy(),
     }
+
     start_time = time.time()
     print(
         "Universal phase retrieval: preparing pure-energy reconstruction "
@@ -4421,10 +3079,7 @@ def multi_energy_phase_retrieval_algorithm(
                 completed_updates,
                 projection_start,
                 projection_every,
-                total_updates=outer_iterations * nE,
             ):
-                continue
-            if recipe["projection_relaxation"] == 0:
                 continue
 
             # The projection sees the complete current energy stack.
@@ -4449,8 +3104,6 @@ def multi_energy_phase_retrieval_algorithm(
                 fit_known_beta_scale=recipe["fit_known_beta_scale"],
                 fit_known_beta_offset=recipe["fit_known_beta_offset"],
                 projection_supportmask=projection_supportmask,
-                material_thickness=material_thickness,
-                fit_material_thickness=recipe["fit_material_thickness"],
                 return_components=True,
             )
             errors["projection_steps"].append(
@@ -4475,13 +3128,13 @@ def multi_energy_phase_retrieval_algorithm(
 
     # Final projection, unless the user explicitly selected no projection.
     print("Universal phase retrieval: applying final energy projection", flush=True)
-    projected_fields, components = project_fourier_fields_multi_energy(
+    fields, components = project_fourier_fields_multi_energy(
         fields,
         projection_model=recipe["projection_model"],
         rank=recipe["rank"],
         static_mode=recipe["projection_static_mode"],
         weights=recipe["energy_weights"],
-        relaxation=recipe["final_projection_relaxation"],
+        relaxation=1.0,
         log_floor=recipe["log_floor"],
         spectral_constraint=recipe["spectral_constraint"],
         energy_values=recipe["energy_values"],
@@ -4495,13 +3148,8 @@ def multi_energy_phase_retrieval_algorithm(
         fit_known_beta_scale=recipe["fit_known_beta_scale"],
         fit_known_beta_offset=recipe["fit_known_beta_offset"],
         projection_supportmask=projection_supportmask,
-        material_thickness=material_thickness,
-        fit_material_thickness=recipe["fit_material_thickness"],
         return_components=True,
     )
-    if recipe["final_projection_relaxation"] > 0:
-        fields = projected_fields
-    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
 
     if recipe["final_fourier_constraint"]:
         for j in range(nE):
@@ -4518,7 +3166,7 @@ def multi_energy_phase_retrieval_algorithm(
         flush=True,
     )
 
-    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)
+    return fields, fieldswarmup,components, bsmasks, errors
 
 
 def default_general_phase_retrieval_recipe():
@@ -4527,41 +3175,11 @@ def default_general_phase_retrieval_recipe():
         # Phase-retrieval stages applied independently to every observation.
         "inner_mode": ["HAPRE"],
         "inner_Nit": [1],
-        "outer_iterations": 300,  # 0 runs warmup and configured final constraints only
+        "outer_iterations": 300,
         "warmup_mode": ["HAPRE"],
         "warmup_Nit": [20],
-        # Optional explicit schedules for the reference observation and all
-        # other observations.  None keeps the shared warmup schedule above.
-        "warmup_reference_mode": None,
-        "warmup_reference_Nit": None,
-        "warmup_other_mode": None,
-        "warmup_other_Nit": None,
-        "warmup_start_from_first": False,
-        "warmup_reference_observation": 0,
-        "startimage_scale_fit": "linear",  # or "through_origin"
-        "startimage_radial_normalization": False,
-        "warmup_seed_scale_fit": "sum",  # or "linear" intensity slope
-        "warmup_seeded_stage_indices": None,  # None repeats the full schedule
-        "freeze_saturated_fields": False,
-        "partial_coherence": False,
-        "coherence_kernel_scope": "per_observation",  # or "shared" across states
-        # sequential: hand gamma to the next state; average: independent fits
-        # from one snapshot; pooled: fixed gamma per sweep then joint RL fit.
-        "shared_coherence_update": "sequential",
-        "warmup_calibrate_shared_gamma": False,
-        "coherence_round_iterations": 50,
-        "coherent_refresh_rounds": [],  # 1-based outer rounds, before their PC updates
-        "coherent_refresh_iterations": 50,
-        "coherent_refresh_mode": "ER",
-        "observation_workers": 1,
-        "fft_workers": 1,
-        # Complete all coherent warmups first; freeze their missing-pixel targets
-        # for every later partial-coherence stage (sum of intensities for modes).
-        "preserve_warmup_masked_intensity": False,
-        # Shared scope only: calibrate gamma in reference warmup, then hold it.
-        "freeze_coherence_after_reference": False,
         "shuffle_observations": True,
-        "random_seed": 0,
+        "random_seed": None,
         "beta_zero": 0.5,
         "beta_mode": "arctan",
         "alpha_zero": 0.0,
@@ -4576,53 +3194,11 @@ def default_general_phase_retrieval_recipe():
         "warmup_TV_freq": None,
         "warmup_RL_it": None,
         "warmup_RL_freq": None,
-        "warmup_reference_beta_zero": None,
-        "warmup_reference_beta_mode": None,
-        "warmup_reference_alpha_zero": None,
-        "warmup_reference_alpha_mode": None,
-        "warmup_reference_TV_freq": None,
-        "warmup_reference_RL_it": None,
-        "warmup_reference_RL_freq": None,
-        "warmup_other_beta_zero": None,
-        "warmup_other_beta_mode": None,
-        "warmup_other_alpha_zero": None,
-        "warmup_other_alpha_mode": None,
-        "warmup_other_TV_freq": None,
-        "warmup_other_RL_it": None,
-        "warmup_other_RL_freq": None,
         "plot_every": 1e9,
         "average_img": 1,
         "Fourier_last": True,
         "final_fourier_constraint": True,
         "hologram_intensity_cutoff_vmin": -1,
-        "binning": 1,
-        "crop": 0,
-        "roi": None,
-        "Nmodes": 1,
-        "modes": None,
-        "gaussian_mode_sigma_x": 4.0,
-        "gaussian_mode_sigma_y": 4.0,
-        "gaussian_mode_angle": 0.0,
-        "gaussian_mode_amplitude": 1.0,
-        "gaussian_mode_center": None,
-        "gaussian_mode_coherent": False,
-        "mode_support_center": "image",
-        "recenter_modal_supports": True,
-        "mode_initialization": "random_phase",  # or "support_fft"
-        "mode_initialization_seed": 0,
-        # Optional incident-power ratios from zero-thickness reference apertures.
-        "fit_illumination_intensity": False,
-        "align_global_phase": False,
-        "fit_aperture_illumination": False,
-        "object_illumination_mode": "pooled",
-        "aperture_factor_type": "complex",
-        "illumination_intensity_reference_observation": 0,
-        # Optionally remove state dependence from support-factor modes other
-        # than 1 by projecting them to one common object per energy/beam.
-        "magnetization_mode_groups": None,
-        "illumination_mode_groups": None,
-        "constrain_nonphysical_modes_common": False,
-        "nonphysical_modes_common_relaxation": 1.0,
         # General log-object projection settings.
         "projection_model": "physical_factorized",
         # Number of completed observation updates between projections. None
@@ -4631,53 +3207,17 @@ def default_general_phase_retrieval_recipe():
         # None starts projection at the first projection_every boundary.
         "projection_start": None,
         "projection_relaxation": 1.0,
-        "final_projection_relaxation": 1.0,
         "observation_weights": None,
         "rank_deficient": "error",
         # Physical factorization L = C_m + q_c(E) + p*q_m(E)*mz_s.
         "physical_iterations": 20,
-        "clip_magnetization": True,
-        "magnetization_clip_range": (-1.0, 1.0),
-        "magnetization_trend": "none",
-        "magnetization_trend_intensity_cutoff": 0.01,
-        "magnetization_trend_correction": "offset",
-        "bound_magnetization_median": False,
-        "magnetization_median_scope": "whole",
-        # Snap to the nearest of -1, 0, +1.
-        "initial_binary_magnetization": False,
-        "binary_magnetization": False,
-        "binary_magnetization_values": [-1.0, 0.0, 1.0],
-        "physical_projection_object_roi": False,
-        "physical_phase_reference": False,
-        # Shared spatial least-squares weights from mean anchor |exit wave|^2.
-        "physical_spatial_weighting": "exit_wave_intensity",
-        "projection_diagnostic_observation": None,
-        # Optional reversible focus transform around every object-space
-        # physical projection. Zero propagation skips propagation and phase.
-        "projection_focus_prop_um": 0.0,
-        "projection_focus_phase_rad": 0.0,
-        "projection_focus_setup": None,
-        "projection_focus_integer_wavelength": True,
-        "material_mask": None,
-        "material_thickness": None,
-        "fit_material_thickness": False,
-        # None preserves the legacy one-chemical/one-magnetic physical model.
-        # A list enables nonnegative chemical mixtures with optional magnetism
-        # and independent spectral constraints for each species.
-        "chemical_species": None,
-        "chemical_reference_mask": None,
-        "chemical_reference_alignment": True,
-        "chemical_initialization_seed": 0,
         "saturated_states": None,
         # If True, force the fitted magnetic state maps to zero outside the
         # real-space support used by the phase-retrieval kernel.
-        "zero_magnetization_outside_support": True,
-        # If True, force the material thickness to zero outside that support.
-        # A supplied material mask can additionally mark holes inside it.
-        "zero_thickness_outside_support": False,
+        "zero_magnetization_outside_support": False,
         # If True, apply the selected joint log-object projection only inside
         # the real-space support; outside it, keep each observation unchanged.
-        "projection_constraints_inside_support_only": True,
+        "projection_constraints_inside_support_only": False,
         # Backward-compatible alias for older physical-only recipes.
         "physical_constraints_inside_support_only": False,
         "charge_spectral_constraint": "free",
@@ -4721,29 +3261,6 @@ def _ordered_unique(values):
     return unique, indices
 
 
-def illumination_group_labels(state_labels, energy_labels, variation="common"):
-    """Build stable incoming-wave groups, independently of coherence gamma.
-
-    Polarization is intentionally absent: opposite polarizations within an
-    energy/state group share the incoming wave. Energy labels must already be
-    calibrated/grouped; raw noisy readings would create unintended extra beams.
-    This selects free complex beam fields, not a uniquely calibrated probe model.
-    """
-    states, energies = list(state_labels), list(energy_labels)
-    if len(states) != len(energies):
-        raise ValueError("State and energy labels must have the same length")
-    if variation not in {"common", "energy", "state", "energy_state"}:
-        raise ValueError("variation must be common, energy, state, or energy_state")
-    groups, labels = {}, []
-    for state, energy in zip(states, energies):
-        key = (None if variation == "common" else energy if variation == "energy"
-               else state if variation == "state" else (energy, state))
-        if key not in groups:
-            groups[key] = f"beam{len(groups)}"
-        labels.append(groups[key])
-    return labels
-
-
 def _normalize_metadata(
     state_labels,
     energy_labels,
@@ -4751,14 +3268,7 @@ def _normalize_metadata(
     beam_labels,
     n_observations,
 ):
-    """
-    Validate and encode all observation metadata used by the model.
-
-    Context:
-    Observation labels define which fitted quantities are shared. Preserve encounter order
-    when assigning group indices so component arrays remain aligned with the input
-    observations.
-    """
+    """Validate and encode all observation metadata used by the model."""
     states = np.asarray(state_labels)
     energies = np.asarray(energy_labels)
     polarizations = np.asarray(polarization_coefficients, dtype=float)
@@ -4933,27 +3443,6 @@ def project_log_objects_general(
     weighted_design = design * sqrt_weights[:, None]
     design_rank = np.linalg.matrix_rank(weighted_design)
     n_components = design.shape[1]
-    single_beam = len(metadata["beam_names"]) == 1
-    single_energy = len(metadata["energy_names"]) == 1
-    same_polarization = np.allclose(
-        metadata["polarizations"],
-        metadata["polarizations"][0],
-    )
-    if (
-        design_rank < n_components
-        and rank_deficient == "error"
-        and single_beam
-        and single_energy
-        and same_polarization
-    ):
-        raise ValueError(
-            "The general state/energy/polarization/beam design is rank "
-            "deficient for a single-beam, single-energy, same-polarization "
-            "scan. This is the standard hysteresis case: use "
-            "projection_model='physical_factorized' (shared charge + state "
-            "magnetization), or add beam/polarization diversity to make the "
-            "general model identifiable."
-        )
     if design_rank < n_components and rank_deficient == "error":
         raise ValueError(
             "The general state/energy/polarization/beam design is rank "
@@ -5037,303 +3526,6 @@ def project_log_objects_general(
     return projected, components
 
 
-def largest_support_component(supportmask):
-    """Binary thickness template for the largest connected support aperture.
-
-    The input is an unshifted 2D object-space support. Diagonal neighbors
-    belong to the same aperture. The result has the same shape and uint8 type.
-    """
-    from scipy.ndimage import label
-
-    support = np.asarray(supportmask)
-    if support.ndim != 2:
-        raise ValueError("supportmask must be a 2D array.")
-    labels, count = label(support != 0, structure=np.ones((3, 3), dtype=int))
-    if count == 0:
-        raise ValueError("supportmask has no nonzero aperture.")
-    sizes = np.bincount(labels.ravel())
-    sizes[0] = 0
-    return (labels == np.argmax(sizes)).astype(np.uint8)
-
-
-def _two_domain_distribution(values, weights):
-    """Conservative two-population estimate, not an absolute calibration.
-
-    Both signs, >=10% weighted population per domain, and separation greater
-    than four within-population standard deviations are required. Reject
-    uniform/single broad populations rather than manufacturing domains.
-    """
-    values, weights = np.asarray(values, float), np.asarray(weights, float)
-    if len(values) < 32 or not np.all(np.isfinite(values)):
-        return None
-    centers = np.quantile(values, [.1, .9])
-    if centers[0] == centers[1]:
-        return None
-    for _ in range(40):
-        membership = values > centers.mean()
-        if not np.any(membership) or np.all(membership):
-            return None
-        updated = np.array([np.average(values[~membership], weights=weights[~membership]),
-                            np.average(values[membership], weights=weights[membership])])
-        if np.allclose(updated, centers, rtol=0, atol=1e-12):
-            centers = updated
-            break
-        centers = updated
-    membership = values > centers.mean()
-    masses = np.array([weights[~membership].sum(), weights[membership].sum()])
-    if masses.min() < .1*masses.sum() or not centers[0] < 0 < centers[1]:
-        return None
-    deviations = [np.sqrt(np.average((values[selection]-center)**2, weights=weights[selection]))
-                  for selection, center in zip([~membership, membership], centers)]
-    gap = centers[1]-centers[0]
-    if gap <= 4*max(deviations):
-        return None
-    # A real gap must have low probability density; two-means alone will split
-    # a single broad peak even when no domain populations are present.
-    valley = abs(values-centers.mean()) < .1*gap
-    if weights[valley].sum() > .05*weights.sum():
-        return None
-    return centers
-
-
-def _weighted_magnetization_median(values, weights):
-    """Interpolate the weighted CDF at its midpoint; equal weights give np.median."""
-    order = np.argsort(values)
-    values, weights = np.asarray(values)[order], np.asarray(weights)[order]
-    centers = (np.cumsum(weights)-.5*weights)/np.sum(weights)
-    return float(np.interp(.5, centers, values))
-
-
-def _constrain_magnetization_trend(maps, active, names, saturated, trend,
-                                   clip=True, groups=None, discrete_values=None, preferences=None,
-                                   spatial_weights=None, state_weights=None, correction="offset", median_bounds=False,
-                                   clip_range=(-1.0, 1.0), median_scope="whole"):
-    """Project state means onto a monotone sequence, preserving fixed anchors.
-
-    Continuous maps use weighted means; correction may offset or positively
-    scale retained pixels. Infeasible factors fall back to an offset. Equality
-    between neighbouring states is allowed.
-
-    State order is first appearance in observation metadata. Each optional
-    modal group has its own sequence. Spatial texture is retained through a
-    constant shift (with bounded water filling when clipping is enabled).
-    Discrete maps instead adjust allowed-value counts; no pixel ordering
-    between states is imposed.
-    """
-    if (trend == "none" and not median_bounds) or not np.any(active):
-        return
-    if correction not in ("offset", "factor", "affine_domains"):
-        raise ValueError("magnetization_trend_correction must be 'offset', 'factor', or 'affine_domains'.")
-    spatial_weights = np.ones(active.shape) if spatial_weights is None else np.asarray(spatial_weights, float)
-    if spatial_weights.shape != active.shape or np.any(~np.isfinite(spatial_weights)) or np.any(spatial_weights < 0):
-        raise ValueError("Trend spatial weights must be finite nonnegative and match the maps")
-    active = active & (spatial_weights > 0)
-    if not np.any(active):
-        return
-    pixel_weights = spatial_weights[active]
-    def mean(values):
-        return float(np.average(values, weights=pixel_weights))
-    state_weights = np.ones(len(names)) if state_weights is None else np.asarray(state_weights, float)
-    if state_weights.shape != (len(names),) or np.any(~np.isfinite(state_weights)) or np.any(state_weights <= 0):
-        raise ValueError("Trend state weights must be finite and positive")
-    if discrete_values is not None and (correction != "offset" or not np.allclose(pixel_weights, pixel_weights[0])):
-        raise ValueError("Discrete trend correction requires offset mode and uniform retained-pixel weights")
-    if median_bounds and discrete_values is not None and np.any(abs(discrete_values) > 1):
-        raise ValueError("Median bounds require discrete magnetization values within [-1, 1]")
-    clip_low, clip_high = clip_range
-    def median_valid(values):
-        selections = [np.ones(values.shape, bool)] if median_scope == "whole" else [values < 0, values > 0]
-        return all(abs(_weighted_magnetization_median(values[mask], pixel_weights[mask])) <= 1.+1e-12
-                   for mask in selections if np.any(mask))
-    if median_scope not in ("whole", "domains"):
-        raise ValueError("magnetization_median_scope must be 'whole' or 'domains'.")
-    if median_bounds and median_scope == "domains" and discrete_values is None:
-        # Positive scaling within each sign preserves membership and texture.
-        for index, name in enumerate(names):
-            if name in saturated:
-                continue
-            values = maps[index][active].copy()
-            for mask in (values < 0, values > 0):
-                if np.any(mask):
-                    median = _weighted_magnetization_median(values[mask], pixel_weights[mask])
-                    if abs(median) > 1.:
-                        values[mask] /= abs(median)
-            maps[index][active] = values
-    direction = -1. if trend == "decreasing" else 1.
-    directed_low, directed_high = sorted((direction*clip_low, direction*clip_high))
-    levels = None if discrete_values is None else np.sort(direction * discrete_values)
-    if levels is not None and len(levels) > 2 and not np.allclose(
-            np.diff(levels), levels[1] - levels[0], rtol=1e-12, atol=1e-14):
-        raise ValueError("magnetization_trend with discrete magnetization requires equally spaced values.")
-    sequences = [list(range(len(names)))] if groups is None else groups
-    for indices in sequences:
-        means = direction * np.array([mean(maps[index][active]) for index in indices])
-        anchors = {i: direction * saturated[names[index]]
-                   for i, index in enumerate(indices) if names[index] in saturated}
-        if median_bounds and any(abs(value) > 1 for value in anchors.values()):
-            raise ValueError("Median bounds contradict saturated_states outside [-1, 1]")
-        positions = sorted(anchors) if trend != "none" else []
-        if any(anchors[a] > anchors[b] for a, b in zip(positions, positions[1:])):
-            raise ValueError("magnetization_trend contradicts saturated_states in state order.")
-        targets = means.copy()
-        medians = direction*np.array([_weighted_magnetization_median(maps[index][active], pixel_weights)
-                                      for index in indices])
-        lower = means-1.-medians if median_bounds and levels is None else np.full(len(indices), -np.inf)
-        upper = means+1.-medians if median_bounds and levels is None else np.full(len(indices), np.inf)
-        if median_bounds and median_scope == "domains" and levels is None:
-            # Domain-wise scaling can leave no common admissible offset.
-            # For a trend, choose feasible means in [-1, 1] and permit a
-            # mean-preserving contraction when an offset violates a median.
-            lower = np.full(len(indices), -1. if trend != "none" else -np.inf)
-            upper = np.full(len(indices), 1. if trend != "none" else np.inf)
-        if clip:
-            lower = np.maximum(lower, directed_low)
-            upper = np.minimum(upper, directed_high)
-        boundaries = [-1] + positions + [len(indices)]
-        for left, right in zip(boundaries, boundaries[1:]):
-            if levels is not None and right > left + 1 and (
-                    anchors.get(left, -np.inf) > levels[-1]
-                    or anchors.get(right, np.inf) < levels[0]):
-                raise ValueError("magnetization_trend anchors are incompatible with binary_magnetization_values.")
-            # Bounded isotonic regression: enforce the mean trend and median
-            # bounds jointly, rather than alternately undoing either correction.
-            blocks = []
-            for i in range(left + 1, right):
-                lo = max(lower[i], anchors.get(left, -np.inf))
-                hi = min(upper[i], anchors.get(right, np.inf))
-                if lo > hi + 1e-12:
-                    raise ValueError("Median bounds and trend/anchors cannot be satisfied by offsets; revise the material mask or constraints")
-                weight = state_weights[indices[i]]
-                blocks.append([np.clip(means[i], lo, hi), weight, 1, lo, hi, means[i]*weight])
-                while trend != "none" and len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
-                    b, a = blocks.pop(), blocks.pop()
-                    weight = a[1]+b[1]
-                    lo, hi = max(a[3], b[3]), min(a[4], b[4])
-                    if lo > hi + 1e-12:
-                        raise ValueError("Median bounds and trend cannot be satisfied by offsets; revise the material mask or constraints")
-                    total = a[5]+b[5]
-                    blocks.append([np.clip(total/weight, lo, hi), weight, a[2]+b[2], lo, hi, total])
-            targets[left+1:right] = np.repeat([b[0] for b in blocks], [b[2] for b in blocks])
-        domain_centers = {}
-        if correction == "affine_domains":
-            for index in indices:
-                centers = _two_domain_distribution(maps[index][active], pixel_weights)
-                if centers is not None:
-                    domain_centers[index] = centers
-        reference_gap = (np.median([centers[1]-centers[0] for centers in domain_centers.values()])
-                         if domain_centers else None)
-        for i, index in enumerate(indices):
-            if i in anchors:
-                continue
-            values = maps[index][active]
-            target = direction * targets[i]
-            if levels is not None:
-                if len(levels) == 1:
-                    continue
-                # Means lie on a count lattice. Rounding isotonic targets to
-                # the same lattice preserves their order without ordering pixels.
-                spacing = levels[1] - levels[0]
-                ranks = np.rint((direction*values - levels[0])/spacing).astype(int)
-                target_count = int(np.rint((targets[i]-levels[0])*len(values)/spacing))
-                target_count = np.clip(target_count, 0, (len(levels)-1)*len(values))
-                delta = int(target_count - ranks.sum())
-                preferred = direction * (preferences.get(index, values)
-                                         if preferences is not None else values)
-                while delta:
-                    step = 1 if delta > 0 else -1
-                    candidates = np.flatnonzero(ranks < len(levels)-1 if step > 0 else ranks > 0)
-                    current = levels[ranks[candidates]]
-                    updated = levels[ranks[candidates]+step]
-                    cost = (updated-preferred[candidates])**2 - (current-preferred[candidates])**2
-                    count = min(abs(delta), len(candidates))
-                    chosen = candidates[np.argsort(cost, kind="stable")[:count]]
-                    ranks[chosen] += step
-                    delta -= step*count
-                maps[index][active] = direction * levels[ranks]
-                continue
-            current_mean = mean(values)
-            if abs(target - current_mean) < 1e-14:
-                continue
-            if correction == "affine_domains" and index in domain_centers:
-                centers = domain_centers[index]
-                factor = reference_gap/(centers[1]-centers[0])
-                offset = target-factor*current_mean
-                adjusted = factor*values+offset
-                # Preserve two signed populations and avoid clipping that
-                # would invalidate the required weighted mean.
-                adjusted_centers = factor*centers+offset
-                if (not median_bounds or median_valid(adjusted)) and adjusted_centers[0] < 0 < adjusted_centers[1] and (
-                        not clip or np.all((adjusted >= clip_low) & (adjusted <= clip_high))):
-                    maps[index][active] = adjusted
-                    continue
-                # Missing/ambiguous domains or infeasible bounds use offset.
-            if correction == "factor" and abs(current_mean) > 1e-14:
-                factor = target/current_mean
-                scaled = values*factor
-                # Positive factors preserve pixel signs. Clipping would change
-                # the target mean, so use an offset for infeasible factors.
-                if factor >= 0 and (not median_bounds or median_valid(scaled)) and (not clip or np.all((scaled >= clip_low) & (scaled <= clip_high))):
-                    maps[index][active] = scaled
-                    continue
-            # Zero mean, a required sign reversal, or incompatible clipping
-            # cannot be corrected safely by a positive factor: offset fallback.
-            if clip:
-                lo, hi = clip_low - values.max(), clip_high - values.min()
-                for _ in range(60):
-                    shift = (lo + hi)/2
-                    if mean(np.clip(values + shift, clip_low, clip_high)) < target:
-                        lo = shift
-                    else:
-                        hi = shift
-                maps[index][active] = np.clip(values + (lo+hi)/2, clip_low, clip_high)
-            else:
-                maps[index][active] = values + target - current_mean
-            if median_bounds and median_scope == "domains" and not median_valid(maps[index][active]):
-                adjusted = maps[index][active].copy()
-                # A constant at the target is feasible. Retain as much
-                # spatial contrast as possible while keeping that mean.
-                if abs(target) > 1.+1e-12:
-                    raise ValueError("Domain median bounds require a feasible trend target within [-1, 1].")
-                lo, hi = 0., 1.
-                for _ in range(60):
-                    factor = (lo+hi)/2
-                    candidate = target + factor*(adjusted-target)
-                    if median_valid(candidate):
-                        lo = factor
-                    else:
-                        hi = factor
-                maps[index][active] = target + lo*(adjusted-target)
-
-    if median_bounds and median_scope == "domains":
-        if any(not median_valid(maps[index][active]) for index in range(len(names))):
-            raise ValueError("Domain median bounds and trend/clipping cannot be satisfied by the selected correction; revise the constraints.")
-
-
-def _binary_magnetization_values(recipe):
-    """Validate discrete reduced-magnetization values; prefer zero in ties."""
-    try:
-        values = np.asarray(recipe.get("binary_magnetization_values", [-1., 0., 1.]), dtype=float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("binary_magnetization_values must be a nonempty sequence of finite values in [-1, 1].") from exc
-    if (values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values))
-            or np.any(np.abs(values) > 1)):
-        raise ValueError("binary_magnetization_values must be a nonempty sequence of finite values in [-1, 1].")
-    values = np.unique(values)
-    return values[np.argsort(np.abs(values), kind="stable")]
-
-
-def _snap_magnetization(magnetization, values):
-    """Nearest allowed value, preferring smaller magnitude then negative ties."""
-    nearest = np.full_like(magnetization, values[0])
-    distance = np.abs(magnetization - values[0])
-    for value in values[1:]:
-        candidate_distance = np.abs(magnetization - value)
-        closer = candidate_distance < distance
-        nearest = np.where(closer, value, nearest)
-        distance = np.minimum(distance, candidate_distance)
-    return nearest
-
-
 def project_log_objects_physical(
     log_objects,
     state_labels,
@@ -5347,42 +3539,15 @@ def project_log_objects_physical(
     recipe=None,
     magnetization_supportmask=None,
     projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
-    thickness_supportmask=None,
     return_components=False,
-    initial_components=None,
 ):
     """
-    Fit ``L = C_beam + t(r)[q_charge(E) + p*q_magnetic(E)*mz_state(r)]``.
+    Fit ``L = C_beam + q_charge(E) + p*q_magnetic(E)*mz_state``.
 
-    Recipe ``initial_binary_magnetization=True`` snaps the first measured guess
-    to the nearest of -1 and +1 (exact zero chooses -1), without constraining
-    later fitting or snapping a reused fit.
-
-    ``initial_components`` reuses a previous fit on the same state/energy/beam
-    grid. Arrays are copied; saturated signs and support constraints still apply.
-
-    ``mz_state`` is real and clipped to ``[-1, 1]`` by default. Set recipe
-    ``magnetization_clip_range=(lower, upper)`` to choose finite clipping limits,
-    or ``clip_magnetization=False`` to disable clipping. Set
-    ``binary_magnetization=True`` to snap to the nearest allowed value in
-    ``binary_magnetization_values`` (default [-1, 0, 1]). Ties prefer smaller
-    magnitude, then the negative value. This overrides clipping. Saturated states, when
+    ``mz_state`` is real and clipped to ``[-1, 1]``. Saturated states, when
     supplied, are fixed to +1 or -1. Charge and magnetic response spectra can
     be constrained through the local free/KK/known-beta spectral options,
     followed by optional rectangular value bounds.
-
-    Context:
-    Physical-fit boundary: input is a stack of complex object logarithms, not detector
-    intensities. physical_spatial_weighting selects uniform (None), a shared
-    saturation-anchor intensity mean ("exit_wave_intensity", all frames if no
-    anchors), or each observation's own intensity ("exit_wave_intensity_per_frame").
-    Intensity maps have mean one inside material and are held fixed during each
-    fit. Per-frame weights apply to all least-squares updates, with scalar
-    observation weights multiplying pixel weights. With object ROI enabled,
-    pack only positive-thickness pixels before phase
-    adjustment and fitting, then scatter them back while preserving the exterior.
     """
     log_objects = _as_energy_stack(log_objects, name="log_objects")
     if not (0 <= relaxation <= 1):
@@ -5393,135 +3558,8 @@ def project_log_objects_physical(
     ) or iterations <= 0:
         raise ValueError("physical_iterations must be a positive integer.")
     recipe = default_general_phase_retrieval_recipe() if recipe is None else recipe
-    clip_magnetization = recipe.get("clip_magnetization", True)
-    if not isinstance(clip_magnetization, bool):
-        raise ValueError("clip_magnetization must be bool.")
-    clip_range = np.asarray(recipe.get("magnetization_clip_range", (-1., 1.)), dtype=float)
-    if clip_range.shape != (2,) or not np.all(np.isfinite(clip_range)) or clip_range[0] >= clip_range[1]:
-        raise ValueError("magnetization_clip_range must contain two finite values with lower < upper.")
-    binary_magnetization = recipe.get("binary_magnetization", False)
-    if not isinstance(binary_magnetization, bool):
-        raise ValueError("binary_magnetization must be bool.")
-    initial_binary = recipe.get("initial_binary_magnetization", False)
-    if not isinstance(initial_binary, bool):
-        raise ValueError("initial_binary_magnetization must be bool.")
-    binary_values = _binary_magnetization_values(recipe) if binary_magnetization else None
-    trend = recipe.get("magnetization_trend", "none")
-    if trend not in ("none", "increasing", "decreasing"):
-        raise ValueError("magnetization_trend must be 'none', 'increasing', or 'decreasing'.")
-    median_bounds = recipe.get("bound_magnetization_median", False)
-    if not isinstance(median_bounds, bool):
-        raise ValueError("bound_magnetization_median must be bool.")
-    median_scope = recipe.get("magnetization_median_scope", "whole")
-    if median_scope not in ("whole", "domains"):
-        raise ValueError("magnetization_median_scope must be 'whole' or 'domains'.")
-    trend_cutoff = recipe.get("magnetization_trend_intensity_cutoff", 0.01)
-    if not isinstance(trend_cutoff, (int, float, np.number)) or not np.isfinite(trend_cutoff) or not 0 <= trend_cutoff < 1:
-        raise ValueError("magnetization_trend_intensity_cutoff must be a fraction in [0, 1).")
-    trend_correction = recipe.get("magnetization_trend_correction", "offset")
-    if trend_correction not in ("offset", "factor", "affine_domains"):
-        raise ValueError("magnetization_trend_correction must be 'offset', 'factor', or 'affine_domains'.")
-    if (trend != "none" or median_bounds) and recipe.get("chemical_species") is not None:
-        raise ValueError("magnetization_trend currently supports the single-species physical model only.")
-    if recipe.get("chemical_species") is not None:
-        if initial_binary:
-            raise ValueError("initial_binary_magnetization currently supports the single-species physical model only.")
-        try:
-            from .phase_retrieval_species import project_species
-        except ImportError:
-            from phase_retrieval_species import project_species
-        if fit_material_thickness:
-            raise ValueError("With chemical_species, fit species density maps instead of fit_material_thickness.")
-        metadata = _normalize_metadata(state_labels, energy_labels,
-            polarization_coefficients, beam_labels, len(log_objects))
-        return project_species(log_objects, metadata, recipe,
-            _observation_weights(weights, len(log_objects)), material_thickness,
-            magnetization_supportmask, projection_supportmask, thickness_supportmask,
-            saturated_states, iterations, relaxation, return_components)
-    if recipe.get("physical_projection_object_roi", False):
-        if material_thickness is None:
-            raise ValueError("Object-ROI physical projection requires a material thickness/aperture map.")
-        aperture = np.asarray(material_thickness) > 0
-        if projection_supportmask is not None:
-            aperture &= np.asarray(projection_supportmask) != 0
-        if not np.any(aperture):
-            raise ValueError("Physical projection aperture is empty.")
-        # A compact (active_pixels, 1) image reuses the spatial fitting code
-        # without allocating observations × modes × the full detector area.
-        def pack(array):
-            return None if array is None else np.asarray(array)[aperture][:, None]
-        local_initial = None
-        if initial_components is not None:
-            local_initial = dict(initial_components)
-            for key in ("magnetization", "common_log_objects"):
-                local_initial[key] = np.asarray(initial_components[key])[..., aperture, None]
-        local_recipe = dict(recipe, physical_projection_object_roi=False)
-        local, components = project_log_objects_physical(
-            log_objects[:, aperture, None], state_labels, energy_labels,
-            polarization_coefficients, beam_labels, weights=weights,
-            relaxation=relaxation, saturated_states=saturated_states,
-            iterations=iterations, recipe=local_recipe, initial_components=local_initial,
-            magnetization_supportmask=pack(magnetization_supportmask),
-            projection_supportmask=np.ones((int(aperture.sum()), 1), dtype=bool),
-            material_thickness=pack(material_thickness),
-            fit_material_thickness=fit_material_thickness,
-            thickness_supportmask=pack(thickness_supportmask), return_components=True,
-        )
-        # Fit only active aperture pixels. Vacuum and reference holes are not
-        # silently overwritten by the zero-thickness common-field constraint.
-        projected = log_objects.copy()
-        projected[:, aperture] = local[..., 0]
-        # Restore map shapes for plotting/saving, but do not label unused
-        # exterior component values as physically fitted information.
-        def expand(value):
-            if isinstance(value, dict):
-                return {key: expand(item) for key, item in value.items()}
-            if isinstance(value, np.ndarray) and value.ndim >= 2 and value.shape[-2:] == local.shape[-2:]:
-                full = np.zeros(value.shape[:-2] + aperture.shape, dtype=value.dtype)
-                full[..., aperture] = value[..., 0]
-                return full
-            return value
-        components = expand(components)
-        components["physical_phase_reference"] = bool(recipe.get("physical_phase_reference", False))
-        components["physical_projection_roi_mask"] = aperture.copy()
-        components["physical_projection_fit_pixels"] = int(aperture.sum())
-        components["physical_projection_full_pixels"] = int(aperture.size)
-        return (projected, components) if return_components else projected
-    if recipe.get("physical_phase_reference", False):
-        # Pick equivalent complex-log branches relative to the first state in
-        # each energy/beam group. This preserves exp(log_object) exactly while
-        # preventing a +/- pi wrap from masquerading as a large magnetic phase.
-        # Assumption: relative state phases lie on the nearest reference branch.
-        log_objects = log_objects.copy()
-        phase_groups = {}
-        for index, key in enumerate(zip(energy_labels, beam_labels)):
-            phase_groups.setdefault(key, []).append(index)
-        for indices in phase_groups.values():
-            reference_phase = log_objects[indices[0]].imag.copy()
-            log_objects.imag[indices] = reference_phase + np.angle(np.exp(
-                1j * (log_objects.imag[indices] - reference_phase),
-            ))
-    if (fit_material_thickness and not recipe["fit_known_spectrum_scale"] and
-            any(str(recipe[key]).lower() in {"known_beta", "known-beta", "known_beta_kk", "known-beta-kk"}
-                for key in ("charge_spectral_constraint", "magnetic_spectral_constraint"))):
-        raise ValueError("Fitting relative thickness requires free charge and magnetic spectral scales.")
 
     n_observations, nx, ny = log_objects.shape
-    thickness = _validate_material_thickness(material_thickness, (nx, ny))
-    if thickness is None:
-        thickness = np.ones((nx, ny), dtype=float)
-    thickness = thickness.copy()
-    if recipe["zero_thickness_outside_support"]:
-        if thickness_supportmask is None:
-            raise ValueError(
-                "thickness_supportmask is required when "
-                "zero_thickness_outside_support=True."
-            )
-        thickness_supportmask = np.asarray(thickness_supportmask) != 0
-        if thickness_supportmask.shape != (nx, ny):
-            raise ValueError("thickness_supportmask must have shape (nx, ny).")
-        thickness *= thickness_supportmask
-    allowed_material = thickness > 0
     metadata = _normalize_metadata(
         state_labels,
         energy_labels,
@@ -5537,38 +3575,6 @@ def project_log_objects_physical(
     n_states = len(metadata["state_names"])
     n_energies = len(metadata["energy_names"])
     n_beams = len(metadata["beam_names"])
-    spatial_weighting = recipe.get("physical_spatial_weighting")
-    if spatial_weighting not in (None, "exit_wave_intensity", "exit_wave_intensity_per_frame"):
-        raise ValueError("physical_spatial_weighting must be None, 'exit_wave_intensity', or 'exit_wave_intensity_per_frame'.")
-    spatial_weights = np.ones((nx, ny), dtype=float)
-    if spatial_weighting == "exit_wave_intensity":
-        anchors = [a for a, state in enumerate(metadata["states"]) if state in saturated]
-        selected = anchors or list(range(n_observations))
-        # Scale before exponentiating to avoid overflow; normalize to mean 1
-        # inside material. Use one map across states to avoid magnetic-state bias.
-        log_intensity = 2 * log_objects[selected].real
-        peak = np.max(log_intensity[:, allowed_material])
-        spatial_weights = np.mean(np.exp(np.minimum(log_intensity - peak, 0.)), axis=0)
-        spatial_weights[~allowed_material] = 0.
-        scale = np.mean(spatial_weights[allowed_material])
-        if not np.isfinite(scale) or scale <= 0:
-            raise ValueError("Exit-wave intensity weights require nonzero finite material intensity.")
-        spatial_weights /= scale
-    if spatial_weighting == "exit_wave_intensity_per_frame":
-        log_intensity = 2 * log_objects.real
-        peak = np.max(log_intensity[:, allowed_material], axis=1)
-        spatial_weights = np.exp(np.minimum(log_intensity - peak[:, None, None], 0.))
-        spatial_weights[:, ~allowed_material] = 0.
-        scale = np.mean(spatial_weights[:, allowed_material], axis=1)
-        if np.any(~np.isfinite(scale) | (scale <= 0)):
-            raise ValueError("Each frame requires nonzero finite material intensity.")
-        spatial_weights /= scale[:, None, None]
-    observation_spatial_weights = np.broadcast_to(spatial_weights, log_objects.shape)
-    # Preserve the exterior common-field estimate where intensity weights are zero.
-    pixel_weights = weights[:, None, None] * np.where(
-        allowed_material[None], np.maximum(observation_spatial_weights, 1e-30), 1.)
-    if spatial_weighting != "exit_wave_intensity_per_frame":
-        pixel_weights = np.broadcast_to(weights[:, None, None], log_objects.shape)
     if magnetization_supportmask is not None:
         magnetization_supportmask = np.asarray(magnetization_supportmask) != 0
         if magnetization_supportmask.shape != (nx, ny):
@@ -5584,12 +3590,12 @@ def project_log_objects_physical(
 
     # Initialize beam fields from weighted observation means.
     common = np.zeros((n_beams, nx, ny), dtype=np.complex128)
-    beam_weight = np.zeros((n_beams, nx, ny), dtype=float)
+    beam_weight = np.zeros(n_beams, dtype=float)
     for observation in range(n_observations):
         beam = metadata["beam_indices"][observation]
-        common[beam] += pixel_weights[observation] * log_objects[observation]
-        beam_weight[beam] += pixel_weights[observation]
-    common /= beam_weight
+        common[beam] += weights[observation] * log_objects[observation]
+        beam_weight[beam] += weights[observation]
+    common /= beam_weight[:, None, None]
 
     charge = np.zeros(n_energies, dtype=np.complex128)
     magnetic = np.ones(n_energies, dtype=np.complex128)
@@ -5597,10 +3603,6 @@ def project_log_objects_physical(
     for state, sign in saturated.items():
         state_index = metadata["state_names"].index(state)
         magnetization[state_index] = sign
-    # During thickness fitting, keep the known saturated sign at every pixel
-    # where material is allowed. At zero fitted thickness it has no effect on
-    # the exit wave, but retains a direction for a later thickness update.
-    magnetization *= allowed_material if fit_material_thickness else thickness > 0
     if magnetization_supportmask is not None:
         magnetization *= magnetization_supportmask
 
@@ -5626,139 +3628,6 @@ def project_log_objects_physical(
                 )
                 magnetic[energy] = direction * max(amplitude, 1e-12)
 
-        # The second moment above determines an axis, not its signed direction.
-        # Resolve that ambiguity from known saturation contrasts before fitting
-        # free states; otherwise clipping can trap them on the opposite branch
-        # from the anchors. Center within each beam to eliminate its common
-        # field (and the charge term at this energy).
-        anchor_rhs = 0j
-        anchor_norm = 0.0
-        anchor_thickness = thickness.copy()
-        if magnetization_supportmask is not None:
-            anchor_thickness *= magnetization_supportmask
-        for beam in range(n_beams):
-            anchors = [a for a in np.flatnonzero(
-                selection & (metadata["beam_indices"] == beam)
-            ) if metadata["states"][a] in saturated]
-            if len(anchors) < 2:
-                continue
-            anchor_weights = weights[anchors, None, None] * np.maximum(observation_spatial_weights[anchors], 1e-30)
-            coefficients = np.asarray([
-                metadata["polarizations"][a] * saturated[metadata["states"][a]]
-                for a in anchors
-            ])
-            centered = coefficients[:, None, None] - (
-                np.sum(coefficients[:, None, None] * anchor_weights, axis=0)
-                / np.sum(anchor_weights, axis=0)
-            )
-            for a, weight, coefficient in zip(anchors, anchor_weights, centered):
-                basis = coefficient * anchor_thickness
-                anchor_rhs += np.vdot(basis, weight * log_objects[a])
-                anchor_norm += float(np.vdot(basis, weight * basis).real)
-        if anchor_norm > 1e-30:
-            magnetic[energy] = anchor_rhs / anchor_norm
-
-    if initial_components is None:
-        # Seed free states from measured contrast before the first common-field
-        # update can absorb it. Saturated observations determine the baseline
-        # independently of the number/sign of free states in the scan.
-        numerator = np.zeros_like(magnetization)
-        denominator = np.zeros_like(magnetization)
-        for energy in range(n_energies):
-            for beam in range(n_beams):
-                observations = np.flatnonzero(
-                    (metadata["energy_indices"] == energy)
-                    & (metadata["beam_indices"] == beam))
-                if not len(observations):
-                    continue
-                anchors = [a for a in observations if metadata["states"][a] in saturated]
-                baseline = common[beam]
-                if anchors:
-                    anchor_weights = pixel_weights[anchors]
-                    anchor_signs = np.asarray([
-                        metadata["polarizations"][a] * saturated[metadata["states"][a]]
-                        for a in anchors])
-                    baseline = np.sum(anchor_weights * (
-                        log_objects[anchors] - anchor_signs[:, None, None]
-                        * magnetic[energy] * thickness), axis=0) / np.sum(anchor_weights, axis=0)
-                for observation in observations:
-                    state = metadata["state_indices"][observation]
-                    coefficient = metadata["polarizations"][observation] * magnetic[energy] * thickness
-                    weight = pixel_weights[observation]
-                    numerator[state] += weight * np.real(
-                        np.conj(coefficient) * (log_objects[observation] - baseline))
-                    denominator[state] += weight * abs(coefficient)**2
-        for state, name in enumerate(metadata["state_names"]):
-            if name not in saturated:
-                magnetization[state] = np.divide(
-                    numerator[state], denominator[state],
-                    out=np.zeros((nx, ny)), where=denominator[state] > 1e-30)
-        if initial_binary:
-            magnetization = _snap_magnetization(magnetization, np.array([-1., 1.]))
-        if binary_magnetization:
-            magnetization = _snap_magnetization(magnetization, binary_values)
-        elif clip_magnetization:
-            magnetization = np.clip(magnetization, *clip_range)
-        magnetization *= allowed_material
-        if magnetization_supportmask is not None:
-            magnetization *= magnetization_supportmask
-
-    reused_fit = initial_components is not None
-    if reused_fit:
-        for key in ("state_names", "energy_names", "beam_names"):
-            if list(initial_components[key]) != list(metadata[key]):
-                raise ValueError(f"initial_components {key} must match the current fit.")
-        def initial_array(key, shape, dtype):
-            value = np.asarray(initial_components[key], dtype=dtype)
-            if value.shape != shape or not np.all(np.isfinite(value)):
-                raise ValueError(f"initial_components {key} must be finite with shape {shape}.")
-            return value.copy()
-        common = initial_array("common_log_objects", common.shape, complex)
-        charge = initial_array("charge_response", charge.shape, complex)
-        magnetic = initial_array("magnetic_response", magnetic.shape, complex)
-        magnetization = initial_array("magnetization", magnetization.shape, float)
-        if binary_magnetization:
-            magnetization = _snap_magnetization(magnetization, binary_values)
-        elif clip_magnetization:
-            magnetization = np.clip(magnetization, *clip_range)
-        for state, sign in saturated.items():
-            magnetization[metadata["state_names"].index(state)].fill(sign)
-        magnetization *= allowed_material
-        if magnetization_supportmask is not None:
-            magnetization *= magnetization_supportmask
-
-    trend_preferences = {}
-    trend_spatial_weights = np.ones((nx, ny), dtype=float)
-    if trend != "none" or median_bounds:
-        # A common intensity map and cutoff across states avoids state-dependent
-        # selection of the material. Normalize before exponentiating.
-        log_intensity = 2*log_objects.real
-        peak = np.max(log_intensity[:, allowed_material])
-        trend_spatial_weights = np.mean(np.exp(np.minimum(log_intensity-peak, 0.)), axis=0)
-        trend_spatial_weights[~allowed_material] = 0.
-        trend_spatial_weights[trend_spatial_weights < trend_cutoff*np.max(trend_spatial_weights)] = 0.
-        if binary_values is not None:
-            # Discrete counts require a common equal-weight lattice; retain the
-            # same intensity cutoff but use equal weights on surviving pixels.
-            trend_spatial_weights = (trend_spatial_weights > 0).astype(float)
-    if magnetization_supportmask is not None:
-        trend_spatial_weights[~magnetization_supportmask] = 0.
-    trend_state_weights = np.bincount(metadata["state_indices"], weights=weights, minlength=n_states)
-    def constrain_trend():
-        active = thickness > 0
-        if magnetization_supportmask is not None:
-            active &= magnetization_supportmask
-        _constrain_magnetization_trend(
-            magnetization, active, metadata["state_names"], saturated, trend,
-            clip_magnetization, recipe.get("_magnetization_trend_groups"),
-            binary_values, trend_preferences, trend_spatial_weights,
-            trend_state_weights, trend_correction, median_bounds,
-            clip_range=(-1., 1.) if binary_magnetization else clip_range,
-            median_scope=median_scope)
-    constrain_trend()
-
-    initial_magnetization = magnetization.copy()
-
     charge_spectral_info = {}
     magnetic_spectral_info = {}
     for _ in range(int(iterations)):
@@ -5776,36 +3645,21 @@ def project_log_objects_physical(
                 * magnetic[energy]
                 * magnetization[state]
             )
-            common[beam] += pixel_weights[observation] * (
-                log_objects[observation] - thickness * modeled_material
+            common[beam] += weights[observation] * (
+                log_objects[observation] - modeled_material
             )
-            beam_weight[beam] += pixel_weights[observation]
-        common /= beam_weight
+            beam_weight[beam] += weights[observation]
+        common /= beam_weight[:, None, None]
 
-        # Probe zero-thickness pixels that are still allowed to contain
-        # material. Using the exact zero there makes the magnetic update
-        # singular and can turn zero thickness into an absorbing state.
-        magnetization_fit_thickness = thickness
-        if fit_material_thickness:
-            positive = thickness[allowed_material & (thickness > 0)]
-            probe_thickness = 1e-3 * np.mean(positive) if positive.size else 1e-3
-            magnetization_fit_thickness = np.where(
-                allowed_material & (thickness == 0), probe_thickness, thickness,
-            )
-
-        trend_preferences.clear()
-        # Fit real reduced-magnetization maps with optional |mz| <= 1 clipping.
+        # Fit real reduced-magnetization maps while enforcing |mz| <= 1.
         for state, state_name in enumerate(metadata["state_names"]):
             if state_name in saturated:
                 magnetization[state].fill(saturated[state_name])
-                magnetization[state] *= (
-                    allowed_material if fit_material_thickness else thickness > 0
-                )
                 if magnetization_supportmask is not None:
                     magnetization[state] *= magnetization_supportmask
                 continue
             numerator = np.zeros((nx, ny), dtype=float)
-            denominator = np.zeros((nx, ny), dtype=float)
+            denominator = 0.0
             for observation in np.flatnonzero(
                 metadata["state_indices"] == state
             ):
@@ -5814,112 +3668,68 @@ def project_log_objects_physical(
                 coefficient = (
                     metadata["polarizations"][observation]
                     * magnetic[energy]
-                    * magnetization_fit_thickness
                 )
                 residual = (
                     log_objects[observation]
                     - common[beam]
-                    - thickness * charge[energy]
+                    - charge[energy]
                 )
-                numerator += pixel_weights[observation] * np.real(
+                numerator += weights[observation] * np.real(
                     np.conj(coefficient) * residual
                 )
-                denominator += pixel_weights[observation] * abs(coefficient) ** 2
-            magnetization[state] = np.divide(
-                numerator, denominator,
-                out=(magnetization[state].copy() if fit_material_thickness
-                     else np.zeros_like(numerator)),
-                where=denominator > 1e-30,
-            )
-            if binary_magnetization:
-                if trend != "none":
-                    active = thickness > 0
-                    if magnetization_supportmask is not None:
-                        active &= magnetization_supportmask
-                    active &= trend_spatial_weights > 0
-                    trend_preferences[state] = magnetization[state][active].copy()
-                magnetization[state] = _snap_magnetization(magnetization[state], binary_values)
-            elif clip_magnetization:
-                magnetization[state] = np.clip(magnetization[state], *clip_range)
-            if magnetization_supportmask is not None:
-                magnetization[state] *= magnetization_supportmask
-
-        constrain_trend()
+                denominator += weights[observation] * abs(coefficient) ** 2
+            if denominator > 1e-30:
+                magnetization[state] = np.clip(
+                    numerator / denominator,
+                    -1.0,
+                    1.0,
+                )
+                if magnetization_supportmask is not None:
+                    magnetization[state] *= magnetization_supportmask
 
         # Fit scalar charge and magnetic responses independently at each energy.
         for energy in range(n_energies):
             observations = np.flatnonzero(
                 metadata["energy_indices"] == energy
             )
-            # The model has only two scalar coefficients per energy. Accumulate
-            # its 2x2 normal equations instead of materializing one enormous
-            # (observations * pixels, 2) complex design matrix.
-            gram = np.zeros((2, 2), dtype=np.complex128)
-            rhs = np.zeros(2, dtype=np.complex128)
+            rows = []
+            values = []
+            row_weights = []
             for observation in observations:
                 beam = metadata["beam_indices"][observation]
                 state = metadata["state_indices"][observation]
-                magnetic_basis = (
+                coefficient = (
                     metadata["polarizations"][observation]
-                    * magnetization[state]
-                    * thickness
+                    * magnetization[state].ravel()
                 )
-                residual = log_objects[observation] - common[beam]
-                weight = weights[observation] * observation_spatial_weights[observation]
-                gram[0, 0] += np.vdot(thickness, weight * thickness)
-                gram[0, 1] += np.vdot(thickness, weight * magnetic_basis)
-                gram[1, 1] += np.vdot(magnetic_basis, weight * magnetic_basis)
-                rhs[0] += np.vdot(thickness, weight * residual)
-                rhs[1] += np.vdot(magnetic_basis, weight * residual)
-            gram[1, 0] = np.conj(gram[0, 1])
-            coefficients = np.linalg.pinv(gram) @ rhs
-            charge[energy], magnetic[energy] = coefficients
-
-        if fit_material_thickness:
-            # Eliminate the free beam field by centering observations within
-            # each illumination condition, then solve for a shared real map.
-            numerator = np.zeros((nx, ny), dtype=float)
-            denominator = np.zeros((nx, ny), dtype=float)
-            for beam in range(n_beams):
-                observations = np.flatnonzero(metadata["beam_indices"] == beam)
-                total_weight = np.sum(pixel_weights[observations], axis=0)
-                responses = np.stack([
-                    charge[metadata["energy_indices"][a]]
-                    + metadata["polarizations"][a]
-                    * magnetic[metadata["energy_indices"][a]]
-                    * magnetization[metadata["state_indices"][a]]
-                    for a in observations
-                ])
-                mean_response = np.sum(
-                    responses * pixel_weights[observations], axis=0,
-                ) / total_weight
-                mean_log = np.sum(
-                    log_objects[observations]
-                    * pixel_weights[observations], axis=0,
-                ) / total_weight
-                for index, observation in enumerate(observations):
-                    direction = responses[index] - mean_response
-                    residual = log_objects[observation] - mean_log
-                    numerator += pixel_weights[observation] * np.real(
-                        np.conj(direction) * residual
+                rows.append(
+                    np.column_stack(
+                        [
+                            np.ones(coefficient.size),
+                            coefficient,
+                        ]
                     )
-                    denominator += pixel_weights[observation] * np.abs(direction) ** 2
-            if np.any(denominator[allowed_material] > 1e-30):
-                updated = np.maximum(
-                    0, np.divide(numerator, denominator,
-                                 out=thickness.copy(), where=denominator > 1e-30),
                 )
-                updated[~allowed_material] = 0
-                scale = np.mean(updated[allowed_material])
-                if scale > 1e-30:
-                    thickness = updated / scale
-                    charge *= scale
-                    magnetic *= scale
+                values.append(
+                    (
+                        log_objects[observation] - common[beam]
+                    ).ravel()
+                )
+                row_weights.append(
+                    np.full(coefficient.size, weights[observation])
+                )
+            design = np.concatenate(rows, axis=0)
+            target = np.concatenate(values)
+            sqrt_weight = np.sqrt(np.concatenate(row_weights))
+            coefficients = np.linalg.pinv(
+                design * sqrt_weight[:, None]
+            ) @ (target * sqrt_weight)
+            charge[energy], magnetic[energy] = coefficients
 
         # Fix the charge/common-field offset gauge before applying priors.
         charge_offset = np.mean(charge)
         charge -= charge_offset
-        common += charge_offset * thickness
+        common += charge_offset
 
         charge, charge_spectral_info = constrain_complex_spectrum(
             charge,
@@ -5960,40 +3770,12 @@ def project_log_objects_physical(
             recipe["magnetic_response_imag_range"],
         )
 
-    # A fitted thickness may have reached zero on the last iteration. Keep the
-    # returned magnetic object consistent with the final material domain.
-    magnetization *= thickness > 0
-    trend_preferences.clear()
-    constrain_trend()
-
-    if fit_material_thickness:
-        # Keep the illumination estimate consistent with the final fitted
-        # thickness and spectral responses.
-        common.fill(0.0)
-        beam_weight.fill(0.0)
-        for observation in range(n_observations):
-            beam = metadata["beam_indices"][observation]
-            energy = metadata["energy_indices"][observation]
-            state = metadata["state_indices"][observation]
-            material = thickness * (
-                charge[energy]
-                + metadata["polarizations"][observation]
-                * magnetic[energy] * magnetization[state]
-            )
-            common[beam] += pixel_weights[observation] * (
-                log_objects[observation] - material
-            )
-            beam_weight[beam] += pixel_weights[observation]
-        common /= beam_weight
-
     fitted = np.stack([
         common[metadata["beam_indices"][observation]]
-        + thickness * (
-            charge[metadata["energy_indices"][observation]]
-            + metadata["polarizations"][observation]
-            * magnetic[metadata["energy_indices"][observation]]
-            * magnetization[metadata["state_indices"][observation]]
-        )
+        + charge[metadata["energy_indices"][observation]]
+        + metadata["polarizations"][observation]
+        * magnetic[metadata["energy_indices"][observation]]
+        * magnetization[metadata["state_indices"][observation]]
         for observation in range(n_observations)
     ])
     projected = (
@@ -6001,11 +3783,7 @@ def project_log_objects_physical(
         if relaxation == 1
         else (1 - relaxation) * log_objects + relaxation * fitted
     )
-    if material_thickness is not None or thickness_supportmask is not None:
-        projected[:, thickness == 0] = fitted[:, thickness == 0]
     if projection_supportmask is not None:
-        if material_thickness is not None or thickness_supportmask is not None:
-            projection_supportmask = projection_supportmask | (thickness == 0)
         projected = np.where(
             projection_supportmask[None],
             projected,
@@ -6032,26 +3810,6 @@ def project_log_objects_physical(
     )
     components = {
         "projection_model": "physical_factorized",
-        "physical_fit_reused": reused_fit,
-        "initial_magnetization": initial_magnetization,
-        "magnetization_initialization": ("previous_fit" if reused_fit else
-                                         "nearest_sign" if initial_binary else "measured_contrast"),
-        "physical_spatial_weighting": spatial_weighting,
-        "physical_spatial_weights": spatial_weights,
-        "magnetization_trend": trend,
-        "magnetization_trend_intensity_cutoff": float(trend_cutoff),
-        "magnetization_trend_correction": trend_correction,
-        "bound_magnetization_median": median_bounds,
-        "magnetization_median_scope": median_scope,
-        "magnetization_trend_spatial_weights": trend_spatial_weights,
-        "magnetization_trend_means": np.array([
-            np.average(item[(thickness > 0) & (trend_spatial_weights > 0)],
-                       weights=trend_spatial_weights[(thickness > 0) & (trend_spatial_weights > 0)])
-            if np.any((thickness > 0) & (trend_spatial_weights > 0)) else np.nan
-            for item in magnetization]),
-        "weighted_fit_residual_rms": float(np.sqrt(
-            np.sum(weights[:, None, None] * spatial_weights * abs(residual)**2)
-            / np.sum(weights[:, None, None] * observation_spatial_weights))),
         "common_log_objects": common,
         "common_log_objects_by_beam": {
             name: common[index]
@@ -6061,9 +3819,6 @@ def project_log_objects_physical(
         "charge_response": charge,
         "magnetic_response": magnetic,
         "magnetization": magnetization,
-        "material_thickness": thickness.copy(),
-        "material_thickness_fitted": bool(fit_material_thickness),
-        "thickness_supportmask_applied": thickness_supportmask is not None,
         "magnetization_by_state": {
             name: magnetization[index]
             for index, name in enumerate(metadata["state_names"])
@@ -6083,77 +3838,13 @@ def project_log_objects_physical(
         "charge_absolute_gauge_anchored": charge_absolute_anchored,
         "identifiable": (
             magnetic_scale_anchored and charge_absolute_anchored
-            and not fit_material_thickness
         ),
         "fit_residual_rms": float(np.sqrt(np.mean(np.abs(residual) ** 2))),
         "charge_spectral_info": charge_spectral_info,
         "magnetic_spectral_info": magnetic_spectral_info,
-        "magnetization_bounds": (float(binary_values.min()), float(binary_values.max())) if binary_magnetization else tuple(clip_range) if clip_magnetization else None,
-        "binary_magnetization": binary_magnetization,
-        "binary_magnetization_values": binary_values,
+        "magnetization_bounds": (-1.0, 1.0),
     }
     return projected, components
-
-
-def _projection_focus_transform(
-    fields,
-    energy_labels,
-    propagation_um,
-    phase_rad,
-    setup,
-    inverse=False,
-    integer_wavelength=True,
-):
-    """
-    Apply the reversible Fourier-plane transform used by ``fth.propagate``.
-
-    Context:
-    Projection-only propagation/alignment: move fields to the calibrated physical-model
-    plane and undo that transform afterward. This operation still needs a full Fourier grid
-    even when the subsequent physical fit uses only an aperture.
-    """
-    # Focusing acts independently on each field, including a single observation.
-    array = np.asarray(fields)
-    if array.ndim != 3 or array.shape[0] < 1:
-        raise ValueError("fields must have shape (n_observations, nx, ny) with at least one observation.")
-    array = array.astype(np.complex128, copy=True)
-    if float(propagation_um) == 0:
-        return array
-    if not isinstance(setup, dict):
-        raise ValueError("projection_focus_setup is required for nonzero propagation.")
-    ccd_dist = float(setup["ccd_dist"])
-    px_size = float(setup["px_size"])
-    labels = np.asarray(energy_labels)
-    if labels.shape != (array.shape[0],):
-        raise ValueError("energy_labels must match the number of focused fields.")
-    energies = (np.full(array.shape[0], float(setup["energy"]))
-                if "energy" in setup else labels.astype(float))
-    if np.any(~np.isfinite(energies)) or np.any(energies <= 0):
-        raise ValueError(
-            "Focusing requires positive numeric energy labels or "
-            "projection_focus_setup['energy']."
-        )
-
-    rows, columns = array.shape[-2:]
-    yy, xx = np.mgrid[0:rows, 0:columns]
-    radius_squared = (yy - rows / 2) ** 2 + (xx - columns / 2) ** 2
-    direction = -1.0 if inverse else 1.0
-    distance = direction * float(propagation_um) * 1e-6
-    global_phase = direction * float(phase_rad)
-    hc_over_e = 1.2398419843320026e-6  # Planck*c/e, in eV metre.
-    angular_term = 1 - (px_size / ccd_dist) ** 2 * radius_squared
-    if np.any(angular_term < 0):
-        raise ValueError("Projection-focus geometry produces evanescent detector pixels.")
-    angular_root = np.sqrt(angular_term)
-    for observation, energy in enumerate(energies):
-        wavelength = hc_over_e / energy
-        used_distance = (
-            np.round(distance / wavelength) * wavelength
-            if integer_wavelength else distance
-        )
-        propagation_phase = 2 * used_distance * np.pi / wavelength * angular_root
-        array[observation] *= np.exp(1j * (propagation_phase + global_phase))
-    return array
 
 
 def project_fourier_fields_general(
@@ -6172,37 +3863,11 @@ def project_fourier_fields_general(
     log_floor=1e-12,
     magnetization_supportmask=None,
     projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
-    thickness_supportmask=None,
     return_components=False,
-    initial_components=None,
 ):
-    """
-    Apply the selected general model to Fourier-domain fields.
-
-    Context:
-    Bridge detector fields to object-space constraints. Fourier transforms and complex
-    logarithms happen here; the downstream projector fits model parameters in log-object
-    space.
-    """
-    focus_prop_um = 0.0 if recipe is None else recipe.get("projection_focus_prop_um", 0.0)
-    focus_phase_rad = 0.0 if recipe is None else recipe.get("projection_focus_phase_rad", 0.0)
-    focus_setup = None if recipe is None else recipe.get("projection_focus_setup")
-    focus_integer_wavelength = (
-        True if recipe is None else recipe.get("projection_focus_integer_wavelength", True)
-    )
-    focused_fields = _projection_focus_transform(
-        fields,
-        energy_labels,
-        focus_prop_um,
-        focus_phase_rad,
-        focus_setup,
-        inverse=False,
-        integer_wavelength=focus_integer_wavelength,
-    )
+    """Apply the selected general model to Fourier-domain fields."""
     log_objects = fourier_field_to_object_log(
-        focused_fields,
+        fields,
         log_floor=log_floor,
         unwrap_energy_phase=False,
     )
@@ -6220,10 +3885,6 @@ def project_fourier_fields_general(
             recipe=recipe,
             magnetization_supportmask=magnetization_supportmask,
             projection_supportmask=projection_supportmask,
-            material_thickness=material_thickness,
-            fit_material_thickness=fit_material_thickness,
-            thickness_supportmask=thickness_supportmask,
-            initial_components=initial_components,
             return_components=return_components,
         )
     else:
@@ -6241,36 +3902,11 @@ def project_fourier_fields_general(
         )
     if return_components:
         projected_log_objects, components = projected
-        projected_fields = object_log_to_fourier_field(projected_log_objects)
-        projected_fields = _projection_focus_transform(
-            projected_fields,
-            energy_labels,
-            focus_prop_um,
-            focus_phase_rad,
-            focus_setup,
-            inverse=True,
-            integer_wavelength=focus_integer_wavelength,
-        )
-        components["projection_focus_prop_um"] = float(focus_prop_um)
-        components["projection_focus_phase_rad"] = float(focus_phase_rad)
-        components["projection_focus_setup"] = focus_setup
-        components["physical_components_frame"] = (
-            "focused_object_plane" if float(focus_prop_um) != 0 else "retrieval_object_plane"
-        )
         return (
-            projected_fields,
+            object_log_to_fourier_field(projected_log_objects),
             components,
         )
-    projected_fields = object_log_to_fourier_field(projected)
-    return _projection_focus_transform(
-        projected_fields,
-        energy_labels,
-        focus_prop_um,
-        focus_phase_rad,
-        focus_setup,
-        inverse=True,
-        integer_wavelength=focus_integer_wavelength,
-    )
+    return object_log_to_fourier_field(projected)
 
 
 def response_to_refractive_index(
@@ -6278,19 +3914,13 @@ def response_to_refractive_index(
     wave_numbers,
     thickness,
     response_energy_indices,
-    propagation_sign=1,
 ):
     """
-    Convert ``R=sign*1j*k*d*index_contrast`` to complex index contrast.
+    Convert ``R_je = i*k_e*t*n_je`` to ``n_je`` when ``k_e`` and ``t`` are known.
 
     This conversion is deliberately separate from phase retrieval because the
-    diffraction data determine the log-response product, not its factors.
-    Pass propagation_sign=-1 for exp(-1j*k*index_contrast*d). The historical
-    +1 default is retained for API compatibility; k is in inverse metres and
-    thickness in metres. This does not add the vacuum refractive index 1.
+    diffraction data determine the product ``i*k_e*t*n_je``, not its factors.
     """
-    if isinstance(propagation_sign, bool) or propagation_sign not in (-1, 1):
-        raise ValueError("propagation_sign must be -1 or +1")
     response = np.asarray(response_log_objects, dtype=np.complex128)
     wave_numbers = np.asarray(wave_numbers, dtype=float)
     response_energy_indices = np.asarray(
@@ -6323,152 +3953,14 @@ def response_to_refractive_index(
     if np.any(selected_wave_numbers == 0):
         raise ValueError("wave_numbers must be nonzero.")
     return response / (
-        propagation_sign * 1j * selected_wave_numbers[:, None, None] * float(thickness)
+        1j * selected_wave_numbers[:, None, None] * float(thickness)
     )
 
 
 def _verify_recipe(recipe, n_observations, n_energies=None):
     """Validate the general retrieval recipe and observation weights."""
-    if (isinstance(recipe["Nmodes"], bool)
-            or not isinstance(recipe["Nmodes"], (int, np.integer))
-            or recipe["Nmodes"] < 1):
-        raise ValueError("Nmodes must be a positive integer.")
-    if recipe["mode_support_center"] not in {"image", "components"}:
-        raise ValueError("mode_support_center must be 'image' or 'components'.")
-    if not isinstance(recipe["recenter_modal_supports"], bool):
-        raise ValueError("recenter_modal_supports must be bool.")
-    seed = recipe["mode_initialization_seed"]
-    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, (int, np.integer))):
-        raise ValueError("mode_initialization_seed must be an integer or None.")
-    if recipe["mode_initialization"] not in {"random_phase", "support_fft"}:
-        raise ValueError("mode_initialization must be 'random_phase' or 'support_fft'.")
-    if not isinstance(recipe["fit_illumination_intensity"], bool):
-        raise ValueError("fit_illumination_intensity must be bool.")
-    if recipe["fit_illumination_intensity"] and recipe["projection_model"] != "physical_factorized":
-        raise ValueError("Intensity fitting requires physical_factorized projection.")
-    for key in ("align_global_phase", "fit_aperture_illumination"):
-        if not isinstance(recipe[key], bool):
-            raise ValueError(f"{key} must be bool.")
-        if recipe[key] and recipe["projection_model"] != "physical_factorized":
-            raise ValueError(f"{key} requires physical_factorized projection.")
-    if recipe["object_illumination_mode"] not in {"none", "pooled", "distance_weighted", "nearest", "linear_plane"}:
-        raise ValueError("object_illumination_mode must be none, pooled, distance_weighted, nearest, or linear_plane.")
-    if recipe["aperture_factor_type"] not in {"complex", "amplitude"}:
-        raise ValueError("aperture_factor_type must be complex or amplitude.")
-    if recipe.get("magnetization_mode_groups") is not None or recipe.get("illumination_mode_groups") is not None:
-        if recipe["projection_model"] != "physical_factorized":
-            raise ValueError("Physical mode groups require the physical_factorized model.")
-        _physical_mode_groups(recipe, recipe["Nmodes"])
-    if not isinstance(recipe["constrain_nonphysical_modes_common"], bool):
-        raise ValueError("constrain_nonphysical_modes_common must be bool.")
-    common_relaxation = recipe["nonphysical_modes_common_relaxation"]
-    if (isinstance(common_relaxation, bool)
-            or not isinstance(common_relaxation, (int, float, np.number))
-            or not np.isfinite(common_relaxation)
-            or not 0 <= common_relaxation <= 1):
-        raise ValueError("nonphysical_modes_common_relaxation must be between 0 and 1.")
-    if not isinstance(recipe["fit_material_thickness"], bool):
-        raise ValueError("fit_material_thickness must be bool.")
-    if recipe.get("chemical_species") is not None:
-        try:
-            from .phase_retrieval_species import validate_species
-        except ImportError:
-            from phase_retrieval_species import validate_species
-        validate_species(recipe["chemical_species"])
-        if recipe["projection_model"] != "physical_factorized":
-            raise ValueError("chemical_species requires projection_model='physical_factorized'.")
-        if recipe["fit_material_thickness"]:
-            raise ValueError("With chemical_species, fit species density maps instead of fit_material_thickness.")
-    if not isinstance(recipe["chemical_reference_alignment"], bool):
-        raise ValueError("chemical_reference_alignment must be bool.")
-    seed = recipe["chemical_initialization_seed"]
-    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or seed < 0:
-        raise ValueError("chemical_initialization_seed must be a nonnegative integer.")
-    focus_prop = recipe["projection_focus_prop_um"]
-    focus_phase = recipe["projection_focus_phase_rad"]
-    if (isinstance(focus_prop, bool) or not isinstance(focus_prop, (int, float, np.number))
-            or not np.isfinite(focus_prop)):
-        raise ValueError("projection_focus_prop_um must be a finite number.")
-    if (isinstance(focus_phase, bool) or not isinstance(focus_phase, (int, float, np.number))
-            or not np.isfinite(focus_phase)):
-        raise ValueError("projection_focus_phase_rad must be a finite number.")
-    if not isinstance(recipe["projection_focus_integer_wavelength"], bool):
-        raise ValueError("projection_focus_integer_wavelength must be bool.")
-    focus_setup = recipe["projection_focus_setup"]
-    if focus_prop != 0:
-        if not isinstance(focus_setup, dict):
-            raise ValueError("Nonzero projection focus requires projection_focus_setup.")
-        for key in ("ccd_dist", "px_size"):
-            value = focus_setup.get(key)
-            if (isinstance(value, bool) or not isinstance(value, (int, float, np.number))
-                    or not np.isfinite(value) or value <= 0):
-                raise ValueError(f"projection_focus_setup[{key!r}] must be positive and finite.")
-        if "energy" in focus_setup:
-            energy = focus_setup["energy"]
-            if (isinstance(energy, bool) or not isinstance(energy, (int, float, np.number))
-                    or not np.isfinite(energy) or energy <= 0):
-                raise ValueError("projection_focus_setup['energy'] must be positive and finite.")
-    for key in ("observation_workers", "fft_workers", "coherence_round_iterations"):
-        value = recipe[key]
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
-            raise ValueError(f"{key} must be a positive integer.")
-    if recipe["shared_coherence_update"] not in {"sequential", "average", "pooled"}:
-        raise ValueError("shared_coherence_update must be sequential, average, or pooled.")
-    if recipe["shared_coherence_update"] != "sequential":
-        if recipe["coherence_kernel_scope"] != "shared":
-            raise ValueError("Round coherence updates require coherence_kernel_scope='shared'.")
-        if recipe["freeze_coherence_after_reference"]:
-            raise ValueError("Round coherence updates cannot freeze gamma after the reference.")
-        if not recipe["preserve_warmup_masked_intensity"]:
-            raise ValueError("Round coherence updates require preserve_warmup_masked_intensity=True.")
-    for key in ("preserve_warmup_masked_intensity", "freeze_coherence_after_reference",
-                "warmup_calibrate_shared_gamma", "startimage_radial_normalization"):
-        if not isinstance(recipe[key], bool):
-            raise ValueError(f"{key} must be bool.")
-    if not isinstance(recipe["warmup_start_from_first"], bool):
-        raise ValueError("warmup_start_from_first must be bool.")
-    if (isinstance(recipe["warmup_reference_observation"], bool)
-            or not isinstance(recipe["warmup_reference_observation"], (int, np.integer))
-            or recipe["warmup_reference_observation"] < 0):
-        raise ValueError("warmup_reference_observation must be a non-negative integer.")
-    refresh = recipe["coherent_refresh_rounds"]
-    if (not isinstance(refresh, (list, tuple)) or
-            any(isinstance(v, bool) or not isinstance(v, (int, np.integer))
-                or v < 1 or v > recipe["outer_iterations"] for v in refresh)
-            or len(set(refresh)) != len(refresh)):
-        raise ValueError("coherent_refresh_rounds must contain distinct 1-based outer round numbers.")
-    if refresh and not recipe["partial_coherence"]:
-        raise ValueError("Coherent refresh rounds require partial_coherence=True.")
-    if refresh and not any(stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
-                           for stage in _build_update_schedule(recipe, "inner")):
-        raise ValueError("Coherent refresh requires an active partial-coherence inner stage to resume.")
-    if (isinstance(recipe["coherent_refresh_iterations"], bool) or
-            not isinstance(recipe["coherent_refresh_iterations"], (int, np.integer)) or
-            recipe["coherent_refresh_iterations"] < 1):
-        raise ValueError("coherent_refresh_iterations must be a positive integer.")
-    _normalize_update_schedule([recipe["coherent_refresh_mode"]],
-                               [recipe["coherent_refresh_iterations"]], name="coherent refresh")
-    if recipe["startimage_scale_fit"] not in {"linear", "through_origin"}:
-        raise ValueError("startimage_scale_fit must be 'linear' or 'through_origin'.")
-    if not isinstance(recipe["freeze_saturated_fields"], bool):
-        raise ValueError("freeze_saturated_fields must be bool.")
-    if recipe["warmup_seed_scale_fit"] not in {"sum", "linear"}:
-        raise ValueError("warmup_seed_scale_fit must be 'sum' or 'linear'.")
-    seeded_indices = recipe["warmup_seeded_stage_indices"]
-    if seeded_indices is not None:
-        if (not isinstance(seeded_indices, (list, tuple)) or not seeded_indices
-                or any(isinstance(index, bool)
-                       or not isinstance(index, (int, np.integer))
-                       or index < 0 for index in seeded_indices)):
-            raise ValueError("warmup_seeded_stage_indices must be a nonempty list of non-negative integers or None.")
-    if not isinstance(recipe["partial_coherence"], bool):
-        raise ValueError("partial_coherence must be bool.")
-    if recipe["coherence_kernel_scope"] not in {"per_observation", "shared"}:
-        raise ValueError("coherence_kernel_scope must be 'per_observation' or 'shared'.")
     _build_update_schedule(recipe, name="inner")
     _build_update_schedule(recipe, name="warmup", allow_disabled=True)
-    _build_role_warmup_schedule(recipe, "reference")
-    _build_role_warmup_schedule(recipe, "other")
     for key in (
         "outer_iterations",
         "average_img",
@@ -6476,8 +3968,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         value = recipe[key]
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"{key} must be an integer.")
-    if recipe["outer_iterations"] < 0:
-        raise ValueError("outer_iterations must be >= 0.")
+    if recipe["outer_iterations"] <= 0:
+        raise ValueError("outer_iterations must be > 0.")
     projection_start = recipe["projection_start"]
     if projection_start is not None and (
         isinstance(projection_start, bool)
@@ -6500,15 +3992,8 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("Fourier_last must be bool.")
     if not isinstance(recipe["final_fourier_constraint"], bool):
         raise ValueError("final_fourier_constraint must be bool.")
-    if recipe["partial_coherence"] and recipe["final_fourier_constraint"]:
-        raise ValueError(
-            "final_fourier_constraint must be False with partial_coherence: "
-            "a coherent amplitude overwrite would undo the blurred-intensity fit."
-        )
     if not (0 <= recipe["projection_relaxation"] <= 1):
         raise ValueError("projection_relaxation must be between 0 and 1.")
-    if not (0 <= recipe["final_projection_relaxation"] <= 1):
-        raise ValueError("final_projection_relaxation must be between 0 and 1.")
     if recipe["projection_model"] not in {
         "physical_factorized",
         "state_energy_beam",
@@ -6522,14 +4007,6 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError(
             "rank_deficient must be 'error' or 'minimum_norm'."
         )
-    if not isinstance(recipe["clip_magnetization"], bool):
-        raise ValueError("clip_magnetization must be bool.")
-    if not isinstance(recipe["initial_binary_magnetization"], bool):
-        raise ValueError("initial_binary_magnetization must be bool.")
-    if not isinstance(recipe["binary_magnetization"], bool):
-        raise ValueError("binary_magnetization must be bool.")
-    if recipe["binary_magnetization"]:
-        _binary_magnetization_values(recipe)
     physical_iterations = recipe["physical_iterations"]
     if (
         isinstance(physical_iterations, bool)
@@ -6539,8 +4016,6 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
         raise ValueError("physical_iterations must be a positive integer.")
     if not isinstance(recipe["zero_magnetization_outside_support"], bool):
         raise ValueError("zero_magnetization_outside_support must be bool.")
-    if not isinstance(recipe["zero_thickness_outside_support"], bool):
-        raise ValueError("zero_thickness_outside_support must be bool.")
     if not isinstance(recipe["projection_constraints_inside_support_only"], bool):
         raise ValueError("projection_constraints_inside_support_only must be bool.")
     if not isinstance(recipe["physical_constraints_inside_support_only"], bool):
@@ -6594,127 +4069,6 @@ def _verify_recipe(recipe, n_observations, n_energies=None):
     _observation_weights(recipe["observation_weights"], n_observations)
 
 
-def _normalized_coherence_kernel(gamma):
-    """
-    Return a real, nonnegative kernel with unit mass per spatial plane.
-
-    Context:
-    Called after shared-kernel fitting/averaging. Unit mass is enforced separately for each
-    modal spatial plane; otherwise the blur kernel could absorb an arbitrary intensity
-    scale.
-    """
-    kernel = np.maximum(np.asarray(gamma).real, 0).copy()
-    mass = kernel.sum(axis=(-2, -1), keepdims=True)
-    if np.any(~np.isfinite(kernel)) or np.any(mass <= 0):
-        raise ValueError("Coherence kernels must have finite positive mass.")
-    return kernel / mass
-
-
-def _initial_coherence_kernel(field):
-    """
-    Create a centered, nearly delta-like initial blur on the same spatial/modal grid as one
-    observation. This is an initial guess, not a fitted detector point-spread function.
-    """
-    kernel = np.full(np.shape(field), 2e-6, dtype=float)
-    kernel[..., kernel.shape[-2] // 2, kernel.shape[-1] // 2] = 0.7
-    return _normalized_coherence_kernel(kernel)
-
-
-def _pooled_coherence_update(fields, targets, gamma, iterations, weights=None):
-    """
-    RL fit of one kernel per mode to the summed, weighted state likelihood.
-
-    Fields and targets use centered detector coordinates. All states contribute,
-    including states whose fields are frozen. Unlike averaging separate fits,
-    every RL step uses the joint residual and the sum of modal predictions.
-
-    Context:
-    Called at synchronous round boundaries with fields held fixed. targets already contains
-    measured intensities plus the currently frozen masked fills. The leading observation
-    dimension is pooled; modal kernels remain separate.
-    """
-    from scipy.fft import fft2 as cpu_fft2, ifft2 as cpu_ifft2
-
-    fields = np.asarray(fields)
-    if fields.ndim == 3:
-        fields = fields[:, None]
-    squeeze = np.ndim(gamma) == 2
-    kernel = _normalized_coherence_kernel(gamma)
-    if squeeze:
-        kernel = kernel[None]
-    kernel = np.fft.ifftshift(kernel, axes=(-2, -1))
-    weights = np.ones(len(fields)) if weights is None else np.asarray(weights, dtype=float)
-    if weights.shape != (len(fields),) or np.any(weights < 0) or not np.any(weights > 0):
-        raise ValueError("Pooled coherence needs nonnegative weights with positive total.")
-    # Stream states instead of caching an extra complex FFT stack for the loop.
-    for _ in range(iterations):
-        correction = np.zeros_like(kernel)
-        kernel_fft = cpu_fft2(kernel)
-        for index, field in enumerate(fields):
-            if weights[index] == 0:
-                continue
-            intensity_fft = cpu_fft2(np.fft.ifftshift(np.abs(field) ** 2, axes=(-2, -1)))
-            prediction = cpu_ifft2(intensity_fft * kernel_fft).real.sum(axis=0)
-            target = np.fft.ifftshift(np.maximum(targets[index], 0))
-            ratio_fft = cpu_fft2(target / np.maximum(prediction, 1e-30))
-            correction += weights[index] * np.maximum(
-                cpu_ifft2(np.conj(intensity_fft) * ratio_fft).real, 0,
-            )
-        updated = kernel * correction
-        mass = updated.sum(axis=(-2, -1), keepdims=True)
-        # A mode with no illumination cannot inform its kernel.
-        kernel = np.divide(updated, mass, out=kernel.copy(), where=mass > 0)
-    kernel = np.fft.fftshift(kernel, axes=(-2, -1))
-    return kernel[0] if squeeze else kernel
-
-
-def _observation_map(function, observations, workers):
-    """
-    Bound in-flight reconstructions and preserve deterministic result order.
-
-    Context:
-    Scheduling boundary for independent work: return results in requested observation order
-    even when workers finish out of order. Bounded submission limits the number of large
-    reconstruction buffers alive at once.
-    """
-    observations = list(observations)
-    if workers == 1:
-        for observation in observations:
-            yield observation, function(observation)
-        return
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for start in range(0, len(observations), workers):
-            batch = observations[start:start + workers]
-            for observation, result in zip(batch, executor.map(function, batch)):
-                yield observation, result
-
-
-def _run_observation_update(*args, **kwargs):
-    """
-    Use thread-local FFT settings; never change module globals in workers.
-
-    Context:
-    Worker wrapper around one observation schedule. Configure FFT threads locally and attach
-    execution timing; update shared gamma only after collecting worker results in the parent
-    driver.
-    """
-    from scipy.fft import set_workers
-    recipe = args[5]
-    import threading
-    started = time.perf_counter()
-    with set_workers(int(recipe["fft_workers"])):
-        output = _run_update_schedule(*args, **kwargs)
-    finished = time.perf_counter()
-    if output[1]:
-        output[1][0]["execution"] = {
-            "started": started, "finished": finished,
-            "wall_seconds": finished - started,
-            "thread_id": threading.get_ident(), "fft_workers": int(recipe["fft_workers"]),
-        }
-    return output
-
-
 def _run_update_schedule(
     field,
     amplitude,
@@ -6723,71 +4077,19 @@ def _run_update_schedule(
     schedule,
     recipe,
     phase_retrieval_kernel=None,
-    gamma=None,
-    return_gamma=False,
-    fixed_masked_intensity=None,
-    freeze_gamma=False,
 ):
-    """
-    Run the configured phase-retrieval stages for one observation.
-
-    Context:
-    Numerical stage runner, not a multi-state driver. Coherent stages pass the invalid mask
-    through unchanged. Partial stages substitute masked intensity fills and use a fully
-    observed effective target; callers own the lifetime of those fills.
-    """
-    has_rl = any(stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
-                 for stage in schedule)
-    if has_rl and not recipe.get("partial_coherence", False):
-        raise ValueError(
-            "This observation schedule does not support partial-coherence "
-            "RL updates because no coherence kernel is supplied."
-        )
-    if (recipe["Nmodes"] > 1 and phase_retrieval_kernel is None
-            and recipe.get("observation_workers", 1) == 1
-            and not has_rl and not recipe.get("partial_coherence", False)):
-        result = _run_modal_energy_update_schedule(
-            field, amplitude, supportmask, bsmask, schedule, recipe,
-            nmodes=recipe["Nmodes"], image_shape=amplitude.shape,
-        )
-        return (*result, gamma) if return_gamma else result
-    if recipe["Nmodes"] > 1:
-        if phase_retrieval_kernel is None:
-            phase_retrieval_kernel = PhaseRtrv_core
+    """Run the configured phase-retrieval stages for one observation."""
     if phase_retrieval_kernel is None:
         phase_retrieval_kernel = PhaseRtrv_core
     stage_results = []
-    filled_intensity = None
     for stage_index, stage in enumerate(schedule):
-        stage = dict(stage)
         iterations = stage["Nit"]
-        if freeze_gamma and stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
-            if gamma is None:
-                raise ValueError("A fitted reference gamma is required before freezing coherence.")
-            # Keep convolution active, but no RL update occurs in range(Nit).
-            stage["RL_freq"] = iterations
-        use_rl = stage["RL_it"] > 0 and stage["RL_freq"] <= iterations
-        if use_rl:
-            if gamma is None:
-                gamma_shape = ((recipe["Nmodes"], *amplitude.shape)
-                               if recipe["Nmodes"] > 1 else amplitude.shape)
-                gamma = np.full(gamma_shape, 2e-6, dtype=float)
-                gamma[..., amplitude.shape[0] // 2, amplitude.shape[1] // 2] = 0.7
-            if filled_intensity is None:
-                current = (np.sum(np.abs(field) ** 2, axis=0)
-                           if recipe["Nmodes"] > 1 else np.abs(field) ** 2)
-                masked_values = (current if fixed_masked_intensity is None
-                                 else np.asarray(fixed_masked_intensity))
-                filled_intensity = np.where(bsmask != 0, masked_values, amplitude ** 2)
-            stage_amplitude = np.sqrt(np.maximum(filled_intensity, 0))
-            stage_bsmask = np.zeros_like(bsmask)
-        else:
-            stage_amplitude = amplitude
-            stage_bsmask = bsmask
-            filled_intensity = None
         if stage["mode"] == "gradient_descent":
-            if use_rl:
-                raise ValueError("gradient_descent does not support RL updates")
+            if stage["RL_it"] > 0 and stage["RL_freq"] <= iterations:
+                raise ValueError(
+                    "gradient_descent update stages do not support "
+                    "Richardson-Lucy partial-coherence updates."
+                )
             refined = gradient.refine_field_gradient(
                 field,
                 amplitude,
@@ -6818,9 +4120,8 @@ def _run_update_schedule(
             error = refined.diffraction_loss
             support_error = refined.support_loss
         else:
-            kernel_args = {"Nmodes": recipe["Nmodes"]} if recipe["Nmodes"] > 1 else {}
-            field, error, support_error, gamma_out = phase_retrieval_kernel(
-                diffract=stage_amplitude,
+            field, error, support_error, _ = phase_retrieval_kernel(
+                diffract=amplitude,
                 mask=supportmask,
                 mode=stage["mode"],
                 Nit=iterations,
@@ -6831,43 +4132,27 @@ def _run_update_schedule(
                 Phase=field,
                 seed=False,
                 plot_every=recipe["plot_every"],
-                bsmask=stage_bsmask,
+                bsmask=bsmask,
                 real_object=False,
                 average_img=min(max(1, recipe["average_img"]), iterations),
                 Fourier_last=recipe["Fourier_last"],
-                gamma=gamma if use_rl else None,
+                gamma=None,
                 RL_freq=stage["RL_freq"],
                 RL_it=stage["RL_it"],
                 TV_freq=stage["TV_freq"],
-                **kernel_args,
             )
-            if gamma_out is not None and not freeze_gamma:
-                gamma = gamma_out
         stage_results.append({
             "schedule_stage": stage_index,
             **stage,
             "error": np.asarray(error),
             "support_error": np.asarray(support_error),
-            "coherence": "partial" if use_rl else "full",
         })
-    return (field, stage_results, gamma) if return_gamma else (field, stage_results)
+    return field, stage_results
 
 
 def _apply_measured_amplitudes(fields, amplitudes, bsmasks):
-    """
-    Reapply measured Fourier amplitudes outside invalid-pixel regions.
-
-    Context:
-    Final detector projection: replace amplitudes only at observed pixels. For multiple
-    incoherent modes use one common scale factor based on summed modal power, preserving
-    their relative weights.
-    """
+    """Reapply measured Fourier amplitudes outside invalid-pixel regions."""
     constrained = np.asarray(fields).copy()
-    if constrained.ndim == 4:
-        total = np.sqrt(np.sum(np.abs(constrained) ** 2, axis=1))
-        scale = np.divide(amplitudes, total,
-                          out=np.ones_like(amplitudes), where=total > 1e-30)
-        return constrained * np.where(bsmasks == 0, scale, 1.0)[:, None]
     observed = bsmasks == 0
     constrained[observed] = (
         amplitudes[observed] * np.exp(1j * np.angle(constrained[observed]))
@@ -6875,60 +4160,15 @@ def _apply_measured_amplitudes(fields, amplitudes, bsmasks):
     return constrained
 
 
-def _radially_normalize_startimage(field, hologram, mask_pixel):
-    """Match total modal intensity to the valid detector's radial mean.
-
-    One-pixel annuli are centered on the central detector pixel after crop/binning.
-    Masked/nonfinite/negative data are excluded; measured zeros remain samples.
-    Empty annuli interpolate between populated rings (nearest at either end).
-    Phases and relative modal amplitudes are retained wherever power is nonzero.
-    At exact field zeros, put the target amplitude in the first mode at phase zero.
-    This is an initialization only, not a constraint on subsequent iterations.
-    """
-    measured = np.asarray(hologram, dtype=float)
-    array = np.asarray(field, dtype=np.complex128)
-    if measured.ndim != 2 or array.ndim not in (2, 3) or array.shape[-2:] != measured.shape:
-        raise ValueError("Radial initialization requires a 2D hologram and matching field.")
-    rows, columns = np.ogrid[:measured.shape[0], :measured.shape[1]]
-    rings = np.floor(np.hypot(rows - measured.shape[0] // 2,
-                             columns - measured.shape[1] // 2)).astype(int)
-    valid = (np.asarray(mask_pixel) == 0) & np.isfinite(measured) & (measured >= 0)
-    if not np.any(valid):
-        raise ValueError("Radial initialization needs at least one valid detector pixel.")
-    size = int(rings.max()) + 1
-    counts = np.bincount(rings[valid], minlength=size)
-    sums = np.bincount(rings[valid], weights=measured[valid], minlength=size)
-    populated = counts > 0
-    profile = np.interp(np.arange(size), np.flatnonzero(populated),
-                        sums[populated] / counts[populated])
-    target_amplitude = np.sqrt(profile[rings])
-    modes = array[None] if array.ndim == 2 else array
-    amplitude = np.sqrt(np.sum(np.abs(modes) ** 2, axis=0))
-    scale = np.divide(target_amplitude, amplitude, out=np.zeros_like(amplitude),
-                      where=amplitude > 0)
-    result = modes * scale
-    empty = amplitude == 0
-    result[0, empty] = target_amplitude[empty]
-    return result[0] if array.ndim == 2 else result
-
-
 def _initialize_fields(
     supportmask,
     amplitudes,
     intensities,
     mask_stack,
-    scale_fit="linear",
 ):
-    """
-    Create and approximately normalize one initial field per observation.
-
-    Context:
-    Single-mode support-based initialization. Each observation starts with the support
-    transform and receives its own measured-amplitude scaling; the caller optionally applies
-    radial normalization afterward.
-    """
+    """Create and approximately normalize one initial field per observation."""
     n_observations = amplitudes.shape[0]
-    start = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+    start = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
     fields = np.repeat(start[None], n_observations, axis=0).astype(
         np.complex128
     )
@@ -6941,679 +4181,15 @@ def _initialize_fields(
             continue
         measured = amplitudes[observation][valid].ravel()
         current = np.abs(fields[observation][valid]).ravel()
-        if scale_fit == "through_origin":
-            denominator = np.dot(measured, measured)
-            scale = np.dot(measured, current) / denominator if denominator > 0 else 0
-        elif measured.size >= 2 and np.ptp(measured) > 0 and np.ptp(current) > 0:
-            scale = stats.linregress(measured, current).slope
-        else:
-            scale = 0
-        if np.isfinite(scale) and scale > 1e-12:
-            fields[observation] /= scale
+        if (
+            measured.size >= 2
+            and np.ptp(measured) > 0
+            and np.ptp(current) > 0
+        ):
+            fit = stats.linregress(measured, current)
+            if abs(fit.slope) > 1e-12:
+                fields[observation] /= fit.slope
     return fields
-
-
-def _initialize_physical_modal_fields(supportmask, amplitudes, intensities,
-                                      mask_stack, recipe):
-    """
-    Multimode initialization branch used by the general driver. support_fft transforms each
-    modal support; the alternative delegates to the random-phase initializer. Scaling uses
-    total modal power, not a coherent field sum.
-    """
-    if recipe["mode_initialization"] == "support_fft":
-        support_modes = np.asarray(supportmask)
-        base_modes = np.empty_like(support_modes, dtype=np.complex128)
-        for mode_index, support_mode in enumerate(support_modes):
-            base_modes[mode_index] = np.fft.ifftshift(
-                np.fft.ifft2(np.fft.fftshift(support_mode))
-            )
-        fields = np.repeat(base_modes[None], amplitudes.shape[0], axis=0)
-        for observation in range(amplitudes.shape[0]):
-            valid = ((mask_stack[observation] == 0)
-                     & (intensities[observation] > 0))
-            if not np.any(valid):
-                continue
-            measured = amplitudes[observation][valid].ravel()
-            current = np.sqrt(np.sum(np.abs(fields[observation]) ** 2, axis=0))[
-                valid
-            ].ravel()
-            denominator = np.dot(measured, measured)
-            scale = (np.dot(measured, current) / denominator
-                     if denominator > 0 else 0)
-            if np.isfinite(scale) and scale > 1e-12:
-                fields[observation] /= scale
-        return fields
-    return _initialize_modal_fields(
-        supportmask, amplitudes, intensities, mask_stack, recipe["Nmodes"],
-        recipe["mode_initialization_seed"],
-    )
-
-
-def _project_nonphysical_modes_common(
-    fields,
-    energy_labels,
-    beam_labels,
-    recipe,
-    weights=None,
-    mode_indices=None,
-):
-    """
-    Remove state dependence from modes outside the physical model.
-
-    Context:
-    Secondary-mode projection at joint boundaries and final output. Group by energy and
-    illumination, ignoring state and polarization; align arbitrary modal global phases
-    before complex averaging to avoid cancellation.
-    """
-    array = np.asarray(fields)
-    if array.ndim != 4 or array.shape[1] < 2:
-        return array.copy(), []
-    if mode_indices is None:
-        physical_groups = _physical_mode_groups(recipe, array.shape[1])
-        if physical_groups is not None:
-            physical_modes = {mode for group in physical_groups[0] for mode in group}
-            mode_indices = sorted(set(range(array.shape[1])) - physical_modes)
-    n_observations = array.shape[0]
-    energies = np.asarray(energy_labels)
-    beams = np.asarray(beam_labels)
-    if energies.shape != (n_observations,) or beams.shape != (n_observations,):
-        raise ValueError("Energy and beam labels must match the observation count.")
-    if weights is None:
-        observation_weights = np.ones(n_observations, dtype=float)
-    else:
-        observation_weights = np.asarray(weights, dtype=float)
-        if observation_weights.shape != (n_observations,):
-            raise ValueError("observation_weights must match the observation count.")
-
-    relaxation = float(recipe["nonphysical_modes_common_relaxation"])
-    output = array.copy()
-    group_records = []
-    if relaxation == 0:
-        return output, group_records
-    groups = {}
-    for observation, key in enumerate(zip(energies.tolist(), beams.tolist())):
-        groups.setdefault(key, []).append(observation)
-    for mode_index in (range(1, array.shape[1]) if mode_indices is None else mode_indices):
-        for key, indices in groups.items():
-            group_weights = observation_weights[indices]
-            total = float(np.sum(group_weights))
-            if total <= 0:
-                raise ValueError("Each common-mode energy/beam group needs positive weight.")
-            # Incoherent modes have arbitrary independent global phases. Align
-            # that gauge before taking a linear complex-field average. Averaging
-            # wrapped log phases creates artificial phase edges and diffraction.
-            fields_group = array[indices, mode_index].copy()
-            anchor = fields_group[0]
-            if not np.any(anchor):
-                anchor = fields_group[np.argmax(np.sum(np.abs(fields_group) ** 2, axis=(-2, -1)))]
-            for index in range(len(fields_group)):
-                overlap = np.vdot(anchor, fields_group[index])
-                if abs(overlap) > 0:
-                    fields_group[index] *= np.exp(-1j * np.angle(overlap))
-            common = np.sum(fields_group * group_weights[:, None, None], axis=0) / total
-            output[indices, mode_index] = (1 - relaxation) * fields_group + relaxation * common
-            # A common focus transform within each energy/beam group is linear
-            # and unitary, so averaging here is equivalent to averaging in focus.
-            group_records.append({
-                "mode_index": mode_index,
-                "support_factor": (recipe["modes"][mode_index] if recipe["modes"] is not None else 1),
-                "energy": key[0], "beam": key[1],
-                "observations": list(indices),
-                "averaging": "phase_aligned_complex_field",
-            })
-    return output, group_records
-
-
-def _reference_illumination_correction(fields, energy_labels, beam_labels, recipe, thickness, support, factor_override=None, phase_gauge_offset=0.):
-    """Estimate scalar/aperture complex gains from material-free support only.
-
-    The object aperture uses a selected reference estimate or no gain, never
-    its magnetic transmission. Corrections act in focused object space on all modes. Global
-    phase remains a gauge: undo the correction after fitting to retain each
-    observation's detector-equivalent phase.
-    """
-    from scipy.ndimage import label
-    aperture_fit = recipe.get("fit_aperture_illumination", False)
-    phase_fit = recipe.get("align_global_phase", False)
-    object_mode = recipe.get("object_illumination_mode", "pooled")
-    factor_type = recipe.get("aperture_factor_type", "complex")
-    if object_mode not in {"none", "pooled", "distance_weighted", "nearest", "linear_plane"}:
-        raise ValueError("object_illumination_mode must be none, pooled, distance_weighted, nearest, or linear_plane.")
-    if factor_type not in {"complex", "amplitude"}:
-        raise ValueError("aperture_factor_type must be complex or amplitude.")
-    intensity_fit = recipe.get("fit_illumination_intensity", False) or aperture_fit
-    if thickness is None or support is None:
-        raise ValueError("Reference illumination correction requires material thickness and support.")
-    reference_mask = (np.asarray(thickness) == 0) & (np.asarray(support) != 0)
-    if not np.any(reference_mask):
-        raise ValueError("Reference illumination correction requires material-free reference pixels inside the support.")
-    reference = recipe.get("illumination_intensity_reference_observation", 0)
-    if (isinstance(reference, bool) or not isinstance(reference, (int, np.integer))
-            or not 0 <= reference < len(fields)):
-        raise ValueError("illumination_intensity_reference_observation must index an observation.")
-    # Mixing energies or beams would turn physical reference changes into gains.
-    if len(set(energy_labels)) != 1 or len(set(beam_labels)) != 1:
-        raise ValueError("Reference illumination correction currently requires one energy and one beam.")
-    array = np.asarray(fields)
-    modes = array[:, None] if array.ndim == 3 else array
-    def focus(value, inverse=False):
-        return np.stack([_projection_focus_transform(
-            value[:, m], energy_labels, recipe.get("projection_focus_prop_um", 0.),
-            recipe.get("projection_focus_phase_rad", 0.), recipe.get("projection_focus_setup"),
-            inverse=inverse, integer_wavelength=recipe.get("projection_focus_integer_wavelength", True))
-            for m in range(value.shape[1])], axis=1)
-    objects = np.fft.fft2(np.fft.fftshift(focus(modes), axes=(-2,-1)))
-    primary = objects[:, 0]
-    powers = np.sum(abs(primary[:, reference_mask])**2, axis=1)
-    if np.any(~np.isfinite(powers)) or np.any(powers <= 0):
-        raise ValueError("Reference apertures require finite positive reconstructed power in every observation.")
-    overlap = np.sum(primary[reference, reference_mask].conj()[None] * primary[:, reference_mask], axis=1)
-    if (phase_fit or (aperture_fit and factor_type == "complex")) and (np.any(~np.isfinite(overlap)) or np.any(abs(overlap) <= 1e-12*np.sqrt(powers*powers[reference]))):
-        raise ValueError("Reference overlap is too small for global phase alignment.")
-    phases = np.angle(overlap)+phase_gauge_offset if phase_fit else np.zeros(len(array))
-    gains = powers/powers[reference] if intensity_fit else np.ones(len(array))
-    pooled = np.sqrt(gains)*np.exp(1j*phases)
-    # Scalar correction applies everywhere; aperture corrections override it
-    # inside reference holes while the material aperture retains pooled gains.
-    correction = np.broadcast_to(pooled[:, None, None], primary.shape).copy()
-    details = dict(illumination_intensity_factors=gains,
-                   illumination_intensity_reference_observation=int(reference),
-                   illumination_intensity_reference_pixels=int(reference_mask.sum()),
-                   illumination_intensity_fit="primary reference-aperture power ratio",
-                   global_phase_offsets_rad=phases,
-                   pooled_reference_phase_offsets_rad=np.angle(overlap),
-                   global_phase_aligned=bool(phase_fit))
-    if aperture_fit:
-        # Label and measure centroids in centered coordinates; physical-frame
-        # FFT boundaries can split a hole and corrupt distances.
-        centered_labels, count = label(np.fft.fftshift(np.asarray(support) != 0))
-        labels = np.fft.ifftshift(centered_labels)
-        centroids = np.asarray([np.mean(np.argwhere(centered_labels == k), axis=0)
-                                for k in range(1, count+1)])
-        object_ids = [k for k in range(1, count+1)
-                      if np.any(np.asarray(thickness)[labels == k] > 0)]
-        reference_ids = [k for k in range(1, count+1) if k not in object_ids]
-        if not reference_ids:
-            raise ValueError("Aperture correction requires separate material-free reference apertures.")
-        gauge = np.exp(1j*phases)
-        factors = np.broadcast_to(gauge[:, None], (len(array), count)).copy()
-        kinds = ["reference" if k in reference_ids else "object_"+object_mode
-                 for k in range(1, count+1)]
-        # RH factors are measured independently; the OH is never used to fit a gain.
-        for aperture in reference_ids:
-            mask = labels == aperture
-            reference_values = primary[reference, mask]
-            norm = np.sum(abs(reference_values)**2)
-            if norm <= 0 or not np.isfinite(norm):
-                raise ValueError("Each reference aperture requires finite positive reference power.")
-            factor = np.sum(reference_values.conj()[None]*primary[:, mask], axis=1)/norm
-            if np.any(~np.isfinite(factor)) or np.any(abs(factor) < 1e-12):
-                raise ValueError("Reference aperture overlap is too small for a complex factor.")
-            factors[:, aperture-1] = factor*np.exp(1j*phase_gauge_offset) if factor_type == "complex" else abs(factor)*gauge
-        object_weights = np.zeros((len(object_ids), len(reference_ids)))
-        reference_factors = factors[:, np.asarray(reference_ids)-1]
-        for j, aperture in enumerate(object_ids):
-            if object_mode == "none":
-                factor = gauge  # Phase gauge only, no OH illumination freedom.
-            elif object_mode == "pooled":
-                reference_power = np.asarray([np.sum(abs(primary[reference, labels == k])**2)
-                                              for k in reference_ids])
-                object_weights[j] = reference_power/reference_power.sum()
-                pooled_phase = np.angle(overlap)+phase_gauge_offset if factor_type == "complex" else phases
-                factor = np.sqrt(gains)*np.exp(1j*pooled_phase)
-            else:
-                distance = np.linalg.norm(centroids[np.asarray(reference_ids)-1]
-                                          - centroids[aperture-1], axis=1)
-                if object_mode == "linear_plane":
-                    # Fit intercept and two spatial slopes using every RH.
-                    # Center at the OH so the intercept is its predicted log gain.
-                    offsets = centroids[np.asarray(reference_ids)-1] - centroids[aperture-1]
-                    scale = max(float(np.max(abs(offsets))), 1.)
-                    design = np.column_stack((np.ones(len(reference_ids)), offsets/scale))
-                    if np.linalg.matrix_rank(design) < 3:
-                        raise ValueError("linear_plane OH factors require at least three non-collinear reference apertures.")
-                    spatial_weights = np.linalg.pinv(design)[0]
-                elif object_mode == "nearest":
-                    spatial_weights = (distance == np.min(distance)).astype(float)
-                else:
-                    spatial_weights = 1./np.maximum(distance, 1.)**2
-                spatial_weights /= spatial_weights.sum()
-                object_weights[j] = spatial_weights
-                # Interpolate log amplitude and phase on the pooled gauge branch.
-                # This prevents +/-pi phase wrapping from cancelling complex gains.
-                branch_phase = np.angle(overlap)+phase_gauge_offset if factor_type == "complex" else phases
-                relative_phase = np.angle(reference_factors*np.exp(-1j*branch_phase[:, None]))
-                factor = np.exp(np.sum(spatial_weights[None]*(np.log(abs(reference_factors))
-                                + 1j*relative_phase), axis=1) + 1j*branch_phase)
-            factors[:, aperture-1] = factor
-        correction = np.broadcast_to(gauge[:, None, None], primary.shape).copy()
-        for aperture in range(1, count+1):
-            correction[:, labels == aperture] = factors[:, aperture-1, None]
-        # Single OH workflows use this actual gain in endpoint/export diagnostics.
-        oh_factor = factors[:, object_ids[0]-1] if object_ids else gauge
-        details.update(illumination_intensity_factors=abs(oh_factor)**2,
-                       pooled_reference_intensity_factors=gains,
-                       aperture_illumination_factors=factors,
-                       aperture_illumination_labels=labels,
-                       aperture_illumination_kinds=kinds,
-                       aperture_centroids_yx=centroids,
-                       object_aperture_ids=np.asarray(object_ids),
-                       reference_aperture_ids=np.asarray(reference_ids),
-                       object_reference_weights=object_weights,
-                       object_illumination_constraint=object_mode,
-                       aperture_factor_type=factor_type)
-    if factor_override is not None:
-        if aperture_fit:
-            factors = np.asarray(factor_override, complex)
-            if factors.shape != details['aperture_illumination_factors'].shape:
-                raise ValueError('Shared aperture factors have incompatible shape.')
-            for aperture in range(1,count+1):
-                correction[:,labels==aperture] = factors[:,aperture-1,None]
-            details['aperture_illumination_factors'] = factors.copy()
-            details['illumination_intensity_factors'] = abs(factors[:,object_ids[0]-1])**2
-        else:
-            shared_gain = np.asarray(factor_override, float)
-            correction = np.broadcast_to(np.sqrt(shared_gain)[:,None,None]
-                         * np.exp(1j*phases)[:,None,None],primary.shape).copy()
-            details['illumination_intensity_factors'] = shared_gain.copy()
-    def to_fields(value):
-        result = focus(np.fft.ifftshift(np.fft.ifft2(value), axes=(-2,-1)), inverse=True)
-        return result[:, 0] if array.ndim == 3 else result
-    normalized = to_fields(objects/correction[:, None])
-    def restore(value, reference_relaxation=0., weights=None):
-        value = value[:, None] if array.ndim == 3 else value
-        focused_objects = np.fft.fft2(np.fft.fftshift(focus(value), axes=(-2,-1)))
-        if aperture_fit and reference_relaxation > 0:
-            # Actually constrain the primary RH fields: normalization alone
-            # cancels on restoration when the OH-only projector leaves RHs free.
-            # Estimate one normalized complex profile per RH using the original
-            # least-squares metric (precision scales with squared aperture gain).
-            observation_weights = _observation_weights(weights, len(array))
-            residual_norm = 0.
-            residual_pixels = 0
-            for aperture in reference_ids:
-                mask = labels == aperture
-                values = focused_objects[:, 0, mask]
-                precision = observation_weights*abs(factors[:, aperture-1])**2
-                common_reference = np.sum(precision[:, None]*values, axis=0)/precision.sum()
-                residual_norm += float(np.sum(abs(values-common_reference)**2))
-                residual_pixels += values.size
-                focused_objects[:, 0, mask] = ((1-reference_relaxation)*values
-                                              + reference_relaxation*common_reference)
-            details["reference_aperture_common_profile"] = True
-            details["reference_aperture_profile_residual_rms"] = float(
-                np.sqrt(residual_norm/max(residual_pixels, 1)))
-        return to_fields(focused_objects*correction[:, None])
-    return normalized, restore, details
-
-
-def _physical_mode_groups(recipe, n_modes):
-    """Resolve explicit zero-based partitions; None retains primary-only behavior."""
-    magnetic = recipe.get("magnetization_mode_groups")
-    illumination = recipe.get("illumination_mode_groups")
-    if magnetic is None and illumination is None:
-        return None
-    def validate(groups, name):
-        if not isinstance(groups, (list, tuple)) or not groups:
-            raise ValueError(f"{name} must contain nonempty lists of zero-based mode indices.")
-        result = []
-        used = set()
-        for group in groups:
-            if not isinstance(group, (list, tuple)) or not group:
-                raise ValueError(f"{name} contains an empty or invalid group.")
-            for mode in group:
-                if (isinstance(mode, bool) or not isinstance(mode, (int, np.integer))
-                        or not 0 <= mode < n_modes or mode in used):
-                    raise ValueError(f"{name} mode indices must be unique and within the mode count.")
-                used.add(mode)
-            result.append(list(group))
-        return result, used
-    if magnetic is not None:
-        magnetic, selected = validate(magnetic, "magnetization_mode_groups")
-    else:
-        illumination, selected = validate(illumination, "illumination_mode_groups")
-        magnetic = [[mode] for mode in sorted(selected)]
-    if illumination is None:
-        illumination = [[mode] for mode in sorted(selected)]
-    else:
-        illumination, illuminated = validate(illumination, "illumination_mode_groups")
-        if selected != illuminated:
-            raise ValueError("Magnetization and illumination groups must cover the same modes.")
-    if 0 not in selected:
-        raise ValueError("Physical mode groups must include primary mode 0.")
-    return magnetic, illumination
-
-
-def _project_grouped_physical_modes(fields, state_labels, energy_labels, polarizations, beam_labels,
-                                    groups, **kwargs):
-    """Joint physical fit with independent sharing of magnetic maps and beam fields.
-
-    Fit only packed material pixels. Full Fourier transforms are processed one
-    observation/mode at a time, never stored as a second full modal object stack.
-    """
-    recipe = kwargs['recipe']
-    species_model = recipe.get('chemical_species') is not None
-    if kwargs.get('projection_model', 'physical_factorized') != 'physical_factorized':
-        raise ValueError('Physical mode groups require physical_factorized projection.')
-    magnetic_groups, illumination_groups = groups
-    selected = sorted(mode for group in magnetic_groups for mode in group)
-    magnetic_id = {mode:i for i,group in enumerate(magnetic_groups) for mode in group}
-    illumination_id = {mode:i for i,group in enumerate(illumination_groups) for mode in group}
-    thickness = kwargs.get('material_thickness')
-    if thickness is None:
-        raise ValueError('Physical mode groups require a material thickness/aperture map.')
-    thickness = np.asarray(thickness)
-    aperture = thickness > 0
-    support = kwargs.get('projection_supportmask')
-    if support is not None:
-        aperture &= np.asarray(support) != 0
-    if not np.any(aperture):
-        raise ValueError('Physical mode aperture is empty.')
-    if species_model:
-        # Include vacuum pixels so species gauge alignment retains its reference.
-        aperture = (np.ones_like(aperture) if support is None else np.asarray(support) != 0)
-    n_observations = len(fields)
-    metadata = _normalize_metadata(state_labels, energy_labels, polarizations, beam_labels, n_observations)
-    records = [(observation, mode) for observation in range(n_observations) for mode in selected]
-    def focus(field, observation, inverse=False):
-        return _projection_focus_transform(field[None], [energy_labels[observation]],
-            recipe.get('projection_focus_prop_um',0.), recipe.get('projection_focus_phase_rad',0.),
-            recipe.get('projection_focus_setup'), inverse=inverse,
-            integer_wavelength=recipe.get('projection_focus_integer_wavelength',True))[0]
-    logs = np.empty((len(records), int(aperture.sum()), 1),complex)
-    for index,(observation,mode) in enumerate(records):
-        obj = np.fft.fft2(np.fft.fftshift(focus(fields[observation,mode],observation)))
-        values = obj[aperture]
-        logs[index,:,0] = np.log(np.maximum(abs(values), kwargs.get('log_floor',1e-12))) + 1j*np.angle(values)
-    state_keys = [f's{metadata["state_indices"][obs]}_m{magnetic_id[mode]}' for obs,mode in records]
-    beam_keys = [f'b{metadata["beam_indices"][obs]}_i{illumination_id[mode]}' for obs,mode in records]
-    anchors = _normalize_saturated_states(kwargs.get('saturated_states'), metadata['state_names'])
-    joint_anchors = {f's{i}_m{group}':anchors[state] for i,state in enumerate(metadata['state_names'])
-                     if state in anchors for group in range(len(magnetic_groups))}
-    weights = _observation_weights(kwargs.get('weights'), n_observations)
-    initial = kwargs.get('initial_components')
-    previous = None if initial is None else initial.get('modal_physical_fit')
-    if previous is not None and (initial['magnetization_mode_groups'] != magnetic_groups
-                                or initial['illumination_mode_groups'] != illumination_groups):
-        raise ValueError('Physical mode sharing changed; start a new physical run.')
-    def pack(value):
-        return None if value is None else np.asarray(value)[aperture,None]
-    local_recipe = dict(recipe, physical_projection_object_roi=False)
-    joint_names = list(dict.fromkeys(state_keys))
-    local_recipe['_magnetization_trend_groups'] = [
-        [joint_names.index(f's{i}_m{group}') for i in range(len(metadata['state_names']))]
-        for group in range(len(magnetic_groups))]
-    if species_model:
-        local_recipe['chemical_species'] = []
-        for entry in recipe['chemical_species']:
-            entry = dict(entry)
-            for key in ('density_map', 'supportmask'):
-                if entry.get(key) is not None:
-                    entry[key] = pack(entry[key])
-            if entry.get('saturated_states') is not None:
-                species_anchors = _normalize_saturated_states(entry['saturated_states'], metadata['state_names'])
-                entry['saturated_states'] = {
-                    f's{i}_m{group}': species_anchors[state]
-                    for i,state in enumerate(metadata['state_names']) if state in species_anchors
-                    for group in range(len(magnetic_groups))}
-            local_recipe['chemical_species'].append(entry)
-        local_recipe['chemical_reference_mask'] = pack(recipe.get('chemical_reference_mask'))
-    projected, fit = project_log_objects_physical(
-        logs, state_keys, [energy_labels[obs] for obs,_ in records],
-        [polarizations[obs] for obs,_ in records], beam_keys,
-        weights=np.asarray([weights[obs] for obs,_ in records]),
-        relaxation=kwargs.get('relaxation',1.), saturated_states=joint_anchors,
-        iterations=kwargs.get('physical_iterations',20),
-        recipe=local_recipe,
-        magnetization_supportmask=pack(kwargs.get('magnetization_supportmask')),
-        projection_supportmask=np.ones((int(aperture.sum()),1),bool),
-        material_thickness=pack(thickness), fit_material_thickness=kwargs.get('fit_material_thickness',False),
-        thickness_supportmask=pack(kwargs.get('thickness_supportmask')),
-        initial_components=previous, return_components=True)
-    output = np.asarray(fields).copy()
-    for index,(observation,mode) in enumerate(records):
-        obj = np.fft.fft2(np.fft.fftshift(focus(fields[observation,mode],observation)))
-        obj[aperture] = np.exp(projected[index,:,0])
-        output[observation,mode] = focus(np.fft.ifftshift(np.fft.ifft2(obj)),observation,inverse=True)
-    def expand(value):
-        full = np.zeros(np.shape(value)[:-2]+aperture.shape, dtype=np.asarray(value).dtype)
-        full[...,aperture] = np.asarray(value)[...,0]
-        return full
-    primary_states = [fit['state_names'].index(f's{i}_m{magnetic_id[0]}') for i in range(len(metadata['state_names']))]
-    primary_beams = [fit['beam_names'].index(f'b{i}_i{illumination_id[0]}') for i in range(len(metadata['beam_names']))]
-    components = dict(fit)
-    components.update(state_names=metadata['state_names'],beam_names=metadata['beam_names'],
-        magnetization=expand(fit['magnetization'][primary_states]),
-        initial_magnetization=expand(fit.get('initial_magnetization',fit['magnetization'])[primary_states]),
-        common_log_objects=expand(fit['common_log_objects'][primary_beams]),
-        common_exit_waves=expand(fit['common_exit_waves'][primary_beams]),
-        material_thickness=expand(fit['material_thickness']), saturated_states=anchors,
-        modal_physical_fit=fit, modal_physical_fit_aperture=aperture,
-        magnetization_mode_groups=magnetic_groups, illumination_mode_groups=illumination_groups,
-        physical_model_modes=[mode+1 for mode in selected], Nmodes=fields.shape[1],
-        physical_components_frame='focused_object_plane' if recipe.get('projection_focus_prop_um',0.) else 'retrieval_object_plane')
-    components['magnetization_by_state'] = dict(zip(metadata['state_names'],components['magnetization']))
-    components['common_log_objects_by_beam'] = dict(zip(metadata['beam_names'],components['common_log_objects']))
-    components['common_exit_waves_by_beam'] = dict(zip(metadata['beam_names'],components['common_exit_waves']))
-    # Additional magnetic groups remain packed; expand on demand for diagnostics.
-    components['magnetization_by_mode_group_packed'] = {
-        str(group):fit['magnetization'][[fit['state_names'].index(f's{i}_m{group}')
-                   for i in range(len(metadata['state_names']))]] for group in range(len(magnetic_groups))}
-    if species_model:
-        components['species'] = {}
-        for name,item in fit['species'].items():
-            item = dict(item)
-            item['magnetization_by_mode_group_packed'] = {
-                str(group): item['magnetization'][[
-                    fit['state_names'].index(f's{i}_m{group}')
-                    for i in range(len(metadata['state_names']))]]
-                for group in range(len(magnetic_groups))}
-            item['magnetization'] = expand(item['magnetization'][primary_states])
-            for key in ('density_map','supportmask'):
-                item[key] = expand(item[key])
-            item['magnetization_by_state'] = dict(zip(metadata['state_names'],item['magnetization']))
-            item['saturated_states'] = {
-                state: item['saturated_states'][f's{i}_m{magnetic_id[0]}']
-                for i,state in enumerate(metadata['state_names'])
-                if f's{i}_m{magnetic_id[0]}' in item['saturated_states']}
-            components['species'][name] = item
-        components['species_density_maps'] = expand(fit['species_density_maps'])
-        components['species_magnetization'] = expand(fit['species_magnetization'][:,primary_states])
-        components['chemical_reference_mask'] = expand(fit['chemical_reference_mask'])
-        components['physical_projection_roi_mask'] = expand(fit['physical_projection_roi_mask'])
-        primary_records = [index for index,(_,mode) in enumerate(records) if mode == 0]
-        components['fitted_log_objects'] = expand(fit['fitted_log_objects'][primary_records])
-        components['chemical_reference_offsets'] = fit['chemical_reference_offsets'][primary_records]
-        spatial_weights = fit['physical_spatial_weights']
-        components['physical_spatial_weights'] = expand(
-            spatial_weights[primary_records] if np.asarray(spatial_weights).ndim == 3 else spatial_weights)
-        components['saturated_states'] = components['species'][fit['legacy_component_species']]['saturated_states']
-    return output, components
-
-
-def _project_physical_modes(
-    fields,
-    state_labels,
-    energy_labels,
-    polarization_coefficients,
-    beam_labels,
-    **kwargs,
-):
-    """
-    Apply the physical model to mode 1 and optional common-mode constraints.
-
-    Context:
-    Dispatch the primary mode to the physical model, then enforce the optional shared
-    secondary mode. The secondary field never enters the charge/magnetization fit.
-    """
-    recipe = kwargs.get("recipe")
-    groups = (_physical_mode_groups(recipe, np.asarray(fields).shape[1])
-              if recipe is not None and np.asarray(fields).ndim == 4 else None)
-    if groups is not None:
-        group_kwargs = dict(kwargs)
-        callback = group_kwargs.pop('diagnostic_callback', None)
-        corrections = {}
-        normalized = np.asarray(fields)
-        if any(recipe.get(key,False) for key in ('fit_illumination_intensity','align_global_phase','fit_aperture_illumination')):
-            normalized = normalized.copy()
-            mode_phase_offsets = {}
-            if recipe.get('align_global_phase'):
-                reference = recipe.get('illumination_intensity_reference_observation',0)
-                reference_mask = (np.asarray(kwargs['material_thickness'])==0) & (np.asarray(kwargs['projection_supportmask'])!=0)
-                def reference_object(mode):
-                    focused = _projection_focus_transform(fields[reference:reference+1,mode],
-                        [energy_labels[reference]],recipe.get('projection_focus_prop_um',0.),
-                        recipe.get('projection_focus_phase_rad',0.),recipe.get('projection_focus_setup'),
-                        integer_wavelength=recipe.get('projection_focus_integer_wavelength',True))[0]
-                    return np.fft.fft2(np.fft.fftshift(focused))[reference_mask]
-                for illumination_group in groups[1]:
-                    anchor = reference_object(illumination_group[0])
-                    for mode in illumination_group:
-                        overlap = np.vdot(anchor,reference_object(mode))
-                        if abs(overlap)==0:
-                            raise ValueError('Shared illumination modes require reference phase overlap.')
-                        mode_phase_offsets[mode] = np.angle(overlap)
-            for mode in sorted(m for group in groups[0] for m in group):
-                normalized[:,mode], restore, details = _reference_illumination_correction(
-                    fields[:,mode], energy_labels, beam_labels, recipe,
-                    kwargs.get('material_thickness'), kwargs.get('projection_supportmask'),
-                    phase_gauge_offset=mode_phase_offsets.get(mode,0.))
-                corrections[mode] = (restore, details)
-            # Shared illumination also ties relative gain changes across modes;
-            # arbitrary per-mode global phases remain independent gauge choices.
-            for illumination_group in groups[1]:
-                if len(illumination_group) < 2:
-                    continue
-                details_list = [corrections[mode][1] for mode in illumination_group]
-                if recipe.get('fit_aperture_illumination'):
-                    relative = np.stack([d['aperture_illumination_factors']
-                        * np.exp(-1j*d['global_phase_offsets_rad'])[:,None] for d in details_list])
-                    shared = np.exp(np.mean(np.log(abs(relative)),axis=0))
-                    phase_mean = np.mean(relative/abs(relative),axis=0)
-                    if np.any(abs(phase_mean)<1e-12):
-                        raise ValueError('Shared illumination modes have incompatible reference phases.')
-                    shared = shared*np.exp(1j*np.angle(phase_mean))
-                    overrides = [shared*np.exp(1j*d['global_phase_offsets_rad'])[:,None] for d in details_list]
-                else:
-                    shared = np.exp(np.mean(np.log([d['illumination_intensity_factors']
-                                                   for d in details_list]),axis=0))
-                    overrides = [shared]*len(illumination_group)
-                for mode,override in zip(illumination_group,overrides):
-                    normalized[:,mode],restore,details = _reference_illumination_correction(
-                        fields[:,mode],energy_labels,beam_labels,recipe,
-                        kwargs.get('material_thickness'),kwargs.get('projection_supportmask'),
-                        factor_override=override, phase_gauge_offset=mode_phase_offsets.get(mode,0.))
-                    corrections[mode] = (restore,details)
-            group_kwargs['recipe'] = dict(recipe, fit_illumination_intensity=False,
-                                         align_global_phase=False, fit_aperture_illumination=False)
-        output, components = _project_grouped_physical_modes(
-            normalized, state_labels, energy_labels, polarization_coefficients, beam_labels,
-            groups, **group_kwargs)
-        modal_corrections = {}
-        for mode,(restore,details) in corrections.items():
-            output[:,mode] = restore(output[:,mode], reference_relaxation=kwargs.get('relaxation',1.),
-                                    weights=kwargs.get('weights'))
-            modal_corrections[str(mode)] = details
-        if corrections:
-            components.update(corrections[0][1])
-            components['illumination_corrections_by_mode'] = modal_corrections
-        residual_modes = sorted(set(range(output.shape[1]))-set(m for group in groups[0] for m in group))
-        common_groups = []
-        if recipe.get('constrain_nonphysical_modes_common') and residual_modes:
-            output,common_groups = _project_nonphysical_modes_common(output,energy_labels,beam_labels,
-                recipe,weights=kwargs.get('weights'), mode_indices=residual_modes)
-        components['nonphysical_modes_common'] = bool(common_groups)
-        components['nonphysical_mode_common_groups'] = common_groups
-        if callback is not None:
-            callback('physical_primary',output)
-            callback('common_secondary',output)
-        return (output,components) if kwargs.get('return_components') else output
-
-    if recipe is not None and any(recipe.get(key, False) for key in (
-            "fit_illumination_intensity", "align_global_phase", "fit_aperture_illumination")):
-        normalized, restore, details = _reference_illumination_correction(
-            fields, energy_labels, beam_labels, recipe,
-            kwargs.get("material_thickness"), kwargs.get("projection_supportmask"))
-        normalized_recipe = dict(recipe, fit_illumination_intensity=False,
-                                 align_global_phase=False, fit_aperture_illumination=False)
-        normalized_kwargs = dict(kwargs, recipe=normalized_recipe, return_components=True)
-        callback = normalized_kwargs.pop("diagnostic_callback", None)
-        output, components = _project_physical_modes(
-            normalized, state_labels, energy_labels,
-            polarization_coefficients, beam_labels, **normalized_kwargs)
-        output = restore(output, reference_relaxation=kwargs.get("relaxation", 1.),
-                         weights=kwargs.get("weights"))
-        components.update(details)
-        if callback is not None:
-            callback("physical_primary", output)
-            callback("common_secondary", output)
-        return (output, components) if kwargs.get("return_components") else output
-    diagnostic_callback = kwargs.pop("diagnostic_callback", None)
-    if np.asarray(fields).ndim == 3:
-        result = project_fourier_fields_general(
-            fields, state_labels, energy_labels, polarization_coefficients,
-            beam_labels, **kwargs,
-        )
-        if diagnostic_callback is not None:
-            diagnostic_callback("physical_primary", result[0] if kwargs.get("return_components") else result)
-        return result
-    projected_primary, components = project_fourier_fields_general(
-        fields[:, 0], state_labels, energy_labels, polarization_coefficients,
-        beam_labels, **kwargs,
-    )
-    output = np.asarray(fields).copy()
-    output[:, 0] = projected_primary
-    if diagnostic_callback is not None:
-        diagnostic_callback("physical_primary", output)
-    recipe = kwargs.get("recipe")
-    common_groups = []
-    if recipe is not None and recipe["constrain_nonphysical_modes_common"]:
-        output, common_groups = _project_nonphysical_modes_common(
-            output,
-            energy_labels,
-            beam_labels,
-            recipe,
-            weights=kwargs.get("weights"),
-        )
-    if diagnostic_callback is not None:
-        diagnostic_callback("common_secondary", output)
-    components["Nmodes"] = output.shape[1]
-    components["physical_model_modes"] = [1]
-    components["nonphysical_modes_common"] = bool(
-        recipe is not None and recipe["constrain_nonphysical_modes_common"]
-    )
-    components["nonphysical_modes_common_relaxation"] = (
-        float(recipe["nonphysical_modes_common_relaxation"])
-        if recipe is not None else 0.0
-    )
-    components["nonphysical_mode_common_groups"] = common_groups
-    return output, components
-
-
-def _component_centered_modal_supports(supportmask, factors):
-    """Expand each disconnected aperture in place for off-center samples."""
-    from scipy.ndimage import affine_transform, center_of_mass, label
-
-    support = np.asarray(supportmask) != 0
-    labels, count = label(support, structure=np.ones((3, 3), dtype=int))
-    centers = center_of_mass(support, labels, range(1, count + 1))
-    result = []
-    for factor in factors:
-        if float(factor) == 1.0:
-            result.append(support.astype(np.uint8))
-            continue
-        expanded = np.zeros(support.shape, dtype=bool)
-        matrix = np.eye(2) / float(factor)
-        for component, center in enumerate(centers, start=1):
-            center = np.asarray(center, dtype=float)
-            offset = center - matrix @ center
-            expanded |= affine_transform(
-                (labels == component).astype(np.uint8), matrix,
-                offset=offset, output_shape=support.shape, order=0,
-                mode="constant", cval=0, prefilter=False,
-            ) != 0
-        result.append(expanded.astype(np.uint8))
-    return np.stack(result)
 
 
 def general_phase_retrieval_algorithm(
@@ -7628,7 +4204,6 @@ def general_phase_retrieval_algorithm(
     general_recipe=None,
     start_fields=None,
     phase_retrieval_kernel=None,
-    progress_callback=None,
 ):
     """
     Jointly retrieve arbitrary states, energies, polarizations, and beams.
@@ -7653,16 +4228,7 @@ def general_phase_retrieval_algorithm(
         Invalid-pixel masks used by the reconstruction.
     errors : dict
         Per-stage errors and projection diagnostics.
-
-    Context:
-    Main orchestration for mixed metadata. Owns warmup, coherent masked-fill snapshots, per-
-    observation/shared gamma, coherent refreshes, worker synchronization and physical-
-    projection cadence. The low-level kernel only sees one observation at a time.
     """
-    # Optional observer, outside the numerical recipe and never serialized.
-    # Callbacks must not mutate the borrowed reconstruction arrays.
-    if progress_callback is not None and not callable(progress_callback):
-        raise TypeError("progress_callback must be callable or None")
     recipe = default_general_phase_retrieval_recipe()
     if general_recipe is not None:
         if not isinstance(general_recipe, dict):
@@ -7676,54 +4242,8 @@ def general_phase_retrieval_algorithm(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
-    mode_factors = recipe["modes"]
-    if mode_factors is not None:
-        if isinstance(mode_factors, np.ndarray):
-            if mode_factors.ndim == 0:
-                mode_factors = [mode_factors.item()]
-            elif mode_factors.ndim != 1:
-                raise ValueError("modes must be a nonempty 1D list of nonnegative support factors.")
-            else:
-                mode_factors = list(mode_factors)
-        elif isinstance(mode_factors, (int, float, np.number)) and not isinstance(mode_factors, bool):
-            mode_factors = [mode_factors]
-        elif not isinstance(mode_factors, (list, tuple)):
-            try:
-                mode_factors = list(mode_factors)
-            except TypeError as exc:
-                raise ValueError("modes must be a nonempty list of nonnegative support factors.") from exc
-        if not mode_factors or any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float, np.number))
-            or not np.isfinite(value)
-            or value < 0
-            for value in mode_factors
-        ):
-            raise ValueError("modes entries must be finite nonnegative support factors.")
-        if float(mode_factors[0]) != 1.0:
-            raise ValueError("The first physical mode must use support factor 1.")
-        recipe["modes"] = list(mode_factors)
-        recipe["Nmodes"] = len(mode_factors)
-    else:
-        mode_factors = [1] * int(recipe["Nmodes"])
-
-    # The physical object support is shared by all coherent modes. Keep its
-    # geometry 2D; the modal Fourier kernel broadcasts it to each mode.
-    preparation_recipe = dict(recipe, Nmodes=1)
-    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
-        holograms, mask_pixel, supportmask, preparation_recipe, start_fields
-    )
     holograms = _as_energy_stack(holograms, name="holograms")
     n_observations, nx, ny = holograms.shape
-    material_thickness = _recipe_material_thickness(recipe, input_geometry)
-    if material_thickness is not None:
-        material_thickness = np.fft.fftshift(material_thickness)
-    if recipe.get("chemical_species") is not None:
-        try:
-            from .phase_retrieval_species import map_species_recipe
-        except ImportError:
-            from phase_retrieval_species import map_species_recipe
-        recipe = map_species_recipe(recipe, input_geometry=input_geometry)
     metadata = _normalize_metadata(
         state_labels,
         energy_labels,
@@ -7740,34 +4260,6 @@ def general_phase_retrieval_algorithm(
     supportmask = np.asarray(supportmask)
     if supportmask.shape != (nx, ny):
         raise ValueError("supportmask must have shape (nx, ny).")
-    mode_support_shifts = [(0, 0)] * int(recipe["Nmodes"])
-    if recipe["Nmodes"] > 1:
-        if recipe["recenter_modal_supports"]:
-            modal_supportmask, mode_support_shifts = geometry.recenter_modal_supports(
-                supportmask, mode_factors, center=recipe["mode_support_center"],
-            )
-        elif recipe["mode_support_center"] == "components":
-            modal_supportmask = _component_centered_modal_supports(
-                supportmask, mode_factors,
-            )
-        else:
-            modal_supportmask = _mode_supports(
-                supportmask, mode_factors, (nx, ny),
-            )
-    else:
-        modal_supportmask = supportmask
-    thickness_supportmask = None
-    if recipe["zero_thickness_outside_support"]:
-        if recipe["projection_model"] != "physical_factorized":
-            raise ValueError(
-                "zero_thickness_outside_support requires projection_model='physical_factorized'."
-            )
-        if material_thickness is None:
-            material_thickness = np.ones((nx, ny), dtype=float)
-        thickness_supportmask = np.fft.fftshift(supportmask) != 0
-        material_thickness = material_thickness * thickness_supportmask
-        if not np.any(material_thickness > 0):
-            raise ValueError("The support contains no material pixels for thickness fitting.")
     # PhaseRtrv_core applies support constraints in the shifted object frame.
     # The log-object projection uses the same frame via fft2(fftshift(field)).
     magnetization_supportmask = (
@@ -7800,27 +4292,20 @@ def general_phase_retrieval_algorithm(
 
     # Initialize each observation independently unless fields are supplied.
     if start_fields is None:
-        if recipe["Nmodes"] > 1:
-            fields = _initialize_physical_modal_fields(
-                modal_supportmask, amplitudes, intensities, mask_stack, recipe,
-            )
-        else:
-            fields = _initialize_fields(
-                supportmask, amplitudes, intensities, mask_stack,
-                scale_fit=recipe["startimage_scale_fit"],
-            )
-        if recipe["startimage_radial_normalization"]:
-            for observation in range(n_observations):
-                fields[observation] = _radially_normalize_startimage(
-                    fields[observation], holograms[observation], mask_stack[observation],
-                )
+        fields = _initialize_fields(
+            supportmask,
+            amplitudes,
+            intensities,
+            mask_stack,
+        )
     else:
-        fields = np.asarray(start_fields, dtype=np.complex128).copy()
-        expected = ((n_observations, recipe["Nmodes"], nx, ny) if recipe["Nmodes"] > 1
-                    else holograms.shape)
-        if fields.shape != expected:
+        fields = _as_energy_stack(
+            start_fields,
+            name="start_fields",
+        ).astype(np.complex128, copy=True)
+        if fields.shape != holograms.shape:
             raise ValueError(
-                f"start_fields must have shape {expected}."
+                "start_fields must have the same shape as holograms."
             )
 
     errors = {
@@ -7828,39 +4313,6 @@ def general_phase_retrieval_algorithm(
         "projection_steps": [],
         "settings": recipe.copy(),
     }
-    diagnostic_observation = recipe["projection_diagnostic_observation"]
-    if diagnostic_observation is not None and (
-            isinstance(diagnostic_observation, bool)
-            or not isinstance(diagnostic_observation, (int, np.integer))
-            or not 0 <= diagnostic_observation < n_observations):
-        raise ValueError("projection_diagnostic_observation must index a selected observation.")
-    errors["detector_constraint_diagnostics"] = []
-    if diagnostic_observation is not None:
-        yy, xx = np.indices((nx, ny))
-        outer_pixels = np.hypot(yy - nx // 2, xx - ny // 2) > min(nx, ny) / 4
-        explicit_outer = outer_pixels & (mask_stack[diagnostic_observation] != 0)
-        observed_pixels = bsmasks[diagnostic_observation] == 0
-
-    def record_checkpoint(stage, checkpoint_fields=None):
-        if diagnostic_observation is None:
-            return
-        current = (fields if checkpoint_fields is None else checkpoint_fields)[diagnostic_observation]
-        power = np.abs(current) ** 2
-        primary = power[0] if power.ndim == 3 else power
-        total = power.sum(axis=0) if power.ndim == 3 else power
-        target = amplitudes[diagnostic_observation][observed_pixels]
-        residual = np.sqrt(total[observed_pixels]) - target
-        errors["detector_constraint_diagnostics"].append({
-            "stage": stage, "observation": int(diagnostic_observation),
-            "outer_masked_pixels": int(explicit_outer.sum()),
-            "primary_outer_masked_mean": float(primary[explicit_outer].mean()) if explicit_outer.any() else None,
-            "total_outer_masked_mean": float(total[explicit_outer].mean()) if explicit_outer.any() else None,
-            "observed_amplitude_relative_error": float(np.linalg.norm(residual) / max(np.linalg.norm(target), 1e-30)),
-        })
-
-    coherence_kernels = [None] * n_observations
-    shared_coherence_kernel = None
-    share_coherence = recipe["coherence_kernel_scope"] == "shared"
     start_time = time.time()
     outer_iterations = int(recipe["outer_iterations"])
     print(
@@ -7871,223 +4323,49 @@ def general_phase_retrieval_algorithm(
         flush=True,
     )
 
-    workers = min(int(recipe["observation_workers"]), n_observations)
-    import inspect
-    kernel_module = inspect.getmodule(phase_retrieval_kernel) if phase_retrieval_kernel else None
-    if workers > 1 and (GPU if kernel_module is None else getattr(kernel_module, "GPU", GPU)):
-        print("GPU backend: using one observation worker to avoid competing GPU jobs", flush=True)
-        workers = 1
-    gamma_strategy = recipe["shared_coherence_update"]
-    round_coherence = (share_coherence and recipe["partial_coherence"]
-                       and gamma_strategy != "sequential")
-    print(f"Observation workers: {workers}; FFT threads per worker: {recipe['fft_workers']}; "
-          f"shared gamma update: {gamma_strategy}", flush=True)
-    projection_every, projection_start = _resolve_projection_cadence(
-        recipe, default_every=n_observations,
-    )
-    parallel_joint = (round_coherence or (workers > 1 and
-                      (not recipe["partial_coherence"] or not share_coherence
-                       or recipe["freeze_coherence_after_reference"])))
-    if parallel_joint and recipe["projection_model"] != "none" and recipe["projection_relaxation"] > 0:
-        if projection_every % n_observations or projection_start % n_observations:
-            raise ValueError("Parallel rounds require physical projection boundaries at complete observation sweeps.")
-    state_weights = _observation_weights(recipe["observation_weights"], n_observations)
-
-    preserve_masked = recipe["preserve_warmup_masked_intensity"]
-    fixed_masked_intensities = [None] * n_observations
-    if recipe["freeze_coherence_after_reference"] and not share_coherence:
-        raise ValueError("Freezing reference coherence requires coherence_kernel_scope='shared'.")
-
     # Optional independent warmup before coupling observations.
     warmup_schedule = _build_update_schedule(
         recipe,
         name="warmup",
         allow_disabled=True,
     )
-    reference_schedule = _build_role_warmup_schedule(recipe, "reference")
-    other_schedule = _build_role_warmup_schedule(recipe, "other")
-    if reference_schedule is not None or other_schedule is not None:
-        # An omitted role inherits the shared schedule. This also permits an
-        # explicit empty schedule for either role by setting its Nit to zero.
-        reference_schedule = (warmup_schedule if reference_schedule is None
-                              else reference_schedule)
-        other_schedule = (warmup_schedule if other_schedule is None
-                          else other_schedule)
-    else:
-        reference_schedule = warmup_schedule
-        other_schedule = None
-    if reference_schedule or other_schedule or warmup_schedule:
-        seeded_indices = recipe["warmup_seeded_stage_indices"]
-        if (other_schedule is None and seeded_indices is not None
-                and max(seeded_indices) >= len(warmup_schedule)):
-            raise ValueError("warmup_seeded_stage_indices exceeds warmup stage count.")
-        reference_observation = int(recipe["warmup_reference_observation"])
-        if reference_observation >= n_observations:
-            raise ValueError("warmup_reference_observation exceeds observation count.")
-        warmup_order = [reference_observation] + [
-            index for index in range(n_observations) if index != reference_observation
-        ]
+    if warmup_schedule:
         print(
             "Universal phase retrieval: starting independent warmup "
             f"for {n_observations} observations",
             flush=True,
         )
-        warmup_passes = ("coherent", "partial") if preserve_masked else ("original",)
-        for pass_kind in warmup_passes:
-            pass_started = time.perf_counter()
-            synchronous = round_coherence and pass_kind == "partial"
-            round_gamma = shared_coherence_kernel
-            if synchronous and round_gamma is None:
-                round_gamma = _initial_coherence_kernel(fields[reference_observation])
-
-            calibrate_reference = synchronous and recipe["warmup_calibrate_shared_gamma"]
-
-            def update_warmup(observation):
-                field = fields[observation]
-                if observation == reference_observation:
-                    observation_schedule = reference_schedule
-                elif other_schedule is not None:
-                    observation_schedule = other_schedule
-                elif seeded_indices is not None:
-                    observation_schedule = [warmup_schedule[index] for index in seeded_indices]
-                else:
-                    observation_schedule = warmup_schedule
-                if preserve_masked:
-                    partial_flags = [stage["RL_it"] > 0 and stage["RL_freq"] <= stage["Nit"]
-                                     for stage in observation_schedule]
-                    if pass_kind == "coherent" and any(partial_flags):
-                        first_partial = partial_flags.index(True)
-                        if not all(partial_flags[first_partial:]):
-                            raise ValueError("Preserved warmup requires coherent stages before partial stages.")
-                    observation_schedule = [stage for stage, partial in zip(observation_schedule, partial_flags)
-                                            if partial == (pass_kind == "partial")]
-                    if pass_kind == "coherent" and not observation_schedule:
-                        raise ValueError("Every state needs a coherent warmup to preserve masked intensities.")
-                if not observation_schedule:
-                    return None
-                if (pass_kind != "partial" and observation != reference_observation
-                        and recipe["warmup_start_from_first"]):
-                    if recipe["warmup_seed_scale_fit"] == "linear":
-                        valid = ((bsmasks[reference_observation] == 0)
-                                 & (bsmasks[observation] == 0))
-                        source = intensities[reference_observation][valid]
-                        target = intensities[observation][valid]
-                        if source.size < 2:
-                            raise ValueError("Cannot scale warmup field: fewer than two shared valid pixels.")
-                        source_centered = source - np.mean(source)
-                        denominator = np.dot(source_centered, source_centered)
-                        factor = (np.dot(source_centered, target - np.mean(target))
-                                  / denominator if denominator > 0 else 0)
-                        if not np.isfinite(factor) or factor <= 0:
-                            raise ValueError("Cannot scale warmup field: non-positive intensity slope.")
-                        scale = np.sqrt(factor)
-                    else:
-                        reference_sum = float(np.sum(intensities[reference_observation]))
-                        current_sum = float(np.sum(intensities[observation]))
-                        scale = (np.sqrt(current_sum / reference_sum)
-                                 if reference_sum > 0 and current_sum > 0 else 1.0)
-                    field = fields[reference_observation] * scale
-                    if recipe["startimage_radial_normalization"]:
-                        field = _radially_normalize_startimage(
-                            field, holograms[observation], mask_stack[observation],
-                        )
-                gamma = (round_gamma if synchronous else shared_coherence_kernel
-                         if share_coherence else coherence_kernels[observation])
-                return _run_observation_update(
-                    field, amplitudes[observation], modal_supportmask,
-                    bsmasks[observation], observation_schedule, recipe,
-                    phase_retrieval_kernel=phase_retrieval_kernel,
-                    gamma=None if gamma is None else gamma.copy(), return_gamma=True,
-                    fixed_masked_intensity=fixed_masked_intensities[observation],
-                    freeze_gamma=((synchronous and gamma_strategy == "pooled"
-                                   and not (calibrate_reference and observation == reference_observation)) or
-                                  (recipe["freeze_coherence_after_reference"]
-                                   and observation != reference_observation)),
-                )
-
-            # Seeded coherent states depend only on the completed reference.
-            # Sequential shared-gamma warmup retains its legacy ordering.
-            parallel_pass = (pass_kind == "coherent" or synchronous
-                             or not recipe["partial_coherence"] or not share_coherence)
-            pass_workers = workers if parallel_pass else 1
-            batches = ([warmup_order[:1], warmup_order[1:]]
-                       if (recipe["warmup_start_from_first"] and pass_kind != "partial")
-                       or calibrate_reference else [warmup_order])
-            gamma_sum = None
-            gamma_weight = 0.0
-            for batch in batches:
-                for observation, result in _observation_map(update_warmup, batch, pass_workers):
-                    if result is None:
-                        continue
-                    print(f"  Warmup observation {observation + 1}/{n_observations} ({pass_kind})", flush=True)
-                    fields[observation], results, updated_gamma = result
-                    if preserve_masked and pass_kind == "coherent":
-                        fixed_masked_intensities[observation] = (
-                            np.sum(np.abs(fields[observation]) ** 2, axis=0)
-                            if recipe["Nmodes"] > 1 else np.abs(fields[observation]) ** 2
-                        )
-                    if synchronous:
-                        if calibrate_reference and observation == reference_observation:
-                            round_gamma = _normalized_coherence_kernel(updated_gamma)
-                        if updated_gamma is not None:
-                            contribution = state_weights[observation] * _normalized_coherence_kernel(updated_gamma)
-                            gamma_sum = contribution if gamma_sum is None else gamma_sum + contribution
-                            gamma_weight += state_weights[observation]
-                    elif share_coherence:
-                        shared_coherence_kernel = updated_gamma
-                    else:
-                        coherence_kernels[observation] = updated_gamma
-                    for result in results:
-                        errors["observation_steps"].append({
-                            "outer": -1, "observation": observation,
-                            "state": metadata["states"][observation],
-                            "energy": metadata["energies"][observation],
-                            "polarization": metadata["polarizations"][observation],
-                            "beam": metadata["beams"][observation],
-                            "stage": "warmup", **result,
-                        })
-            if synchronous:
-                if gamma_strategy == "average":
-                    if gamma_weight <= 0:
-                        raise ValueError("Average gamma requires partial-coherence warmup stages.")
-                    shared_coherence_kernel = _normalized_coherence_kernel(gamma_sum / gamma_weight)
-                else:
-                    targets = np.where(bsmasks != 0, np.asarray(fixed_masked_intensities), amplitudes ** 2)
-                    shared_coherence_kernel = _pooled_coherence_update(
-                        fields, targets, round_gamma, recipe["coherence_round_iterations"], state_weights,
-                    )
-            record_checkpoint("warmup_" + pass_kind)
-            elapsed = time.perf_counter() - pass_started
-            errors.setdefault("warmup_passes", []).append({"pass": pass_kind, "wall_seconds": elapsed})
-            print(f"  Warmup {pass_kind} pass complete in {elapsed:.2f} seconds", flush=True)
+        for observation in range(n_observations):
+            print(
+                f"  Warmup observation "
+                f"{observation + 1}/{n_observations}",
+                flush=True,
+            )
+            fields[observation], results = _run_update_schedule(
+                fields[observation],
+                amplitudes[observation],
+                supportmask,
+                bsmasks[observation],
+                warmup_schedule,
+                recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
+            )
+            for result in results:
+                errors["observation_steps"].append({
+                    "outer": -1,
+                    "observation": observation,
+                    "state": metadata["states"][observation],
+                    "energy": metadata["energies"][observation],
+                    "polarization": metadata["polarizations"][observation],
+                    "beam": metadata["beams"][observation],
+                    "stage": "warmup",
+                    **result,
+                })
         print("Universal phase retrieval: warmup complete", flush=True)
     else:
         print("Universal phase retrieval: warmup disabled", flush=True)
 
-    if preserve_masked and any(value is None for value in fixed_masked_intensities):
-        raise ValueError("Every state needs a coherent warmup to preserve masked intensities.")
     fieldswarmup=fields.copy()
-    frozen_indices = []
-    if recipe["freeze_saturated_fields"]:
-        saturated_names = recipe["saturated_states"]
-        if not saturated_names:
-            raise ValueError("freeze_saturated_fields requires saturated_states.")
-        frozen_indices = [index for index, state in enumerate(metadata["states"])
-                          if state in saturated_names]
-        if not frozen_indices:
-            raise ValueError("No observations match saturated_states for freezing.")
-    frozen_fields = fields[frozen_indices].copy()
-
-    def restore_frozen_observations(current_fields):
-        if not frozen_indices:
-            return
-        if (np.asarray(current_fields).ndim == 4
-                and recipe["constrain_nonphysical_modes_common"]):
-            # Freeze the physically modelled primary mode. Higher modes must
-            # remain common across states, including the saturated state.
-            current_fields[frozen_indices, 0] = frozen_fields[:, 0]
-        else:
-            current_fields[frozen_indices] = frozen_fields
 
     inner_schedule = _build_update_schedule(recipe, name="inner")
     rng = np.random.default_rng(recipe["random_seed"])
@@ -8097,43 +4375,10 @@ def general_phase_retrieval_algorithm(
         default_every=n_observations,
     )
     completed_updates = 0
-    fixed_targets = (np.where(bsmasks != 0, np.asarray(fixed_masked_intensities), amplitudes ** 2)
-                     if round_coherence else None)
 
     # Alternate detector/support updates with the metadata-aware object model.
     # Every projection sees the complete current observation stack.
     for outer in range(outer_iterations):
-        if outer + 1 in recipe["coherent_refresh_rounds"]:
-            # Complete an all-state coherent sweep before capturing new fills.
-            # Retain gamma separately: it must not blur the coherent update.
-            refresh_stage = dict(inner_schedule[0],
-                                 mode=recipe["coherent_refresh_mode"],
-                                 Nit=recipe["coherent_refresh_iterations"], RL_it=0)
-            def refresh_observation(observation):
-                if observation in frozen_indices:
-                    return fields[observation], []
-                return _run_observation_update(
-                    fields[observation], amplitudes[observation], modal_supportmask,
-                    bsmasks[observation], [refresh_stage], recipe,
-                    phase_retrieval_kernel=phase_retrieval_kernel,
-                    gamma=None, return_gamma=False, fixed_masked_intensity=None,
-                )
-            for observation, (field, results) in _observation_map(
-                    refresh_observation, range(n_observations), workers):
-                print(f"  Coherent refresh observation {observation + 1}/{n_observations}", flush=True)
-                fields[observation] = field
-                power = np.abs(field) ** 2
-                fixed_masked_intensities[observation] = (
-                    power.sum(axis=0) if power.ndim == 3 else power)
-                errors.setdefault("coherent_refresh_steps", []).append({
-                    "outer_round": outer + 1, "observation": observation,
-                    "frozen": observation in frozen_indices, "steps": results,
-                })
-            if round_coherence:
-                fixed_targets = np.where(bsmasks != 0,
-                                         np.asarray(fixed_masked_intensities), amplitudes ** 2)
-            record_checkpoint("coherent_refresh_before_round_" + str(outer + 1))
-            print(f"Refreshed masked intensities before partial-coherence round {outer + 1}", flush=True)
         print(
             f"Universal phase retrieval: outer loop "
             f"{outer + 1}/{outer_iterations}",
@@ -8144,91 +4389,24 @@ def general_phase_retrieval_algorithm(
             if recipe["shuffle_observations"]
             else np.arange(n_observations)
         )
-        round_results = {}
-        if parallel_joint:
-            round_gamma = shared_coherence_kernel
-            if round_coherence and round_gamma is None:
-                round_gamma = _initial_coherence_kernel(fields[0])
-
-            def update_joint(observation):
-                gamma = round_gamma if share_coherence else coherence_kernels[observation]
-                if observation in frozen_indices:
-                    # Frozen fields still inform the shared illumination estimate.
-                    if round_coherence and gamma_strategy == "average":
-                        fitted_gamma = _pooled_coherence_update(
-                            fields[observation:observation + 1],
-                            fixed_targets[observation:observation + 1], gamma,
-                            recipe["coherence_round_iterations"],
-                        )
-                        return fields[observation], [], fitted_gamma
-                    return fields[observation], [], gamma
-                return _run_observation_update(
-                    fields[observation], amplitudes[observation], modal_supportmask,
-                    bsmasks[observation], inner_schedule, recipe,
-                    phase_retrieval_kernel=phase_retrieval_kernel,
-                    gamma=None if gamma is None else gamma.copy(), return_gamma=True,
-                    fixed_masked_intensity=fixed_masked_intensities[observation],
-                    freeze_gamma=(recipe["freeze_coherence_after_reference"] or
-                                  (round_coherence and gamma_strategy == "pooled")),
-                )
-
-            gamma_sum = None
-            for position, (observation, (field, results, gamma)) in enumerate(
-                    _observation_map(update_joint, order, workers), start=1):
-                print(f"  Updating observation {position}/{n_observations} "
-                      f"(index {int(observation)}, parallel round)", flush=True)
-                fields[observation] = field
-                round_results[observation] = results
-                if round_coherence and gamma_strategy == "average":
-                    contribution = state_weights[observation] * _normalized_coherence_kernel(gamma)
-                    gamma_sum = contribution if gamma_sum is None else gamma_sum + contribution
-                elif not share_coherence:
-                    coherence_kernels[observation] = gamma
-            if round_coherence:
-                if gamma_strategy == "average":
-                    shared_coherence_kernel = _normalized_coherence_kernel(gamma_sum)
-                else:
-                    shared_coherence_kernel = _pooled_coherence_update(
-                        fields, fixed_targets, round_gamma,
-                        recipe["coherence_round_iterations"], state_weights,
-                    )
-                errors.setdefault("coherence_rounds", []).append({
-                    "outer": outer, "strategy": gamma_strategy,
-                    "observations": n_observations,
-                })
         for position, observation in enumerate(order, start=1):
-            if not parallel_joint:
-                print(
-                    "  Updating observation "
-                    f"{position}/{n_observations} "
-                    f"(index {int(observation)}, "
-                    f"energy={metadata['energies'][observation]}, "
-                    f"polarization={metadata['polarizations'][observation]:g})",
-                    flush=True,
-                )
-            if parallel_joint:
-                results = round_results[observation]
-            elif observation in frozen_indices:
-                results = []
-            else:
-                fields[observation], results, updated_gamma = _run_observation_update(
-                    fields[observation],
-                    amplitudes[observation],
-                    modal_supportmask,
-                    bsmasks[observation],
-                    inner_schedule,
-                    recipe,
-                    phase_retrieval_kernel=phase_retrieval_kernel,
-                    gamma=(shared_coherence_kernel if share_coherence
-                           else coherence_kernels[observation]),
-                    return_gamma=True,
-                    fixed_masked_intensity=fixed_masked_intensities[observation],
-                    freeze_gamma=recipe["freeze_coherence_after_reference"],
-                )
-                if share_coherence:
-                    shared_coherence_kernel = updated_gamma
-                else:
-                    coherence_kernels[observation] = updated_gamma
+            print(
+                "  Updating observation "
+                f"{position}/{n_observations} "
+                f"(index {int(observation)}, "
+                f"energy={metadata['energies'][observation]}, "
+                f"polarization={metadata['polarizations'][observation]:g})",
+                flush=True,
+            )
+            fields[observation], results = _run_update_schedule(
+                fields[observation],
+                amplitudes[observation],
+                supportmask,
+                bsmasks[observation],
+                inner_schedule,
+                recipe,
+                phase_retrieval_kernel=phase_retrieval_kernel,
+            )
             for result in results:
                 errors["observation_steps"].append({
                     "outer": outer,
@@ -8248,15 +4426,11 @@ def general_phase_retrieval_algorithm(
                 completed_updates,
                 projection_start,
                 projection_every,
-                total_updates=outer_iterations * n_observations,
             ):
                 continue
-            if recipe["projection_relaxation"] == 0:
-                continue
 
-            record_checkpoint("joint_detector_support")
             print("  Applying joint physical projection", flush=True)
-            fields, components = _project_physical_modes(
+            fields, components = project_fourier_fields_general(
                 fields,
                 metadata["states"],
                 metadata["energies"],
@@ -8272,21 +4446,8 @@ def general_phase_retrieval_algorithm(
                 log_floor=recipe["log_floor"],
                 magnetization_supportmask=magnetization_supportmask,
                 projection_supportmask=projection_supportmask,
-                material_thickness=material_thickness,
-                fit_material_thickness=recipe["fit_material_thickness"],
-                thickness_supportmask=thickness_supportmask,
-                initial_components=(components if "magnetization" in components
-                                    and recipe.get("chemical_species") is None
-                                    and recipe["projection_model"] == "physical_factorized" else None),
                 return_components=True,
-                diagnostic_callback=record_checkpoint,
             )
-            restore_frozen_observations(fields)
-            if progress_callback is not None:
-                progress_callback(dict(stage="physical_projection", outer_round=outer + 1,
-                    fields=fields, components=components, recipe=recipe,
-                    supportmask=supportmask, state_labels=metadata["states"],
-                    energy_labels=metadata["energies"]))
             errors["projection_steps"].append({
                 "outer": outer,
                 "observation": int(observation),
@@ -8302,22 +4463,20 @@ def general_phase_retrieval_algorithm(
                 flush=True,
             )
 
-    # A zero relaxation is a true bypass: avoid the potentially expensive
-    # focus, physical fit, and inverse propagation when no result is applied.
-    if (recipe["projection_model"] != "none"
-            and recipe["final_projection_relaxation"] > 0):
+    # Return components from a final full-strength model decomposition.
+    if recipe["projection_model"] != "none":
         print(
-            "Universal phase retrieval: computing final physical model",
+            "Universal phase retrieval: applying final physical projection",
             flush=True,
         )
-        final_projected_fields, components = _project_physical_modes(
+        fields, components = project_fourier_fields_general(
             fields,
             metadata["states"],
             metadata["energies"],
             metadata["polarizations"],
             metadata["beams"],
             weights=recipe["observation_weights"],
-            relaxation=recipe["final_projection_relaxation"],
+            relaxation=1.0,
             rank_deficient=recipe["rank_deficient"],
             projection_model=recipe["projection_model"],
             saturated_states=recipe["saturated_states"],
@@ -8326,98 +4485,23 @@ def general_phase_retrieval_algorithm(
             log_floor=recipe["log_floor"],
             magnetization_supportmask=magnetization_supportmask,
             projection_supportmask=projection_supportmask,
-            material_thickness=material_thickness,
-            fit_material_thickness=recipe["fit_material_thickness"],
-            thickness_supportmask=thickness_supportmask,
-            initial_components=(components if "magnetization" in components
-                                and recipe.get("chemical_species") is None
-                                and recipe["projection_model"] == "physical_factorized" else None),
             return_components=True,
         )
-        fields = final_projected_fields
-        restore_frozen_observations(fields)
-        if progress_callback is not None:
-            progress_callback(dict(stage="final_physical_projection", outer_round=outer_iterations,
-                fields=fields, components=components, recipe=recipe,
-                supportmask=supportmask, state_labels=metadata["states"],
-                energy_labels=metadata["energies"]))
-    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
-    components["final_projection_skipped"] = bool(
-        recipe["projection_model"] == "none"
-        or recipe["final_projection_relaxation"] == 0
-    )
 
     # Optionally finish exactly on the measured Fourier amplitudes.
-    record_checkpoint("before_final_fourier")
     if recipe["final_fourier_constraint"]:
         fields = _apply_measured_amplitudes(fields, amplitudes, bsmasks)
-        restore_frozen_observations(fields)
         components["final_fourier_constraint_applied"] = True
     else:
         components["final_fourier_constraint_applied"] = False
-    if (np.asarray(fields).ndim == 4
-            and recipe["constrain_nonphysical_modes_common"]):
-        # A final observation-specific amplitude projection can separate the
-        # higher modes again. Finish on the requested common-mode constraint.
-        gain_scale = np.sqrt(components.get("illumination_intensity_factors", np.ones(len(fields))))[:, None, None, None]
-        fields, common_groups = _project_nonphysical_modes_common(
-            fields / gain_scale,
-            metadata["energies"],
-            metadata["beams"],
-            recipe,
-            weights=recipe["observation_weights"],
-        )
-        fields *= gain_scale
-        restore_frozen_observations(fields)
-        components["nonphysical_mode_common_groups"] = common_groups
-        components["common_mode_applied_after_final_fourier"] = bool(
-            recipe["final_fourier_constraint"]
-        )
-    record_checkpoint("returned_final")
-    components["Nmodes"] = int(recipe["Nmodes"])
-    components["modes"] = list(mode_factors)
-    components["modal_supportmask_used"] = np.asarray(modal_supportmask).copy()
-    components["mode_support_shifts"] = mode_support_shifts
-    components["frozen_saturated_observations"] = frozen_indices
-    components["observation_workers"] = workers
-    components["shared_coherence_update"] = gamma_strategy
-    components["coherence_kernel_scope"] = recipe["coherence_kernel_scope"]
-    components["partial_coherence"] = (
-        shared_coherence_kernel is not None if share_coherence
-        else any(kernel is not None for kernel in coherence_kernels)
-    )
-    if components["partial_coherence"]:
-        if share_coherence:
-            components["coherence_kernel"] = shared_coherence_kernel
-        else:
-            components["coherence_kernels"] = np.stack(coherence_kernels)
 
-    executions = [record["execution"] for record in errors["observation_steps"] if "execution" in record]
-    events = sorted([(item["started"], 1) for item in executions]
-                    + [(item["finished"], -1) for item in executions])
-    active = maximum = 0
-    for _, change in events:
-        active += change
-        maximum = max(maximum, active)
-    errors["execution_summary"] = {
-        "requested_workers": int(recipe["observation_workers"]),
-        "effective_workers": workers, "max_concurrent_updates": maximum,
-        "worker_threads_used": len({item["thread_id"] for item in executions}),
-        "summed_update_wall_seconds": sum(item["wall_seconds"] for item in executions),
-    }
-    print(f"Measured concurrent observation updates: {maximum} (configured {workers})", flush=True)
     errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
     print(
         "Universal phase retrieval: complete in "
         f"{errors['runtime_seconds']:.3f} s",
         flush=True,
     )
-    if progress_callback is not None:
-        progress_callback(dict(stage="final", outer_round=outer_iterations,
-            fields=fields, components=components, recipe=recipe,
-            supportmask=supportmask, state_labels=metadata["states"],
-            energy_labels=metadata["energies"]))
-    return input_geometry.finish(fields, fieldswarmup, components, bsmasks, errors)
+    return fields, fieldswarmup,components, bsmasks, errors
 
 
 _PHYSICAL_MODELS = {
@@ -8619,25 +4703,13 @@ def _pure_energy_scan(metadata):
 
 
 def _physical_driver_recipe(recipe):
-    """
-    Select recipe entries understood by the local physical driver.
-
-    Context:
-    Adapter at universal dispatch: retain the keys accepted by the general physical driver
-    so universal-only spectrum aliases do not leak into lower-level validation.
-    """
+    """Select recipe entries understood by the local physical driver."""
     defaults = default_general_phase_retrieval_recipe()
     return {key: recipe[key] for key in defaults}
 
 
 def _energy_driver_recipe(recipe):
-    """
-    Translate universal settings for the local pure-energy driver.
-
-    Context:
-    Compatibility adapter for pure-energy low-rank retrieval. This dispatch is distinct from
-    the mixed-state physical driver and does not support every newer joint-workflow option.
-    """
+    """Translate universal settings for the local pure-energy driver."""
     defaults = default_multi_energy_phase_retrieval_recipe()
     translated = {
         key: recipe[key]
@@ -8652,66 +4724,6 @@ def _energy_driver_recipe(recipe):
     return translated
 
 
-def _run_multimode_spectral(holograms, mask_pixel, supportmask, recipe,
-                             start_fields=None, phase_retrieval_kernel=None):
-    """Route pure-energy mode lists without silently reverting to one mode.
-
-    Prepare geometry and support factors once, then use the existing modal
-    spectral driver on that grid. Its low-rank projection acts independently
-    per mode; it does not assign magnetic meaning to a secondary mode.
-    """
-    factors = recipe["modes"] if recipe["modes"] is not None else [1] * recipe["Nmodes"]
-    if isinstance(factors, np.ndarray):
-        if factors.ndim == 0:
-            factors = [factors.item()]
-        elif factors.ndim != 1:
-            raise ValueError("modes must be a nonempty 1D list of nonnegative support factors")
-        else:
-            factors = list(factors)
-    elif isinstance(factors, (int, float, np.number)) and not isinstance(factors, bool):
-        factors = [factors]
-    elif not isinstance(factors, (list, tuple)):
-        try:
-            factors = list(factors)
-        except TypeError as exc:
-            raise ValueError("modes must be a nonempty list of nonnegative support factors") from exc
-    if not factors or any(
-            isinstance(v, bool) or not isinstance(v, (int, float, np.number))
-            or not np.isfinite(v) or v < 0 for v in factors):
-        raise ValueError("modes must be a nonempty list of nonnegative support factors")
-    local = dict(recipe, Nmodes=len(factors), modes=list(factors))
-    images, mask, support, starts, geom = geometry.prepare(
-        holograms, mask_pixel, supportmask, dict(local, Nmodes=1), start_fields)
-    if local["recenter_modal_supports"]:
-        supports, shifts = geometry.recenter_modal_supports(support, factors, center=local["mode_support_center"])
-    elif local["mode_support_center"] == "components":
-        supports = _component_centered_modal_supports(support, factors)
-        shifts = [(0, 0)] * len(factors)
-    else:
-        supports = _mode_supports(support, factors, images.shape[-2:])
-        shifts = [(0, 0)] * len(factors)
-    if starts is None:
-        amplitudes, intensities, _ = _prepare_energy_amplitudes(
-            images, mask, hologram_intensity_cutoff_vmin=local["hologram_intensity_cutoff_vmin"])
-        masks = _as_energy_mask(mask, nE=len(images), image_shape=images.shape[-2:])
-        starts = _initialize_physical_modal_fields(supports, amplitudes, intensities, masks, local)
-        if local["startimage_radial_normalization"]:
-            starts = np.stack([_radially_normalize_startimage(f, y, m)
-                               for f, y, m in zip(starts, images, masks)])
-    translated = default_multi_energy_multimode_phase_retrieval_recipe()
-    translated.update({k: v for k, v in _energy_driver_recipe(local).items() if k in translated})
-    translated.update(Nmodes=len(factors), mode_initialization_seed=local["mode_initialization_seed"],
-                      crop=0, binning=1, roi=None, material_mask=None,
-                      material_thickness=_recipe_material_thickness(local, geom))
-    result = multi_energy_multimode_phase_retrieval_algorithm(
-        images, mask, supports, multi_energy_recipe=translated, start_fields=starts,
-        phase_retrieval_kernel=phase_retrieval_kernel)
-    fields, warmup, components, masks, errors = result
-    components.update(modes=list(factors), modal_supportmask_used=supports,
-                      mode_support_shifts=shifts)
-    return geom.finish(fields, warmup, components, masks, errors)
-
-
 def project_fourier_fields_universal(
     fields,
     state_labels,
@@ -8721,7 +4733,6 @@ def project_fourier_fields_universal(
     universal_recipe=None,
     saturated_states=None,
     return_components=False,
-    supportmask=None,
 ):
     """
     Apply one universal object-space projection to Fourier-domain fields.
@@ -8743,16 +4754,7 @@ def project_fourier_fields_universal(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
-    fields = np.asarray(fields)
-    if fields.ndim == 4:
-        if fields.shape[1] < 1:
-            raise ValueError("Fields must contain at least one mode")
-        _as_energy_stack(fields[:, 0], name="fields")
-        recipe["Nmodes"] = fields.shape[1]
-        if recipe["modes"] is not None and len(recipe["modes"]) != fields.shape[1]:
-            raise ValueError("modes length must match the supplied field mode axis")
-    else:
-        fields = _as_energy_stack(fields, name="fields")
+    fields = _as_energy_stack(fields, name="fields")
     metadata = _normalize_metadata(
         state_labels,
         energy_labels,
@@ -8761,38 +4763,6 @@ def project_fourier_fields_universal(
         fields.shape[0],
     )
     model = _canonical_projection_model(recipe["projection_model"])
-    if recipe.get("chemical_species") is not None and model != "physical_factorized":
-        raise ValueError("chemical_species requires projection_model='physical_factorized'.")
-
-    material_thickness = _material_thickness_on_grid(recipe, fields.shape[-2:])
-    if material_thickness is not None:
-        material_thickness = np.fft.fftshift(material_thickness)
-    if recipe.get("chemical_species") is not None:
-        try:
-            from .phase_retrieval_species import map_species_recipe
-        except ImportError:
-            from phase_retrieval_species import map_species_recipe
-        recipe = map_species_recipe(recipe, shape=fields.shape[-2:])
-    thickness_supportmask = None
-    if recipe["zero_thickness_outside_support"]:
-        if model != "physical_factorized":
-            raise ValueError(
-                "zero_thickness_outside_support requires projection_model='physical_factorized'."
-            )
-        if supportmask is None:
-            raise ValueError(
-                "supportmask is required when zero_thickness_outside_support=True "
-                "in a direct projection."
-            )
-        support = np.asarray(supportmask)
-        if support.shape != fields.shape[-2:]:
-            raise ValueError("supportmask must match the Fourier-field spatial shape.")
-        if material_thickness is None:
-            material_thickness = np.ones(fields.shape[-2:], dtype=float)
-        thickness_supportmask = np.fft.fftshift(support) != 0
-        material_thickness = material_thickness * thickness_supportmask
-        if not np.any(material_thickness > 0):
-            raise ValueError("The support contains no material pixels for thickness fitting.")
 
     if model == "none":
         unchanged = np.asarray(fields).copy()
@@ -8805,7 +4775,7 @@ def project_fourier_fields_universal(
             recipe,
             len(metadata["energy_names"]),
         )
-        result = _project_physical_modes(
+        return project_fourier_fields_general(
             fields,
             metadata["states"],
             metadata["energies"],
@@ -8819,16 +4789,10 @@ def project_fourier_fields_universal(
             physical_iterations=physical_recipe["physical_iterations"],
             recipe=physical_recipe,
             log_floor=physical_recipe["log_floor"],
-            material_thickness=material_thickness,
-            fit_material_thickness=recipe["fit_material_thickness"],
-            thickness_supportmask=thickness_supportmask,
-            return_components=True,
+            return_components=return_components,
         )
-        return result if return_components else result[0]
 
     if model in {"svd", "rank1_spectral"}:
-        if recipe["coherent_refresh_rounds"]:
-            raise ValueError("Coherent refresh requires the general driver (physical_factorized, state_energy_beam, or none).")
         if not _pure_energy_scan(metadata):
             raise ValueError(
                 f"projection_model={model!r} requires a pure energy scan: "
@@ -8836,10 +4800,7 @@ def project_fourier_fields_universal(
                 "and one observation per energy. Use 'physical_factorized' "
                 "for mixed datasets."
             )
-        projector = project_fourier_fields_multi_energy
-        if fields.ndim == 4:
-            projector = project_fourier_fields_multi_energy_multimode
-        result = projector(
+        result = project_fourier_fields_multi_energy(
             fields,
             projection_model=model,
             rank=recipe["rank"],
@@ -8858,8 +4819,6 @@ def project_fourier_fields_universal(
             known_beta_normalization=recipe["known_beta_normalization"],
             fit_known_beta_scale=recipe["fit_known_beta_scale"],
             fit_known_beta_offset=recipe["fit_known_beta_offset"],
-            material_thickness=material_thickness,
-            fit_material_thickness=recipe["fit_material_thickness"],
             return_components=return_components,
         )
         return result
@@ -8882,7 +4841,6 @@ def universal_phase_retrieval_algorithm(
     universal_recipe=None,
     start_fields=None,
     phase_retrieval_kernel=None,
-    progress_callback=None,
 ):
     """
     Reconstruct a metadata-described list of diffraction measurements.
@@ -8896,20 +4854,12 @@ def universal_phase_retrieval_algorithm(
     -------
     fields : ndarray
         Final Fourier-domain fields, one per input hologram.
-    fieldswarmup : ndarray
-        Fourier-domain fields after warmup and before joint projections.
     components : dict
         Components and identifiability diagnostics from the selected model.
     bsmasks : ndarray
         Observation-specific invalid-pixel masks.
     errors : dict
         Per-stage errors, settings, metadata, and projection diagnostics.
-
-    Context:
-    Public notebook entry point. Supply intensity images plus
-    state/energy/polarization/illumination metadata. Returns final fields, warmup snapshot,
-    fitted components, effective masks and diagnostics; it does not run the optional
-    notebook Poisson polish.
     """
     recipe = default_universal_phase_retrieval_recipe()
     if universal_recipe is not None:
@@ -8924,32 +4874,6 @@ def universal_phase_retrieval_algorithm(
     if saturated_states is not None:
         recipe["saturated_states"] = saturated_states
 
-    if recipe["modes"] is not None:
-        factors = recipe["modes"]
-        if isinstance(factors, np.ndarray):
-            if factors.ndim == 0:
-                factors = [factors.item()]
-            elif factors.ndim != 1:
-                raise ValueError("modes must be a nonempty 1D list of nonnegative support factors")
-            else:
-                factors = list(factors)
-        elif isinstance(factors, (int, float, np.number)) and not isinstance(factors, bool):
-            factors = [factors]
-        elif not isinstance(factors, (list, tuple)):
-            try:
-                factors = list(factors)
-            except TypeError as exc:
-                raise ValueError("modes must be a nonempty list of nonnegative support factors") from exc
-        if not factors or any(
-                isinstance(v, bool) or not isinstance(v, (int, float, np.number))
-                or not np.isfinite(v) or v < 0 for v in factors):
-            raise ValueError("modes must be a nonempty list of nonnegative support factors")
-        recipe["modes"] = list(factors)
-        recipe["Nmodes"] = len(factors)
-    if (isinstance(recipe["Nmodes"], bool) or
-            not isinstance(recipe["Nmodes"], (int, np.integer)) or recipe["Nmodes"] < 1):
-        raise ValueError("Nmodes must be a positive integer")
-
     holograms = _as_energy_stack(
         holograms,
         name="holograms",
@@ -8962,8 +4886,6 @@ def universal_phase_retrieval_algorithm(
         holograms.shape[0],
     )
     model = _canonical_projection_model(recipe["projection_model"])
-    if recipe.get("chemical_species") is not None and model != "physical_factorized":
-        raise ValueError("chemical_species requires projection_model='physical_factorized'.")
     print(
         "Universal phase retrieval: dispatching "
         f"{holograms.shape[0]} observations with "
@@ -8973,31 +4895,21 @@ def universal_phase_retrieval_algorithm(
 
     # Pure energy modes intentionally use the original multi-energy driver.
     if model in {"svd", "rank1_spectral"}:
-        if progress_callback is not None:
-            raise ValueError("Live callbacks require the general physical driver")
-        if recipe["coherent_refresh_rounds"]:
-            raise ValueError("Coherent refresh requires the general driver (physical_factorized, state_energy_beam, or none).")
         if not _pure_energy_scan(metadata):
             raise ValueError(
                 f"projection_model={model!r} requires a pure energy scan. "
                 "Use 'physical_factorized' for mixed metadata."
             )
-        requested_modes = recipe["modes"]
-        nmodes = len(requested_modes) if requested_modes is not None else recipe["Nmodes"]
-        if nmodes > 1:
-            fields, fieldswarmup, components, bsmasks, errors = _run_multimode_spectral(
-                holograms, mask_pixel, supportmask, recipe, start_fields, phase_retrieval_kernel)
-        else:
-            fields, fieldswarmup,components, bsmasks, errors = (
-                multi_energy_phase_retrieval_algorithm(
-                    holograms,
-                    mask_pixel,
-                    supportmask,
-                    multi_energy_recipe=_energy_driver_recipe(recipe),
-                    start_fields=start_fields,
-                    phase_retrieval_kernel=phase_retrieval_kernel,
-                )
+        fields, fieldswarmup,components, bsmasks, errors = (
+            multi_energy_phase_retrieval_algorithm(
+                holograms,
+                mask_pixel,
+                supportmask,
+                multi_energy_recipe=_energy_driver_recipe(recipe),
+                start_fields=start_fields,
+                phase_retrieval_kernel=phase_retrieval_kernel,
             )
+        )
     elif model in _PHYSICAL_MODELS:
         physical_recipe = _prepare_physical_recipe(
             recipe,
@@ -9014,7 +4926,6 @@ def universal_phase_retrieval_algorithm(
                 metadata["beams"],
                 saturated_states=physical_recipe["saturated_states"],
                 general_recipe=_physical_driver_recipe(physical_recipe),
-                progress_callback=progress_callback,
                 start_fields=start_fields,
                 phase_retrieval_kernel=phase_retrieval_kernel,
             )
@@ -9037,637 +4948,3 @@ def universal_phase_retrieval_algorithm(
     errors["observation_metadata"] = metadata_summary
     errors["universal_settings"] = recipe.copy()
     return fields, fieldswarmup,components, bsmasks, errors
-
-
-
-# Public names used by notebooks that construct explicit modal supports.
-mode_supports = _mode_supports
-multimode_phase_retrieval_kernel = PhaseRtrv_core
-
-
-# Multimode spectral projections and retrieval use the same local kernels.
-def _validate_nmodes(nmodes):
-    """Validate and return a strictly positive integer mode count."""
-    if isinstance(nmodes, bool) or not isinstance(nmodes, (int, np.integer)):
-        raise ValueError("Nmodes must be a positive integer.")
-    nmodes = int(nmodes)
-    if nmodes <= 0:
-        raise ValueError("Nmodes must be a positive integer.")
-    return nmodes
-
-def _as_energy_mode_stack(fields, name="fields"):
-    """
-    Return fields as ``(nE, Nmodes, nx, ny)`` and report whether modes squeezed.
-    """
-    fields = np.asarray(fields)
-    if fields.ndim == 3:
-        return fields[:, None, :, :], True
-    if fields.ndim == 4:
-        return fields, False
-    raise ValueError(
-        f"{name} must have shape (nE, nx, ny) or (nE, Nmodes, nx, ny)."
-    )
-
-def _maybe_squeeze_energy_modes(fields, nmodes):
-    """Remove the singleton mode axis when reconstructing exactly one mode."""
-    if nmodes == 1 and np.asarray(fields).ndim == 4:
-        return fields[:, 0]
-    return fields
-
-def _modal_amplitude(fields):
-    """Return the square root of summed modal intensity at every energy."""
-    fields, _ = _as_energy_mode_stack(fields)
-    return np.sqrt(np.sum(np.abs(fields) ** 2, axis=1))
-
-def project_fourier_fields_multi_energy_multimode(
-    phase_stack,
-    projection_model="svd",
-    rank=1,
-    static_mode="mean",
-    weights=None,
-    relaxation=1.0,
-    log_floor=1e-12,
-    spectral_constraint="free",
-    energy_values=None,
-    known_beta_spectrum=None,
-    known_delta_spectrum=None,
-    absorption_part="real",
-    kk_sign=1.0,
-    kk_subtract_baseline=True,
-    kk_normalize_input=False,
-    known_beta_normalization="none",
-    fit_known_beta_scale=True,
-    fit_known_beta_offset=True,
-    projection_supportmask=None,
-    material_thickness=None,
-    fit_material_thickness=False,
-    return_components=False,
-):
-    """
-    Apply the selected cross-energy projection independently to each mode.
-
-    Mode indices must represent corresponding incoherent modes across energy.
-    The reconstruction driver preserves this ordering by propagating each
-    energy's modal fields between joint iterations.
-    """
-    modal_fields, squeezed = _as_energy_mode_stack(
-        phase_stack, name="phase_stack"
-    )
-    n_energy, nmodes, nx, ny = modal_fields.shape
-    if fit_material_thickness and nmodes > 1:
-        raise ValueError("Fitting one shared thickness across multiple modes is not supported; provide a fixed material map.")
-    if projection_supportmask is not None:
-        projection_supportmask = np.asarray(projection_supportmask) != 0
-        if projection_supportmask.ndim == 2:
-            if projection_supportmask.shape != (nx, ny):
-                raise ValueError(
-                    "projection_supportmask must have shape (nx, ny)."
-                )
-        elif projection_supportmask.ndim == 3:
-            if projection_supportmask.shape[1:] != (nx, ny):
-                raise ValueError(
-                    "modal projection_supportmask must have shape "
-                    "(Nmodes, nx, ny)."
-                )
-            if projection_supportmask.shape[0] not in {1, nmodes}:
-                raise ValueError(
-                    "projection_supportmask first axis must be 1 or Nmodes."
-                )
-        else:
-            raise ValueError("projection_supportmask must be 2D or 3D.")
-    projected = np.empty_like(modal_fields, dtype=np.complex128)
-    mode_components = []
-
-    for mode_index in range(nmodes):
-        if projection_supportmask is None or projection_supportmask.ndim == 2:
-            mode_projection_supportmask = projection_supportmask
-        elif projection_supportmask.shape[0] == 1:
-            mode_projection_supportmask = projection_supportmask[0]
-        else:
-            mode_projection_supportmask = projection_supportmask[mode_index]
-        result = project_fourier_fields_multi_energy(
-            modal_fields[:, mode_index],
-            projection_model=projection_model,
-            rank=rank,
-            static_mode=static_mode,
-            weights=weights,
-            relaxation=relaxation,
-            log_floor=log_floor,
-            spectral_constraint=spectral_constraint,
-            energy_values=energy_values,
-            known_beta_spectrum=known_beta_spectrum,
-            known_delta_spectrum=known_delta_spectrum,
-            absorption_part=absorption_part,
-            kk_sign=kk_sign,
-            kk_subtract_baseline=kk_subtract_baseline,
-            kk_normalize_input=kk_normalize_input,
-            known_beta_normalization=known_beta_normalization,
-            fit_known_beta_scale=fit_known_beta_scale,
-            fit_known_beta_offset=fit_known_beta_offset,
-            projection_supportmask=mode_projection_supportmask,
-            material_thickness=material_thickness,
-            fit_material_thickness=fit_material_thickness,
-            return_components=return_components,
-        )
-        if return_components:
-            projected[:, mode_index], components = result
-            mode_components.append(components)
-        else:
-            projected[:, mode_index] = result
-
-    output = projected[:, 0] if squeezed else projected
-    if not return_components:
-        return output
-
-    components = {
-        "projection_model": str(projection_model).lower(),
-        "Nmodes": nmodes,
-        "mode_components": mode_components,
-    }
-    if nmodes == 1 and mode_components:
-        components.update(mode_components[0])
-        components["Nmodes"] = 1
-        components["mode_components"] = mode_components
-    return output, components
-
-def default_multi_energy_multimode_phase_retrieval_recipe():
-    """Return defaults for joint multi-energy, multimode reconstruction."""
-    recipe = default_multi_energy_phase_retrieval_recipe()
-    recipe.update(
-        {
-            "Nmodes": 1,
-            "mode_initialization_seed": 0,
-        }
-    )
-    return recipe
-
-def _verify_multi_energy_multimode_recipe(recipe, n_energy):
-    """Validate multi-energy settings plus multimode-specific parameters."""
-    _verify_multi_energy_recipe(recipe, n_energy)
-    _validate_nmodes(recipe["Nmodes"])
-    seed = recipe["mode_initialization_seed"]
-    if seed is not None and (
-        isinstance(seed, bool) or not isinstance(seed, (int, np.integer))
-    ):
-        raise ValueError("mode_initialization_seed must be an integer or None.")
-
-def _initialize_modal_fields(
-    supportmask,
-    amplitudes,
-    intensities,
-    mask_stack,
-    nmodes,
-    random_seed,
-):
-    """Create normalized, nondegenerate modal fields at every energy."""
-    n_energy, nx, ny = amplitudes.shape
-    support_modes = _as_modes(
-        supportmask,
-        nmodes,
-        (nx, ny),
-        "supportmask",
-        dtype=np.asarray(supportmask).dtype,
-    )
-    base_modes = np.empty((nmodes, nx, ny), dtype=np.complex128)
-    for mode_index in range(nmodes):
-        base_modes[mode_index] = np.fft.ifftshift(
-            np.fft.ifft2(np.fft.fftshift(support_modes[mode_index]))
-        )
-
-    if nmodes > 1:
-        rng = np.random.default_rng(random_seed)
-        modal_phase = np.exp(
-            1j
-            * rng.uniform(
-                -np.pi,
-                np.pi,
-                (nmodes, nx, ny),
-            )
-        )
-        return (
-            amplitudes[:, None, :, :]
-            * modal_phase[None, :, :, :]
-            / np.sqrt(nmodes)
-        )
-
-    fields = np.repeat(base_modes[None, :, :, :], n_energy, axis=0)
-
-    for energy_index in range(n_energy):
-        valid = (
-            (mask_stack[energy_index] == 0)
-            & (intensities[energy_index] > 0)
-        )
-        if not np.any(valid):
-            continue
-        measured = amplitudes[energy_index][valid].ravel()
-        current = np.sqrt(
-            np.sum(np.abs(fields[energy_index]) ** 2, axis=0)
-        )[valid].ravel()
-        if (
-            measured.size >= 2
-            and np.ptp(measured) > 0
-            and np.ptp(current) > 0
-        ):
-            fit = stats.linregress(measured, current)
-            if abs(fit.slope) > 1e-12:
-                fields[energy_index] /= fit.slope
-
-    return fields
-
-def _apply_measured_modal_amplitude(fields, amplitudes, bsmasks):
-    """Apply each measured amplitude to the summed modal intensity."""
-    constrained = fields.copy()
-    total_amplitude = np.sqrt(np.sum(np.abs(constrained) ** 2, axis=1))
-    safe_amplitude = np.where(total_amplitude > 1e-30, total_amplitude, 1e-30)
-    factor = amplitudes / safe_amplitude
-    for energy_index in range(fields.shape[0]):
-        observed = bsmasks[energy_index] == 0
-        for mode_index in range(fields.shape[1]):
-            constrained[energy_index, mode_index, observed] *= factor[
-                energy_index, observed
-            ]
-    return constrained
-
-def _run_modal_energy_update_schedule(
-    field,
-    amplitude,
-    supportmask,
-    bsmask,
-    schedule,
-    recipe,
-    nmodes,
-    image_shape,
-    phase_retrieval_kernel=None,
-):
-    """Run all scheduled multimode updates sequentially for one energy."""
-    stage_results = []
-    for stage_index, stage in enumerate(schedule):
-        mode = stage["mode"]
-        Nit = stage["Nit"]
-        if stage["RL_it"] > 0 and stage["RL_freq"] <= Nit:
-            raise ValueError(
-                "This energy schedule does not support partial-coherence RL "
-                "updates because no coherence kernel is supplied."
-            )
-        if mode == "gradient_descent":
-            result, err_d, err_s, _ = _refine_modes_gradient(
-                field,
-                amplitude,
-                supportmask,
-                bsmask,
-                nmodes=nmodes,
-                image_shape=image_shape,
-                Nit=Nit,
-                learning_rate=make_beta_schedule(
-                    stage["beta_mode"],
-                    Nit,
-                    stage["beta_zero"],
-                ),
-                support_weight=make_alpha_schedule(
-                    stage["alpha_mode"],
-                    Nit,
-                    stage["alpha_zero"],
-                ),
-                Fourier_last=recipe["Fourier_last"],
-            )
-        else:
-            result, err_d, err_s, _ = (phase_retrieval_kernel or PhaseRtrv_core_multimode)(
-                diffract=amplitude,
-                mask=supportmask,
-                mode=mode,
-                Nit=Nit,
-                beta_zero=stage["beta_zero"],
-                beta_mode=stage["beta_mode"],
-                alpha_zero=stage["alpha_zero"],
-                alpha_mode=stage["alpha_mode"],
-                Phase=field,
-                seed=False,
-                plot_every=recipe["plot_every"],
-                bsmask=bsmask,
-                real_object=False,
-                average_img=min(max(1, recipe["average_img"]), Nit),
-                Fourier_last=recipe["Fourier_last"],
-                gamma=None,
-                RL_freq=stage["RL_freq"],
-                RL_it=stage["RL_it"],
-                TV_freq=stage["TV_freq"],
-                Nmodes=nmodes,
-            )
-        field = _as_modes(
-            result,
-            nmodes,
-            image_shape,
-            "retrieved fields",
-            dtype=np.complex128,
-        )
-        stage_results.append(
-            {
-                "schedule_stage": stage_index,
-                "mode": mode,
-                "Nit": Nit,
-                "beta_zero": stage["beta_zero"],
-                "beta_mode": stage["beta_mode"],
-                "alpha_zero": stage["alpha_zero"],
-                "alpha_mode": stage["alpha_mode"],
-                "TV_freq": stage["TV_freq"],
-                "RL_it": stage["RL_it"],
-                "RL_freq": stage["RL_freq"],
-                "Nmodes": nmodes,
-                "error": np.asarray(err_d),
-                "support_error": np.asarray(err_s),
-            }
-        )
-    return field, stage_results
-
-def multi_energy_multimode_phase_retrieval_algorithm(
-    holograms,
-    mask_pixel,
-    supportmask,
-    multi_energy_recipe=None,
-    start_fields=None,
-    phase_retrieval_kernel=None,
-):
-    """
-    Jointly reconstruct multiple energies and incoherent modes.
-
-    Parameters are the same as in
-    ``multi_energy_phase_retrieval_algorithm``
-    with two additions in the recipe:
-
-    ``Nmodes``
-        Number of incoherent modes. ``Nmodes=1`` returns ``(nE, nx, ny)``.
-        Larger values return ``(nE, Nmodes, nx, ny)``.
-    ``mode_initialization_seed``
-        Seed used to break modal degeneracy in the default initialization.
-
-    ``inner_mode`` / ``inner_Nit``
-        Parallel scalar-or-list settings defining the update stages performed
-        at every energy during each outer iteration. Stage-specific beta,
-        alpha, and TV controls use the same convention as the single-mode
-        multi-energy driver.
-
-    Returns
-    -------
-    retrieved : ndarray
-        Shape ``(nE, nx, ny)`` for one mode or
-        ``(nE, Nmodes, nx, ny)`` for multiple modes.
-    fieldswarmup : ndarray
-        Fields immediately after the independent warmup schedule, with the
-        same shape convention as ``retrieved``.
-    components : dict
-        Per-mode cross-energy projection results under ``mode_components``.
-    bsmasks : ndarray
-        Energy-dependent invalid-pixel masks with shape ``(nE, nx, ny)``.
-    errors : dict
-        Update and projection diagnostics.
-    """
-    recipe = default_multi_energy_multimode_phase_retrieval_recipe()
-    if multi_energy_recipe is not None:
-        if not isinstance(multi_energy_recipe, dict):
-            raise TypeError("multi_energy_recipe must be a dictionary.")
-        unknown_keys = set(multi_energy_recipe) - set(recipe)
-        if unknown_keys:
-            raise ValueError(
-                f"Unknown multi-energy multimode recipe key(s): "
-                f"{sorted(unknown_keys)}"
-            )
-        recipe.update(multi_energy_recipe)
-
-    holograms, mask_pixel, supportmask, start_fields, input_geometry = geometry.prepare(
-        holograms, mask_pixel, supportmask, recipe, start_fields
-    )
-    holograms = _as_energy_stack(holograms)
-    n_energy, nx, ny = holograms.shape
-    nmodes = _validate_nmodes(recipe["Nmodes"])
-    _verify_multi_energy_multimode_recipe(recipe, n_energy)
-    if nmodes > 1 and recipe["fit_material_thickness"]:
-        raise ValueError("Fitting thickness requires Nmodes=1; a fixed material map works for multiple modes.")
-    material_thickness = None
-    if (recipe["material_mask"] is not None or
-            recipe["material_thickness"] is not None or
-            recipe["fit_material_thickness"]):
-        material_thickness = _recipe_material_thickness(
-            recipe, input_geometry,
-        )
-        material_thickness = np.fft.fftshift(material_thickness)
-
-    supportmask = np.asarray(supportmask)
-    if supportmask.ndim == 2:
-        if supportmask.shape != (nx, ny):
-            raise ValueError("supportmask must have shape (nx, ny).")
-    elif supportmask.ndim == 3:
-        if supportmask.shape[1:] != (nx, ny):
-            raise ValueError("modal supportmask must have shape (Nmodes, nx, ny).")
-        if supportmask.shape[0] not in {1, nmodes}:
-            raise ValueError("supportmask first axis must be 1 or Nmodes.")
-    else:
-        raise ValueError("supportmask must be 2D or 3D.")
-    projection_supportmask = (
-        np.fft.fftshift(supportmask, axes=(-2, -1))
-        if (
-            recipe["projection_constraints_inside_support_only"]
-            or recipe["physical_constraints_inside_support_only"]
-        )
-        else None
-    )
-
-    amplitudes, intensities, bsmasks = _prepare_energy_amplitudes(
-        holograms,
-        mask_pixel,
-        hologram_intensity_cutoff_vmin=recipe[
-            "hologram_intensity_cutoff_vmin"
-        ],
-    )
-    mask_stack = _as_energy_mask(
-        mask_pixel, nE=n_energy, image_shape=(nx, ny)
-    )
-
-    if start_fields is None:
-        fields = _initialize_modal_fields(
-            supportmask,
-            amplitudes,
-            intensities,
-            mask_stack,
-            nmodes,
-            recipe["mode_initialization_seed"],
-        )
-    else:
-        fields, _ = _as_energy_mode_stack(start_fields, name="start_fields")
-        fields = fields.astype(np.complex128, copy=True)
-        if fields.shape != (n_energy, nmodes, nx, ny):
-            raise ValueError(
-                "start_fields must have shape (nE, nx, ny) for Nmodes=1 or "
-                "(nE, Nmodes, nx, ny)."
-            )
-
-    rng = np.random.default_rng(recipe["random_seed"])
-    errors = {
-        "energy_steps": [],
-        "projection_steps": [],
-        "settings": recipe.copy(),
-    }
-    start_time = time.time()
-
-    warmup_schedule = _build_update_schedule(
-        recipe,
-        name="warmup",
-        allow_disabled=True,
-    )
-    if warmup_schedule:
-        for energy_index in range(n_energy):
-            fields[energy_index], stage_results = _run_modal_energy_update_schedule(
-                fields[energy_index],
-                amplitudes[energy_index],
-                supportmask,
-                bsmasks[energy_index],
-                warmup_schedule,
-                recipe,
-                nmodes,
-                (nx, ny),
-                phase_retrieval_kernel=phase_retrieval_kernel,
-            )
-            for stage_result in stage_results:
-                errors["energy_steps"].append({
-                    "outer": -1,
-                    "energy": energy_index,
-                    "stage": "warmup",
-                    **stage_result,
-                })
-
-    fieldswarmup = fields.copy()
-
-    outer_iterations = int(recipe["outer_iterations"])
-    inner_schedule = _build_update_schedule(
-        recipe,
-        name="inner",
-    )
-    projection_every, projection_start = _resolve_projection_cadence(
-        recipe,
-        default_every=n_energy,
-    )
-    completed_updates = 0
-    components = {
-        "projection_model": recipe["projection_model"],
-        "Nmodes": nmodes,
-    }
-
-    # Each energy update advances all incoherent modes together. Cross-energy
-    # projection then treats each mode index independently.
-    for outer in range(outer_iterations):
-        if recipe["shuffle_energies"]:
-            energy_order = rng.permutation(n_energy)
-        else:
-            energy_order = np.arange(n_energy)
-
-        for energy_index in energy_order:
-            fields[energy_index], stage_results = _run_modal_energy_update_schedule(
-                fields[energy_index],
-                amplitudes[energy_index],
-                supportmask,
-                bsmasks[energy_index],
-                inner_schedule,
-                recipe,
-                nmodes,
-                (nx, ny),
-                phase_retrieval_kernel=phase_retrieval_kernel,
-            )
-            for stage_result in stage_results:
-                errors["energy_steps"].append({
-                    "outer": outer,
-                    "energy": int(energy_index),
-                    "stage": "joint",
-                    **stage_result,
-                })
-
-            completed_updates += 1
-            if not _projection_is_due(
-                completed_updates,
-                projection_start,
-                projection_every,
-                total_updates=outer_iterations * n_energy,
-            ):
-                continue
-
-            fields, components = (
-                project_fourier_fields_multi_energy_multimode(
-                    fields,
-                    projection_model=recipe["projection_model"],
-                    rank=recipe["rank"],
-                    static_mode=recipe["projection_static_mode"],
-                    weights=recipe["energy_weights"],
-                    relaxation=recipe["projection_relaxation"],
-                    log_floor=recipe["log_floor"],
-                    spectral_constraint=recipe["spectral_constraint"],
-                    energy_values=recipe["energy_values"],
-                    known_beta_spectrum=recipe["known_beta_spectrum"],
-                    known_delta_spectrum=recipe["known_delta_spectrum"],
-                    absorption_part=recipe["absorption_part"],
-                    kk_sign=recipe["kk_sign"],
-                    kk_subtract_baseline=recipe["kk_subtract_baseline"],
-                    kk_normalize_input=recipe["kk_normalize_input"],
-                    known_beta_normalization=recipe[
-                        "known_beta_normalization"
-                    ],
-                    fit_known_beta_scale=recipe["fit_known_beta_scale"],
-                    fit_known_beta_offset=recipe["fit_known_beta_offset"],
-                    projection_supportmask=projection_supportmask,
-                    material_thickness=material_thickness,
-                    fit_material_thickness=recipe["fit_material_thickness"],
-                    return_components=True,
-                )
-            )
-            errors["projection_steps"].append(
-                {
-                    "outer": outer,
-                    "energy": int(energy_index),
-                    "completed_update": completed_updates,
-                    "projection_model": components.get("projection_model"),
-                    "Nmodes": nmodes,
-                    "rank": recipe["rank"],
-                    "spectral_constraint": recipe["spectral_constraint"],
-                    "relaxation": recipe["projection_relaxation"],
-                }
-            )
-
-    projected_fields, components = project_fourier_fields_multi_energy_multimode(
-        fields,
-        projection_model=recipe["projection_model"],
-        rank=recipe["rank"],
-        static_mode=recipe["projection_static_mode"],
-        weights=recipe["energy_weights"],
-        relaxation=recipe["final_projection_relaxation"],
-        log_floor=recipe["log_floor"],
-        spectral_constraint=recipe["spectral_constraint"],
-        energy_values=recipe["energy_values"],
-        known_beta_spectrum=recipe["known_beta_spectrum"],
-        known_delta_spectrum=recipe["known_delta_spectrum"],
-        absorption_part=recipe["absorption_part"],
-        kk_sign=recipe["kk_sign"],
-        kk_subtract_baseline=recipe["kk_subtract_baseline"],
-        kk_normalize_input=recipe["kk_normalize_input"],
-        known_beta_normalization=recipe["known_beta_normalization"],
-        fit_known_beta_scale=recipe["fit_known_beta_scale"],
-        fit_known_beta_offset=recipe["fit_known_beta_offset"],
-        projection_supportmask=projection_supportmask,
-        material_thickness=material_thickness,
-        fit_material_thickness=recipe["fit_material_thickness"],
-        return_components=True,
-    )
-    if recipe["final_projection_relaxation"] > 0:
-        fields = projected_fields
-    components["final_projection_relaxation"] = recipe["final_projection_relaxation"]
-    fields, _ = _as_energy_mode_stack(fields)
-
-    if recipe["final_fourier_constraint"]:
-        fields = _apply_measured_modal_amplitude(fields, amplitudes, bsmasks)
-        components["final_fourier_constraint_applied"] = True
-    else:
-        components["final_fourier_constraint_applied"] = False
-
-    components["Nmodes"] = nmodes
-    errors["runtime_seconds"] = float(np.round(time.time() - start_time, 3))
-    return input_geometry.finish(
-        _maybe_squeeze_energy_modes(fields, nmodes),
-        _maybe_squeeze_energy_modes(fieldswarmup, nmodes),
-        components, bsmasks, errors,
-    )

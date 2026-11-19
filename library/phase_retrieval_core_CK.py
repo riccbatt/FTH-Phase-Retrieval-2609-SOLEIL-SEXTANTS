@@ -221,7 +221,7 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
     # Initialize Startimage/Startgamma
     # ----------------------------
     if recipe["Startimage"] is None:
-        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+        Startimage = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
     else:
         Startimage = recipe["Startimage"].copy()
 
@@ -238,6 +238,7 @@ def phase_retrieval_algorithm(pos: ArrayLike, neg: ArrayLike, mask_pixel: ArrayL
         y = np.abs(Startimage[valid_pix]).ravel()
         if x.size >= 2:
             res = stats.linregress(x, y)
+            Startimage = Startimage - res.intercept
             if abs(res.slope) > 1e-12:
                 Startimage = Startimage / res.slope
 
@@ -521,7 +522,7 @@ def single_helicity_phase_retrieval_algorithm(pos: ArrayLike, mask_pixel: ArrayL
     # Initialize Startimage/Startgamma
     # ----------------------------
     if recipe["Startimage"] is None:
-        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+        Startimage = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
     else:
         Startimage = recipe["Startimage"].copy()
 
@@ -538,6 +539,7 @@ def single_helicity_phase_retrieval_algorithm(pos: ArrayLike, mask_pixel: ArrayL
         y = np.abs(Startimage[valid_pix]).ravel()
         if x.size >= 2:
             res = stats.linregress(x, y)
+            Startimage = Startimage - res.intercept
             if abs(res.slope) > 1e-12:
                 Startimage = Startimage / res.slope
 
@@ -764,7 +766,7 @@ def phase_retrieval_algorithm_on_second_helicity_only(new_helicity: ArrayLike, t
     # Initialize Startimage/Startgamma
     # ----------------------------
     if recipe["Startimage"] is None:
-        Startimage = np.fft.ifftshift(np.fft.ifft2(np.fft.fftshift(supportmask)))
+        Startimage = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(supportmask)))
     else:
         Startimage = recipe["Startimage"].copy()
 
@@ -781,6 +783,7 @@ def phase_retrieval_algorithm_on_second_helicity_only(new_helicity: ArrayLike, t
         y = np.abs(Startimage[valid_pix]).ravel()
         if x.size >= 2:
             res = stats.linregress(x, y)
+            Startimage = Startimage - res.intercept
             if abs(res.slope) > 1e-12:
                 Startimage = Startimage / res.slope
 

@@ -839,7 +839,7 @@ def focusCDI_2(pos,neg, roi, mask=1,phase=0, prop_dist=0,dx=0, dy=0, scale=(0,10
 
     widgets.interact(p, x=slider_prop, y=slider_phase, fx = slider_dx, fy = slider_dy)
 
-    return (slider_prop, slider_phase, slider_dx, slider_dy)
+    return (slider_prop.value, slider_phase.value, slider_dx.value, slider_dy.value)
 
 
 def focus_hyst2d(pos,neg, roi, mask=1,phase=0, prop_dist=0, dx=0, dy=0, scale=(0,100), experimental_setup={'ccd_dist':18e-2, 'energy':779.5, 'px_size':20e-6}, operation="-", max_prop_dist=10, mode="bins"):
