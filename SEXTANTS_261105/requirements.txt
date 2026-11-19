@@ -1,9 +1,0 @@
-numpy
-matplotlib
-pillow
-h5py
-ipython
-jupyterlab
-tqdm
-scipy
-ipympl
